@@ -1242,87 +1242,6 @@ statistics. This is subject to further work.
 See~\cite{DLV} for the case where the strikes are not homogeneous across
 expiries.
 
-%\subsubsection*{Discussion}
-%
-%In theorem~\ref{th:simplersmooth} we could only guarantee that the call prices are increasing for all strikes~$K$ if a single martingale was used. Figure~\ref{fig:callviolation} shows
-%an example of a case where there calls associated with the martingale density~$q$
-%are increasing in expiry, while this is not the case for the full model.
-%\begin{figure}[H]
-%    \centering
-%    \includegraphics[width=0.75\linewidth]{call_violation.png}
-%    \caption{An example of our model~\eqref{eq:CasSumBSC} which is not a martingale
-%    process (the solid orange line is below the solid blue line) even though the densities~$q$ and the underlying log-normal processes~$Y^i$
-%    each are. The example uses strikes $(0.819, 0.905, 1, 1.11, 1.22)$ with
-%    log-normal volatilities $(0.1, 0.1, 2, 0.1, 0.1)$ and densities
-%    $p_1:=(0,0,1,0,0)$ and $p_2:=(0.51, 0.016,0.036,0.029,0.41)$.}
-%    \label{fig:callviolation}
-%\end{figure}
-%
-%To avoid such simple cases where our approach fails even on the model strikes we impose
-%in our implementation
-%in section~\ref{sec:PROD} the additional constraints
-%\begin{equation}
-%    \hat C_j(K^i) \geq \hat C_{j-1}(K^i)    \label{eq:homgincr}
-%\end{equation}
-%which reduces the occurrence of term structure arbitrage markedly.
-%However,  as figure~\ref{fig:callviolatio2} shows this is not a sufficient condition
-%to strictly ensure absence of arbitrage.
-%\begin{figure}[H]
-%    \centering
-%    \includegraphics[width=0.75\linewidth]{call_violation2.png}
-%    \caption{An example of our model~\eqref{eq:CasSumBSC} which is not a martingale
-%    process even though~\eqref{eq:homgincr} is satisfied:
-%    the solid orange line is below the solid blue line just above strike~1.5.
-%    The example uses strikes $(0.5, 1.0, 1.5)$ with
-%    log-normal volatilities $(0.05, 1.2, 0.05)$ and densities
-%    $p_1:=(0,1,0)$ and $p_2:=(0.5, 0,0.5)$.}
-%    \label{fig:callviolatio2}
-%\end{figure}
-%
-%
-%The underlying mathematical reason is that to construct a consistent martingale process based on mixing dynamically different processes~$Y_1,\ldots,Y_N$
-%we need to apply a conditional version of our previous approach.
-%\subsubsection*{Discussion}
-%
-%In theorem~\ref{th:simplersmooth} we could only guarantee that the call prices are increasing for all strikes~$K$ if a single martingale was used. Figure~\ref{fig:callviolation} shows
-%an example of a case where there calls associated with the martingale density~$q$
-%are increasing in expiry, while this is not the case for the full model.
-%\begin{figure}[H]
-%    \centering
-%    \includegraphics[width=0.75\linewidth]{call_violation.png}
-%    \caption{An example of our model~\eqref{eq:CasSumBSC} which is not a martingale
-%    process (the solid orange line is below the solid blue line) even though the densities~$q$ and the underlying log-normal processes~$Y^i$
-%    each are. The example uses strikes $(0.819, 0.905, 1, 1.11, 1.22)$ with
-%    log-normal volatilities $(0.1, 0.1, 2, 0.1, 0.1)$ and densities
-%    $p_1:=(0,0,1,0,0)$ and $p_2:=(0.51, 0.016,0.036,0.029,0.41)$.}
-%    \label{fig:callviolation}
-%\end{figure}
-%
-%To avoid such simple cases where our approach fails even on the model strikes we impose
-%in our implementation
-%in section~\ref{sec:PROD} the additional constraints
-%\begin{equation}
-%    \hat C_j(K^i) \geq \hat C_{j-1}(K^i)    \label{eq:homgincr}
-%\end{equation}
-%which reduces the occurrence of term structure arbitrage markedly.
-%However,  as figure~\ref{fig:callviolatio2} shows this is not a sufficient condition
-%to strictly ensure absence of arbitrage.
-%\begin{figure}[H]
-%    \centering
-%    \includegraphics[width=0.75\linewidth]{call_violation2.png}
-%    \caption{An example of our model~\eqref{eq:CasSumBSC} which is not a martingale
-%    process even though~\eqref{eq:homgincr} is satisfied:
-%    the solid orange line is below the solid blue line just above strike~1.5.
-%    The example uses strikes $(0.5, 1.0, 1.5)$ with
-%    log-normal volatilities $(0.05, 1.2, 0.05)$ and densities
-%    $p_1:=(0,1,0)$ and $p_2:=(0.5, 0,0.5)$.}
-%    \label{fig:callviolatio2}
-%\end{figure}
-%
-%
-%The underlying mathematical reason is that to construct a consistent martingale process based on mixing dynamically different processes~$Y_1,\ldots,Y_N$
-%we need to apply a conditional version of our previous approach.
-%
 
 \subsection{Generalization}\label{sec:genr}
 
@@ -1694,7 +1613,7 @@ we have found $q_1,\ldots,q_{j-1}$ and therefore $\Q_{j-1}$, and that we are now
 looking to fit the marginal density for
 the $j$th expiry, $q_j\in [0,1]^{N_j}$.
 
-\begin{equation}\label{eq:HMOG}
+\begin{equation}\label{eq:GENR}
 \left\{
     \begin{array}{lll}
         \mbox{\textsl{Variables:}}
@@ -1748,7 +1667,7 @@ which we restate here for convenience:
     \begin{enumerate}
         \item The market has unit expectation: $C(T,0)\equiv \E[Z_T]=1$ for all $T$;
         \item zero is unattainable: $\partial_K C(T,0)\equiv -1$ since then $\P[ Z_T=0 ] =-1$;  
-        \item call prices ultimately reach zero: $\lim_{K\uparrow \infty} C(T,K)=0$,\label{it:caf_limC}
+        \item call prices ultimately reach zero: $\lim_{K\uparrow \infty} C(T,K)=0$,
         \item call prices are convex: $\partial_{KK} C(T,K) \geq 0$; and
         \item call prices are increasing in time: $\partial_T C(T,K)\geq 0$.
     \end{enumerate}
