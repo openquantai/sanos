@@ -1,0 +1,372 @@
+% \usepackage{amsthm}
+% \smartqed  % flush right qed marks, e.g. at end of proof
+\usepackage{graphicx}
+
+
+%-------%
+% Fonts % 
+%-------%
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{booktabs}       % professional-quality tables
+
+
+% General Packages
+%------------------%
+\usepackage{amsfonts,amssymb,bbm}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{adjustbox}
+\usepackage[UKenglish]{isodate}
+\usepackage{graphicx}
+\usepackage{silence}
+\WarningFilter{caption}{Unknown document class (or package)}
+\usepackage[format=default,font=small,labelfont=it]{caption}
+\usepackage{subcaption}
+\usepackage{hyperref} 
+    \hypersetup{
+    	colorlinks = true,
+    	linkcolor = blue,
+    	anchorcolor = blue,
+    	citecolor = blue,
+    	filecolor = blue,
+    	urlcolor = blue
+    }
+    
+
+
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{fancyvrb}
+\usepackage{rotating}
+    %%% Tikz
+    \usepackage{tikz}
+    \usepackage{tikz-cd} 
+    \pgfdeclarelayer{edgelayer}
+    \pgfdeclarelayer{nodelayer}
+    \pgfsetlayers{edgelayer,nodelayer,main}
+    %%%% Custom Node styles
+    \tikzstyle{new style 0}=[fill={rgb,255: red,255; green,94; blue,247}, draw=black, shape=circle]
+    \tikzstyle{pointy}=[fill=white, draw=black, shape=circle]
+    %%%% Custom Edge styles
+    \tikzstyle{pointy}=[->]
+\usepackage{fontawesome}
+
+
+%To display labels in the PDF. Comment at the end!
+% Code
+\usepackage{algpseudocode}
+\usepackage[linesnumbered,lined,boxed,commentsnumbered,ruled,longend]{algorithm2e}
+\newcommand\mycommfont[1]{\footnotesize\ttfamily\textcolor{blue}{#1}}
+\SetCommentSty{mycommfont}
+
+% TABLE Formatting
+\raggedbottom
+\newcommand{\ra}[1]{\renewcommand{\arraystretch}{#1}}
+\setlength\heavyrulewidth{0.3ex}
+\usepackage{lscape}
+
+
+
+\makeatletter
+\newcommand{\pushright}[1]{\ifmeasuring@#1\else\omit\hfill$\displaystyle#1$\fi\ignorespaces}
+\newcommand{\pushleft}[1]{\ifmeasuring@#1\else\omit$\displaystyle#1$\hfill\fi\ignorespaces}
+\makeatother
+
+
+\DeclareMathOperator{\Leb}{Leb}
+\DeclareMathOperator{\supp}{supp}
+\DeclareMathOperator{\inter}{int}
+\DeclareMathOperator*{\esssup}{ess\,sup}
+\DeclareMathOperator{\tr}{tr}
+\newcommand{\n}{\mathbbm{n}}
+\newcommand{\bE}{\mathbb{E}}
+\newcommand{\bP}{\mathbb{P}}
+\newcommand{\cL}{\mathcal{L}}
+\newcommand{\cY}{\mathcal{Y}}
+\newcommand{\cB}{\mathcal{B}}
+\newcommand{\cM}{\mathcal{M}}
+\newcommand{\1}{\mathbbm{1}}
+\newcommand{\II}{I_{\varepsilon,\Gamma}}
+
+%Modifiche comode 
+\renewcommand{\phi}{\varphi}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\al}{\alpha}
+\newcommand{\om}{\omega}
+\newcommand{\Om}{\Omega}
+\newcommand{\lam}{\lambda}
+\newcommand{\Ll}{\left}
+\newcommand{\rr}{\mathbb{R}}
+\newcommand*\diff{\mathop{}\!\mathrm{d}}
+%\def\mathsf{1}{\mathds{1}}
+\let\oldemptyset\emptyset
+\let\emptyset\varnothing
+\newcommand{\essinf}{\operatornamewithlimits{ess\,inf}}
+\newcommand{\paren}[1]{\left( \left. #1 \right. \right)}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\BL}{BL}
+\newcommand\sbullet[1][.5]{\mathbin{\vcenter{\hbox{\scalebox{#1}{$\bullet$}}}}}
+\newcommand{\rhoseason}{m_{\rho}}%\rho_{\mathrm{season}}}% name of the seasonality function: m_{\rho} in [Arlot 2004]
+\newcommand{\rhoseasondiscrete}[1]{m_{\rho,#1}}
+\newcommand{\rhomin}{\ensuremath{\mu_{\min}}} %changed by Duccio
+\newcommand{\rhomax}{\ensuremath{\mu_{\max}}} %changed by Duccio
+\newcommand{\croch}[1]{\left[ \left. #1 \right. \right]}
+\newcommand{\survival}{\ensuremath{\mathbb{S}}}
+
+% Processes
+\newcommand{\process}[3]{{#1}({#2})_{#3}}
+\newcommand{\myset}[2]{\lbrace{#1}, \ldots, {#2}\rbrace}
+\newcommand{\mySet}[2]{\left\lbrace {#1} \middle\vert {#2} \right\rbrace}
+
+
+% Mathbb
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\D}{\mathbf{D}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\N}{\mathbb{N}}
+\renewcommand{\P}{\mathbb{P}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\T}{\mathbb{T}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\K}{\mathbb{K}}
+\newcommand{\Cg}{\mathfrak{C}}
+\newcommand{\bdot}{\boldsymbol{\cdot}}
+
+
+% Calligrafiche
+\newcommand{\Aa}{\mathcal{A}}
+\newcommand{\Bb}{\mathcal{B}}
+\newcommand{\Cc}{\mathcal{C}}
+\newcommand{\Ee}{\mathcal{E}}
+\newcommand{\Ff}{\mathcal{F}}
+\newcommand{\Hh}{\mathcal{H}}
+\newcommand{\Ii}{\mathcal{I}}
+\newcommand{\Kk}{K}
+\newcommand{\Mm}{\mathcal{M}}
+\newcommand{\Nn}{\mathcal{N}}
+\newcommand{\Qq}{\mathcal{Q}}
+\newcommand{\Ss}{\mathcal{S}}
+\newcommand{\Xx}{\mathcal{X}}
+
+\newcommand{\eqdef}{\ensuremath{\,\raisebox{-1pt}{$\stackrel{\mbox{\upshape\tiny def.}}{=}$}}\,}
+% \newcommand{\eqdef}{\stackrel{\mathclap{\tiny\mbox{def.}}}{=}}
+
+\newcommand{\softplus}{\mathrm{softplus}}
+
+% \newcommand{\sdim}{{N_\mathrm{sim}}} %Similarity score encoding dimension
+% \newcommand{\pdim}{{N_\mathrm{pos}}} %Positional encoding dimension
+% \newcommand{\edim}{{N}} % Encoding dimension
+% \newcommand{\ddim}{{N'}} % Decoding dimension (target dimension of MLP)
+% \newcommand{\rdim}{{N_\mathrm{ref}}} %Number of reference paths
+% \newcommand{\tdim}{{N_\mathrm{time}}} %Number of reference time points
+% \newcommand{\pldim}{{N_\mathrm{p}}} %Number of time points between linear pieces
+\newcommand{\ldim}{{d_\mathrm{h}}} %Latent dimension, was {d_K}
+
+% Cose del modello
+\newcommand{\rhosummer}{\rho}% name of the length of summer
+\newcommand{\rhowinter}{\rho}% name of the length of winter
+
+\newtheorem{atheorem}{Theorem}
+\renewcommand{\theatheorem}{\Alph{atheorem}} % "letter-numbered" theorems
+%\newtheorem{InformalTheorem}{Informal Theorem}
+% \newtheorem{definition}{Definition}
+% \newtheorem{proposition}{Proposition}
+% \newtheorem{assumption}{Assumption}
+% \newtheorem{theorem}{Theorem}
+% \newtheorem{lemma}{Lemma}
+% \newtheorem{corollary}{Corollary}
+\newtheorem{notation}{Notation}
+\newtheorem{setting}{Setting}[section]
+\newtheorem{assumptions}{Assumptions}[section]
+% \theoremstyle{remark}
+% \newtheorem*{remark}{Remark}
+% \newtheorem{example}{Example}
+% \theoremstyle{definition}
+% \newtheorem{question}{Question}
+
+% QED Symbol 
+\usepackage{etoolbox}
+\newcommand{\addQEDstyle}[2]{\AtBeginEnvironment{#1}{\pushQED{\qed}\renewcommand{\qedsymbol}{#2}}\AtEndEnvironment{#1}{\popQED}}
+\addQEDstyle{remark}{$\triangleleft$}
+\addQEDstyle{example}{$\triangleleft$}
+
+
+
+%%%% COMMENTING (Temporary)
+\NewDocumentCommand{\luca}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{\scriptsize
+                            \textcolor{green}{ 
+                            \textbf{L:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{green}{ 
+                            \textbf{L:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+\NewDocumentCommand{\giulia}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{\scriptsize
+                            \textcolor{red}{ 
+                            \textbf{GL:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{red}{ 
+                            \textbf{GL:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+}
+\NewDocumentCommand{\anastasis}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{\scriptsize
+                            \textcolor{violet}{ 
+                            \textbf{A:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{violet}{ 
+                            \textbf{A:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+                    
+\NewDocumentCommand{\cody}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{\scriptsize
+                            \textcolor{orange}{ 
+                            \textbf{A:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{orange}{ 
+                            \textbf{A:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+\newcommand{\byyan}[1]{\textcolor{cyan}{#1}}
+\NewDocumentCommand{\yannick}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{\scriptsize
+                            \textcolor{cyan}{ 
+                            \textbf{Y:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{cyan}{ 
+                            \textbf{Y:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    } 
+
+\definecolor{darkgreen}{rgb}{0.0, 0.2, 0.13}
+\NewDocumentCommand{\xuwei}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{\scriptsize
+                            \textcolor{darkgreen}{ 
+                            \textbf{X:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{darkgreen}{ 
+                            \textbf{X:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+\usepackage{appendix}
+
+
+
+\usepackage{cleveref}
+\newcounter{termcounter}
+\renewcommand{\thetermcounter}{\Roman{termcounter}}
+\crefname{term}{term}{terms}
+\creflabelformat{term}{#2\textup{(#1)}#3}
+
+% \Crefformat{section}{\S#2#1#3}
+% \Crefformat{appendix}{\S#2#1#3}
+
+\makeatletter
+\def\term{\@ifnextchar[\term@optarg\term@noarg}%]
+\def\term@optarg[#1]#2{%
+  \textup{#1}%
+  \def\@currentlabel{#1}%
+  \def\cref@currentlabel{[][2147483647][]#1}%
+  \cref@label[term]{#2}}
+\def\term@noarg#1{%
+  \refstepcounter{termcounter}%
+  \textup{(\thetermcounter)}%
+  \cref@label[term]{#1}}
+\makeatother
+
+
+%  \setcounter{termcounter}{0}
+
+\crefname{lemma}{lemma}{lemmata}
+\Crefname{lemma}{Lemma}{Lemmata}
+\crefname{assumption}{assumption}{assumptions}
+\Crefname{assumption}{Assumption}{Assumptions}
+\crefname{example}{Example}{Examples}
+\crefname{proposition}{Proposition}{Proposition}
+\crefname{algorithm}{algorithm}{algorithms}
+\Crefname{algorithm}{Algorithm}{Algorithms}
+
+\crefname{appendix}{appendix}{appendices}
+\Crefname{appendix}{Appendix}{Appendices}
+
+\usepackage{comment}
+\let\CheckCommand\providecommand
+\usepackage{microtype}
+
+\newcommand{\hsig}{{\operatorname{hsig}}}

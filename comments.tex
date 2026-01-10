@@ -1,0 +1,207 @@
+%
+\definecolor{bleudefrance}{rgb}{0.19, 0.55, 0.91}
+\definecolor{britishracinggreen}{rgb}{0.0, 0.26, 0.15}
+\definecolor{darkcyan}{rgb}{0.0, 0.55, 0.55}
+\definecolor{MidnightBlue}{RGB}{25,25,112}
+\definecolor{MidnightBlueComplementingGreen}{RGB}{25,112,25}
+\definecolor{MidnightBlueComplementingPurple}{RGB}{112,25,112}
+\definecolor{MidnightBlueComplementingRed}{RGB}{112,25,69}
+\definecolor{darkmidnightblue}{rgb}{0.0, 0.2, 0.4}
+
+\definecolor{WowColor}{rgb}{.75,0,.75}
+\definecolor{MildlyAlarming}{rgb}{0.85,0.25,0.1}
+\definecolor{SubtleColor}{rgb}{0,0,.50}
+\definecolor{antiquefuchsia}{rgb}{0.57, 0.36, 0.51}
+\definecolor{fashionfuchsia}{rgb}{0.96, 0.0, 0.63}
+\definecolor{jade}{rgb}{0.0, 0.66, 0.42}
+\definecolor{caribbeangreen}{rgb}{0.0, 0.8, 0.6}
+\definecolor{aquamarine}{rgb}{0.5, 0.8, 0.85}
+\definecolor{lightseagreen}{rgb}{0.13, 0.7, 0.67}
+\definecolor{darkgreen}{rgb}{0.0, 0.2, 0.13}
+\definecolor{darkspringgreen}{rgb}{0.09, 0.45, 0.27}
+%
+\definecolor{attentioncolor}{RGB}{152,90,81}
+\definecolor{burgred}{RGB}{40,3,22}
+%
+\definecolor{AnnieGreen}{RGB}{17,123,92}
+\definecolor{Turquoise}{RGB}{64,224,208}
+
+\definecolor{darkjade}{RGB}{0,122,84}
+\definecolor{Window1}{RGB}{92,150,31}%
+    \definecolor{Window1dark}{RGB}{41,67,13}%
+\definecolor{Window2}{RGB}{255,168,28}
+    \definecolor{Window2dark}{RGB}{114,75,12}
+\definecolor{Window3}{RGB}{255,96,33}
+    \definecolor{Window3dark}{RGB}{97,36,12}
+%
+\definecolor{InputColor}{RGB}{20,255,177}
+    \definecolor{InputColorlight}{RGB}{222,237,229}
+
+\definecolor{RedAlizarin}{rgb}{0.82, 0.1, 0.26}
+%%% Editing
+\usepackage{soul}
+
+\usepackage[colorinlistoftodos]{todonotes}
+\newcommand{\ML}[1]{\textcolor{red}{[\textbf{ML}: #1]}}
+
+\NewDocumentCommand{\Takashi}{mo}{
+    \IfValueF{#2}{
+    %%%%% NO Margin Note
+                        {{
+                        %\scriptsize
+                            \textcolor{magenta}{ 
+                            [\textbf{Takashi:}
+                            \textit{{#1}}]
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{magenta}{ 
+                            \textbf{T:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+\NewDocumentCommand{\ak}{m}{
+            {\textcolor{egyptianblue}{
+                            {#1}
+                            }
+                        }
+        }
+\NewDocumentCommand{\AK}{mo}{
+    \IfValueF{#2}{\hfill\\
+    %%%%% NO Margin Note
+                        {{
+                        %\scriptsize
+                            \textcolor{darkmidnightblue}{ 
+                            \textbf{AK:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{darkmidnightblue}{ 
+                            \textbf{AK:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+\NewDocumentCommand{\yan}{mo}{
+    \IfValueF{#2}{\hfill\\
+    %%%%% NO Margin Note
+                        {{
+                        %\scriptsize
+                            \textcolor{cyan}{ 
+                            \textbf{YL:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{cyan}{ 
+                            \textbf{YL:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+
+\NewDocumentCommand{\RS}{mo}{
+    \IfValueF{#2}{\hfill\\
+    %%%%% NO Margin Note
+                        {{
+                        %\scriptsize
+                            \textcolor{WowColor}{ 
+                            \textbf{RS:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{WowColor}{ 
+                            \textbf{RS:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+}
+
+
+
+
+
+\NewDocumentCommand{\HB}{mo}{
+    \IfValueF{#2}{\hfill\\
+    %%%%% NO Margin Note
+                        {{
+                        %\scriptsize
+                            \textcolor{violet}{ 
+                            \textbf{HB:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{violet}{ 
+                            \textbf{HB:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+
+\NewDocumentCommand{\BH}{mo}{
+    \IfValueF{#2}{\hfill\\
+    %%%%% NO Margin Note
+                        {{
+                        %\scriptsize
+                            \textcolor{bleudefrance}{ 
+                            \textbf{BH:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+    %%%% Margin Note
+    \IfValueT{#2}{
+                        \marginnote{{\scriptsize
+                            \textcolor{bleudefrance}{ 
+                            \textbf{BH:}
+                            \textit{{#1}}
+                            }
+                        }}
+        }
+                    }
+
+
+
+
+
+
+
+
+
+
+
+
+%%%% COMMENTING
+\NewDocumentCommand{\del}{m}{
+    {\color{gray}{ \tiny {#1} }}
+}
+
+\NewDocumentCommand{\add}{m}{{\color{britishracinggreen}{{#1}}}}
