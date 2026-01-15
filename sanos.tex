@@ -124,10 +124,7 @@
 %========================================================%
 %                    TITLE SECTION
 %========================================================%
-% \title{\textbf{A Data-Driven and Model-Free Call Price Formula:} \hfill\\
-% \small An Explicit, Data-Driven, and Optimal Solution to Model-Free Call Option Pricing\normalsize}
 
-%
 % allow more/larger floats on a page and shrink gaps between stacked floats
 \setcounter{topnumber}{3}
 \setcounter{bottomnumber}{3}
@@ -138,27 +135,65 @@
 \renewcommand{\textfraction}{0.05}
 \setlength{\textfloatsep}{8pt plus 2pt minus 2pt} % space between stacked floats
 \setlength{\floatsep}{8pt plus 2pt minus 2pt}     % space between floats
+\newcommand{\email}[1]{\texttt{#1}}
 
 % ----- metadata only -----
+% \title{
+% {\LARGE\bfseries SANOS{\large\\ Smooth strictly Arbitrage-free Non-parametric Option Surfaces}}
+% }
+
 \title{
-{\LARGE\bfseries SANOS{\large\\ Smooth strictly Arbitrage-free Non-parametric Option Surfaces}}
+    \hrule height 4pt
+    \vspace{0.25 in}
+    {\Huge\bfseries SANOS} \\ [0.4em] 
+    {\Large Smooth strictly Arbitrage-free Non-parametric Option Surfaces}
+    \vspace{0.25in} 
+    \hrule height 1pt
 }
-\author{
-Hans Buehler\footnote{All authors listed in alphabetical order.} \footnote{Corresponding author.}\\
-University of Oxford, Mathematical and Computational Finance Group\\
-\\
-Blanka Horvath\\
-University of Oxford, Oxford-Man Institute for Quantitative Finance\\
-\\
-Anastasis Kratsios\\
-McMaster University, Vector Institute\\
-\\
-Yannick Limmer\\
-DRW\\
-\\
-Raeid Saqur\\
-University of Oxford, Vector Institute
+
+
+\author{%
+  \hspace{-.18cm} 
+  % \textbf{Hans~Buehler}\textsuperscript{1,*,$\dagger$} 
+  \textbf{Hans~Buehler}\textsuperscript{1}%
+  \footnote{All authors listed in alphabetical order.}%
+  \footnote{Corresponding author.}
+  % \email{hans.buehler@maths.ox.ac.uk}} 
+  \quad
+  \textbf{Blanka~Horvath}\textsuperscript{1,2} 
+  \quad
+  \textbf{Anastasis~Kratsios}\textsuperscript{3,4} 
+  \\[0.5em] 
+  \hspace{-.18cm} 
+  \textbf{Yannick~Limmer}\textsuperscript{5}  
+  \quad 
+  \textbf{Raeid~Saqur}\textsuperscript{1,4}  \\[1em]
+  % \vspace{3pt}\\
+  \parbox{0.9\textwidth}{\centering\small
+    \textsuperscript{1}Mathematical Institute, University of Oxford \\
+    \textsuperscript{2}Oxford-Man Institute for Quantitative Finance, University of Oxford \\
+    \textsuperscript{3}Department of Mathematics, McMaster University \\
+    \textsuperscript{4}Vector Institute \\
+    \textsuperscript{5}DRW
+  }
 }
+
+% \author{
+% Hans Buehler\footnote{All authors listed in alphabetical order.} \footnote{Corresponding author.}\\
+% University of Oxford, Mathematical and Computational Finance Group\\
+% \\
+% Blanka Horvath\\
+% University of Oxford, Oxford-Man Institute for Quantitative Finance\\
+% \\
+% Anastasis Kratsios\\
+% McMaster University, Vector Institute\\
+% \\
+% Yannick Limmer\\
+% DRW\\
+% \\
+% Raeid Saqur\\
+% University of Oxford, Vector Institute
+% }
 
 \date{January 14th, 2026}
 
@@ -231,14 +266,14 @@ are not zero, we can always find a version of our model which fits the market.\\
 %On this subject, a~picture speaks more than a 1000~words: Figure~\ref{fig:initialexample} shows the examples of fitting our model to SPX index options ith a fairly trivial non-optimized implementation of our model. Execution time for a global linear programming fit to all options across all expiries is negligible.
 Figure~\ref{fig:initialexample} makes the strength of the calibration immediately apparent. In a way, these plots speak more than a 1000~words: Across the full range of strikes and maturities shown, the model curves closely track the observed S\&P\,500 option data, with deviations that are difficult to discern at the scale of the plots and no evident systematic bias in any particular region of the surface. Notably, this high-quality fit is achieved with negligible runtime—solving a single global linear program over the full cross-section of options across all expiries completes essentially instantaneously.
 
-\textsl{The data used for illustration in this article are end of day option data sourced from Option Metrics IvyDB.\footnote{\url{https://optionmetrics.com/}}. We selected OTM options with at least 1000 shares traded on the day. We also exclude strikes of options whose Vega/sqrT is less than 0.1\%. We will publish the data pipeline for this project alongside the code for the model and the notebooks used to generate all graphs in this article.}
+\textsl{The data used for illustration in this article are end of day option data sourced from Option Metrics IvyDB.\footnote{\url{https://optionmetrics.com/}}. We selected OTM options with at least 1000 shares traded on the day. We also exclude strikes of options whose $\mathrm{Vega}/\sqrt{T}$ is less than 0.1\%. We will publish the data pipeline for this project alongside the code for the model and the notebooks used to generate all graphs in this article.}
 
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{mass-1D-0.5.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-35-2023-08-04-0.5.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-213-2023-07-18-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/mass-1D-0.5.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.5.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.5.png}
     \caption{Fit of our model to the market, illustrated for a few DTE's on several days in 2023 using IvyDB OptionMetrics data. The thin bars in the call price and volatility
     graphs illustrate fit errors, expressed relative to the relevant spread on the right hand axis. (We do see some pricing errors in these charts because of the smoothness
     we impose; see section~\ref{sec:prod_model}.)
@@ -246,7 +281,7 @@ Figure~\ref{fig:initialexample} makes the strength of the calibration immediatel
     \label{fig:initialexample}
 \end{figure}
 
-Our method is fast and does not require compromises such as Legrande multipliers, penalties, or reliance on ``observations in experiments" to be strictly arbitrage-free. Moreover,
+A convenient feature of our model is that it strictly arbitrage-free and does not require any of the compromises in fit and arbitrage that other currently available approaches rely on: such as Legrande multipliers, penalties, or reliance on ``observations in experiments". Moreover,
 its implementation is simple and fast enough to be used in high speed trading environments or
 as part of machine learning models
 trained using gradient descent or other heavy numerical methods: indeed,
@@ -267,8 +302,10 @@ $$
 Our model fits market data surprisingly well and is by construction strictly free of arbitrage and smooth. Our model has a simple interpretation as a discrete jump process multiplied
 by an underlying martingale process.\\
 
+\removeblock{
 With this model we provide a very efficient solution to the challenge posed in~\cite{gatheral2014arbitrage}:
 ``prior work has not successfully [...] eliminated static arbitrage and indeed, efforts to find simple closed-form arbitrage-free parameterizations of the implied volatility surface are still widely considered to be futile."
+}
 \removeblock{We are not providing arb-free dynamics in some sense:
 While the elimination of static arbitrage can be addressed at the level of an implied-volatility parameterization, the corresponding dynamic problem remains fundamentally unresolved\footnote{“Modelling implied volatility (IV) surfaces in a manner that reflects historical dynamics while remaining arbitrage-free is a challenging open problem…” [Ning–Jaimungal–Zhang–Bergeron (2021/2023)]}.
 In particular, even when an implied-volatility surface is arbitrage-free in the static sense (i.e., free of calendar-spread and butterfly arbitrage), there is, in general, no known constructive procedure that guarantees the existence of risk-neutral dynamics—such as a stochastic volatility model—whose option prices reproduce that surface across strikes and maturities. As emphasized in~\cite{gatheral2014arbitrage}, the task of endowing a given static arbitrage-free surface with consistent dynamics is therefore widely viewed as not generally solvable. In this work, we address (and close) this gap  by providing an explicit, computationally tractable construction of dynamics consistent with the calibrated arbitrage-free surface, thereby furnishing a practical solution to the dynamic realization problem within our modeling framework.
@@ -1048,9 +1085,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{mass-1D-lin.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-1D-0.25.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-1D-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/mass-1D-lin.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-1D-0.25.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-1D-0.5.png}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to~1~day to expiry options on SPX. The right hand side shows the density which is much smoother
     for the case~$\eta=0.25$ while actually retaining a decent fit: the biggest fitting error is~40\% of vol spread.}
     \label{fig:example1DTE}
@@ -1058,9 +1095,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{mass-35-2023-08-04-0.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-35-2023-08-04-0.25.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-35-2023-08-04-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.25.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.5.png}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~35 days to expiry. In this case~$\eta=0.06$ fits the market within bid/ask
     while imposing sufficient smoothness on the model.
     }
@@ -1069,9 +1106,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{mass-213-2023-07-18-0.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-213-2023-07-18-0.25.png}\\
-    \includegraphics[width=0.9\linewidth]{mass-213-2023-07-18-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.25.png}\\
+    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.5.png}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~213 days to expiry. This expiry has sparse strikes which leads to 
     the unnatural bump on the right wing for the linear model. This is rectified by the smoother model with~$\eta=0.25$.
     }
@@ -1102,7 +1139,7 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.5\linewidth]{inhomvvio.png}
+    \includegraphics[width=0.5\linewidth]{figs/inhomvvio.png}
     \caption{
         Example of the idea~\eqref{eq:inhC} where the call prices at two expiries
         are increasing in the market strikes~$K=(0.5,1,1.5)$ but not
@@ -1547,7 +1584,7 @@ is the case for~$w=1$.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{mass-smoothness.png}
+    \includegraphics[width=0.9\linewidth]{figs/mass-smoothness.png}
     \caption{These two examples illustrate the impact of the smoothness parameter~$\eta$ 
     in a zoomed in view on a fit. The left hand graphs show the implied
     volatility bid/ask, and the model fits. The right hand graph shows the density produced by each model setting. "Linear" refers to the case~$\eta=0$.
