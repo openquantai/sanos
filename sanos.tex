@@ -173,13 +173,14 @@ University of Oxford, Vector Institute
 
  \maketitle
 
-\begin{abstract}
+\begin{abstract} TODO: Please all look through the whole paper one last time! Try to spot all remaining typos and flag (in comments to this overleaf) any formulations that you think suboptimal, so that we can resolve the last bits tomorrow. 
+This paper is going online on Friday, 16.1,  so please get ready!!\vspace{0.1cm}\\
     We present a simple, numerically efficient but highly flexible non-parametric method to construct representations of option price surfaces
     $\hat C(T,K)$ which are both smooth and strictly arbitrage-free across time and strike. 
     The method can be viewed as a smooth generalization of the widely-known linear interpolation scheme, 
     and retains the simplicity and transparency of that baseline.
     
-Call option prices for arbitrary strikes $K$ and a $T_j$ are represented as convex combinations of Black--Scholes call payoffs anchored at quoted strikes $K^i$ with variances~$V_j$ 
+Call option prices for arbitrary strikes $K$ and some expiry $T_j$ are represented as convex combinations of Black--Scholes call payoffs anchored at quoted strikes $K^i$ with variances~$V_j$ 
 with weights~$q_j$\vspace{-0.3cm}
 $$
 \vspace{-0.1cm}\hat C(T_j,K)=\sum_{i=0}^{N} q_j^i\,\mathrm{Call}(K^i,K,V_j).\vspace{-0.05cm}
@@ -228,8 +229,11 @@ This article tackles the problem of fitting a discrete set of observed European 
 making our model the first known smooth strictly arbitrage-free model whose parameters are subject to only trivial constraints. As long as bid/ask spreads of option prices
 are not zero, we can always find a version of our model which fits the market.\\
 
-On this subject, a~picture speaks more than a 1000~words: Figure~\ref{fig:initialexample} shows the examples of fitting our model to
-SPX index options ith a fairly trivial non-optimized implementation of our model. Execution time for a global linear programming fit to all options across all expiries is negligible.
+%On this subject, a~picture speaks more than a 1000~words: Figure~\ref{fig:initialexample} shows the examples of fitting our model to SPX index options ith a fairly trivial non-optimized implementation of our model. Execution time for a global linear programming fit to all options across all expiries is negligible.
+Figure~\ref{fig:initialexample} makes the strength of the calibration immediately apparent. In a way, these plots speak more than a 1000~words: Across the full range of strikes and maturities shown, the model curves closely track the observed S\&P\,500 option data, with deviations that are difficult to discern at the scale of the plots and no evident systematic bias in any particular region of the surface. Notably, this high-quality fit is achieved with negligible runtime—solving a single global linear program over the full cross-section of options across all expiries completes essentially instantaneously.
+
+\textsl{The data used for illustration in this article are end of day option data sourced from Option Metrics IvyDB.\footnote{\url{https://optionmetrics.com/}}. We selected OTM options with at least 1000 shares traded on the day. We also exclude strikes of options whose Vega/sqrT is less than 0.1\%. We will publish the data pipeline for this project alongside the code for the model and the notebooks used to generate all graphs in this article.}
+
 
 \begin{figure}[H]
     \centering
@@ -262,12 +266,14 @@ $$
     \hat C(T,K) := \alpha_j(T)  \hat C(T_{j+1},K) + (1-\alpha_j(T))  \hat C(T_j,K) \ .
 $$
 Our model fits market data surprisingly well and is by construction strictly free of arbitrage and smooth. Our model has a simple interpretation as a discrete jump process multiplied
-by an underlying martingale process.
+by an underlying martingale process.\\
 
 With this model we provide a very efficient solution to the challenge posed in~\cite{gatheral2014arbitrage}:
-``prior work has not successfully [...] eliminated static arbitrage and indeed, efforts to find simple closed-form arbitrage-free
-parameterizations of the implied volatility surface are still widely considered to be futile."
-Our results close this gasp.
+``prior work has not successfully [...] eliminated static arbitrage and indeed, efforts to find simple closed-form arbitrage-free parameterizations of the implied volatility surface are still widely considered to be futile."
+\removeblock{We are not providing arb-free dynamics in some sense:
+While the elimination of static arbitrage can be addressed at the level of an implied-volatility parameterization, the corresponding dynamic problem remains fundamentally unresolved\footnote{“Modelling implied volatility (IV) surfaces in a manner that reflects historical dynamics while remaining arbitrage-free is a challenging open problem…” [Ning–Jaimungal–Zhang–Bergeron (2021/2023)]}.
+In particular, even when an implied-volatility surface is arbitrage-free in the static sense (i.e., free of calendar-spread and butterfly arbitrage), there is, in general, no known constructive procedure that guarantees the existence of risk-neutral dynamics—such as a stochastic volatility model—whose option prices reproduce that surface across strikes and maturities. As emphasized in~\cite{gatheral2014arbitrage}, the task of endowing a given static arbitrage-free surface with consistent dynamics is therefore widely viewed as not generally solvable. In this work, we address (and close) this gap  by providing an explicit, computationally tractable construction of dynamics consistent with the calibrated arbitrage-free surface, thereby furnishing a practical solution to the dynamic realization problem within our modeling framework.
+}
 
 In addition to our production model, we also present extensions to other underlying processes than Black\&Scholes, and generalize our approach to a theoretically more
 appealing model  which allows specification of different variance curves~$V^i_j$
@@ -281,6 +287,9 @@ of our model in terms of a parameter set which is subject only to positivity con
 in our formula (which are subject to linear but still complicated constraints) with densities generated by "Discrete Local Volatilities" (DLVs) as introduced in~\cite{DLV} (which only need to be non-negative).
 These DLVs together with the forward volatilities to generate the backbone variances only need be positive to generate an arbitrage-free smooth call option
 price surface.
+
+We note that a model in that space, combined with~\cite{removedrift, buehler2022deephedginglearningremove} will yield not only arbitrage-free  snapshots, but
+also discrete time dynamics which are free of dynamic arbitrage. Such a model is subject to further research.
 
 \subsubsection*{Implementation}
 
