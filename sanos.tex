@@ -274,9 +274,9 @@ Figure~\ref{fig:initialexample} makes the strength of the calibration immediatel
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1 DTE_eta-0.25.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35 DTE_eta-0.25.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249 DTE_eta-0.25.pdf}
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1DTE_eta-0.25.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35DTE_eta-0.25.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249DTE_eta-0.25.pdf}
     \caption{Fit of our model to the market, illustrated for a few DTE's on several days in 2023 using IvyDB OptionMetrics data. The thin bars in the call price and volatility
     graphs illustrate fit errors, expressed relative to the relevant spread on the right hand axis. (We do see some fitting errors in these charts because of the smoothness
     we impose; see section~\ref{sec:prod_model}.) The red dots below the zero line in the density
@@ -1136,9 +1136,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-03-29_dte-1 DTE.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1 DTE_eta-0.06.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1 DTE_eta-0.25.pdf}
+    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-03-29_dte-1DTE.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1DTE_eta-0.06.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1DTE_eta-0.25.pdf}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to~1~day to expiry options on SPX. The right hand side shows the density which is much smoother
     for the case~$\eta=0.25$ while actually retaining a decent fit: the biggest fitting error is~40\% of vol spread.}
     \label{fig:example1DTE}
@@ -1146,9 +1146,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-08-04_dte-35 DTE.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35 DTE_eta-0.06.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35 DTE_eta-0.25.pdf}
+    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-08-04_dte-35DTE.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35DTE_eta-0.06.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35DTE_eta-0.25.pdf}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~35 days to expiry. In this case~$\eta=0.06$ fits the market within bid/ask
     while imposing sufficient smoothness on the model.
     }
@@ -1157,9 +1157,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-07-18_dte-1249 DTE.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249 DTE_eta-0.06.pdf}\\
-    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249 DTE_eta-0.25.pdf}
+    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-07-18_dte-1249DTE.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249DTE_eta-0.06.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249DTE_eta-0.25.pdf}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~1249 days to expiry. This expiry has sparse strikes which leads to 
     the unnatural bump on the right wing for the linear model. This is rectified by the smoother model with~$\eta=0.25$.
     }
