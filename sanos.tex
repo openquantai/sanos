@@ -26,6 +26,7 @@
 \definecolor{linkblue}{rgb}{0.0, 0.20, 0.40}
 \usepackage{hyperref} 
 \usepackage{nicematrix}
+\usepackage{booktabs}
 \hypersetup{
     % Link colors
     colorlinks = true,
@@ -50,7 +51,7 @@
 \definecolor{faintgray}{RGB}{245,245,245}
 \definecolor{faintborder}{RGB}{230,230,230}
 \definecolor{lightblack}{gray}{0.4}
-
+\definecolor{pinegreen}{rgb}{0.0, 0.47, 0.44}
 %========================================================%
 %                CUSTOM COMMANDS
 %========================================================%
@@ -157,24 +158,25 @@
   % \textbf{Hans~Buehler}\textsuperscript{1,*,$\dagger$} 
   \textbf{Hans~Buehler}\textsuperscript{1}%
   \footnote{All authors listed in alphabetical order.}%
-  \footnote{Corresponding author.}
+  \,\,\footnote{Corresponding author.}
   % \email{hans.buehler@maths.ox.ac.uk}} 
   \quad
   \textbf{Blanka~Horvath}\textsuperscript{1,2} 
   \quad
-  \textbf{Anastasis~Kratsios}\textsuperscript{3,4} 
+  \textbf{Anastasis~Kratsios}\textsuperscript{3,4,5} 
   \\[0.5em] 
   \hspace{-.18cm} 
-  \textbf{Yannick~Limmer}\textsuperscript{5}  
+  \textbf{Yannick~Limmer}\textsuperscript{6}  
   \quad 
-  \textbf{Raeid~Saqur}\textsuperscript{1,4}  \\[1em]
+  \textbf{Raeid~Saqur}\textsuperscript{1,5}  \\[1em]
   % \vspace{3pt}\\
   \parbox{0.9\textwidth}{\centering\small
     \textsuperscript{1}Mathematical Institute, University of Oxford \\
     \textsuperscript{2}Oxford-Man Institute for Quantitative Finance, University of Oxford \\
     \textsuperscript{3}Department of Mathematics, McMaster University \\
-    \textsuperscript{4}Vector Institute \\
-    \textsuperscript{5}DRW
+    \textsuperscript{4} The Ennio De Giorgi Mathematical Research Centre, Scuola Normale Superiore di Pisa\\
+    \textsuperscript{5}Vector Institute \\
+    \textsuperscript{6}DRW
   }
 }
 
@@ -213,7 +215,7 @@
     $\hat C(T,K)$ which are both smooth and strictly arbitrage-free across time and strike. 
     The method can be viewed as a smooth generalization of the widely-known linear interpolation scheme, 
     and retains the simplicity and transparency of that baseline.
-    
+% 
 Call option prices for arbitrary strikes $K$ and some expiry $T_j$ are represented as convex combinations of Black--Scholes call payoffs anchored at quoted strikes $K^i$ with variances~$V_j$ 
 with weights~$q_j$\vspace{-0.3cm}
 $$
@@ -223,7 +225,7 @@ which are free of arbitrage across time and strike. This is extended to the full
 
 Calibration of the model to observed market quotes is formulated as a linear program, allowing bid--ask spreads to be incorporated directly via linear penalties or inequalities, and delivering materially lower computational cost than most of the currently available implied-volatility surface fitting routines.
 
-   As a further contribution, we derive an equivalent parameterization of the proposed surface in terms of strictly positive “discrete local volatility” \cite{DLV} variables. This yields, to our knowledge, the first construction of smooth, strictly arbitrage-free option price surfaces while requiring only trivial parameter constraints (positivity). We illustrate the approach using S\&P\,500 index options.
+As a further contribution, we derive an equivalent parameterization of the proposed surface in terms of strictly positive “discrete local volatility” \cite{DLV} variables. This yields, to our knowledge, the first construction of smooth, strictly arbitrage-free option price surfaces while requiring only trivial parameter constraints (positivity). We illustrate the approach using S\&P\,500 index options.
 \end{abstract}
 \removeblock{
 \begin{abstract}
@@ -232,7 +234,7 @@ Calibration of the model to observed market quotes is formulated as a linear pro
     We present a (surprisingly) simple, \textit{numerically efficient} but \textit{highly flexible} non-parametric method to construct a representation of option price surfaces
     $\hat C(T,K)$ beyond quoted expiries and strikes which is both \textit{smooth}, and remains \textit{strictly arbitrage-free} across time and strike. 
     The method can be viewed as a smooth generalization of the widely-known (non-smooth) linear  interpolation scheme, which successfully retains \textit{the simplicity and transparency} of that baseline: 
-    %Essentially, in our model call option prices are given in terms of discrete densities~$q_j$ and increasing Black~\&~Scholes variances~$V_j$ as for each expiry as
+    %Essentially, in our model call option prices are given in terms of discrete densities~$q_j$ and increasing Black-Scholes variances~$V_j$ as for each expiry as
     %$$
     %    \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big(K^i,K,V_j \big) 
   %$$
@@ -259,21 +261,22 @@ Calibration of the model to observed market quotes is formulated as a linear pro
 
 
 
-This article tackles the problem of fitting a discrete set of observed European option bid/ask prices efficiently and develops  a \textit{non-parametric, strictly arbitrage-free,  smooth surface} representation of option prices to model prices for a full continuous range of strikes and maturities beyond the observed market quotes. We also present a version of our model which requires only positivity of the input parameters,
+This article tackles the problem of fitting a discrete set of observed European option bid-ask prices efficiently and develops  a \textit{non-parametric, strictly arbitrage-free,  smooth surface} representation of option prices to model prices for a full continuous range of strikes and maturities beyond the observed market quotes. We also present a version of our model which requires only positivity of the input parameters,
 making our model the first known smooth strictly arbitrage-free model whose parameters are subject to only trivial constraints. As long as bid/ask spreads of option prices
 are not zero, we can always find a version of our model which fits the market.\\
 
 %On this subject, a~picture speaks more than a 1000~words: Figure~\ref{fig:initialexample} shows the examples of fitting our model to SPX index options ith a fairly trivial non-optimized implementation of our model. Execution time for a global linear programming fit to all options across all expiries is negligible.
 Figure~\ref{fig:initialexample} makes the strength of the calibration immediately apparent. In a way, these plots speak more than a 1000~words: Across the full range of strikes and maturities shown, the model curves closely track the observed S\&P\,500 option data, with deviations that are difficult to discern at the scale of the plots and no evident systematic bias in any particular region of the surface. Notably, this high-quality fit is achieved with negligible runtime—solving a single global linear program over the full cross-section of options across all expiries completes essentially instantaneously.
 
-\textsl{The data used for illustration in this article are end of day option data sourced from Option Metrics IvyDB.\footnote{\url{https://optionmetrics.com/}}. We selected OTM options with at least 1000 shares traded on the day. We also exclude strikes of options whose $\mathrm{Vega}/\sqrt{T}$ is less than 0.1\%. We will publish the data pipeline for this project alongside the code for the model and the notebooks used to generate all graphs in this article.}
+\textsl{The data used for illustration in this article are end of day option data sourced from Option Metrics IvyDB.\footnote{\url{https://optionmetrics.com/}}. We selected OTM options with at least 100 lots are traded on the day. We also exclude strikes of options whose $\mathrm{Vega}/\sqrt{T}$ is less than 0.1\%. Past this, we also only consider expiries with
+20 active options. We will publish the data pipeline for this project alongside the code for the model and the notebooks used to generate all graphs in this article.}
 
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/mass-1D-0.5.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.5.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1 DTE_eta-0.25.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35 DTE_eta-0.25.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249 DTE_eta-0.25.pdf}
     \caption{Fit of our model to the market, illustrated for a few DTE's on several days in 2023 using IvyDB OptionMetrics data. The thin bars in the call price and volatility
     graphs illustrate fit errors, expressed relative to the relevant spread on the right hand axis. (We do see some fitting errors in these charts because of the smoothness
     we impose; see section~\ref{sec:prod_model}.) The red dots below the zero line in the density
@@ -282,16 +285,17 @@ Figure~\ref{fig:initialexample} makes the strength of the calibration immediatel
     \label{fig:initialexample}
 \end{figure}
 
-A convenient feature of our model is that it strictly arbitrage-free and does not require any of the compromises in fit and arbitrage that other currently available approaches rely on: such as Legrande multipliers, penalties, or reliance on ``observations in experiments". Moreover,
+A convenient feature of our model is that it strictly arbitrage-free and does not require any of the compromises in fit and arbitrage that other currently available approaches rely on: such as Lagrange multipliers, penalties, or reliance on ``observations in experiments". Moreover,
 its implementation is simple and fast enough to be used in high speed trading environments or
 as part of machine learning models
-trained using gradient descent or other heavy numerical methods: indeed,
-our main production approach boils down to writing
+trained using gradient descent or other heavy numerical methods.
+
+Our approach boils down to writing
 $$
     \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big(K^i,K,V_j \big) \ .
 $$
 in terms of martingale densities~$q_1,\ldots,q_M$ for expiries~$T_1<\cdots<T_M$
-defined for homogeneous strikes $K_1<\cdots<K_N$ and log-normal variances $V_1<\cdots<V_M$. Here, $\mathrm{Call}(s,k,v)$ is the Black~\&~Scholes call price function 
+defined for homogeneous strikes $K_1<\cdots<K_N$ and log-normal variances $V_1<\cdots<V_M$. Here, $\mathrm{Call}(s,k,v)$ is the Black-Scholes call price function 
 for spot~$s$, strike~$k$ and variance~$v$. We find the densities~$q_1,\ldots,q_M$ to match the market
 bid/ask by linear programming.
 The method enforces absence of arbitrage in both time and strike space; that means extending our
@@ -312,7 +316,7 @@ While the elimination of static arbitrage can be addressed at the level of an im
 In particular, even when an implied-volatility surface is arbitrage-free in the static sense (i.e., free of calendar-spread and butterfly arbitrage), there is, in general, no known constructive procedure that guarantees the existence of risk-neutral dynamics—such as a stochastic volatility model—whose option prices reproduce that surface across strikes and maturities. As emphasized in~\cite{gatheral2014arbitrage}, the task of endowing a given static arbitrage-free surface with consistent dynamics is therefore widely viewed as not generally solvable. In this work, we address (and close) this gap  by providing an explicit, computationally tractable construction of dynamics consistent with the calibrated arbitrage-free surface, thereby furnishing a practical solution to the dynamic realization problem within our modeling framework.
 }
 
-In addition to our production model, we also present extensions to other underlying processes than Black\&Scholes, and generalize our approach to a theoretically more
+In addition to our production model, we also present extensions to other underlying processes than Black-Scholes, and generalize our approach to a theoretically more
 appealing model  which allows specification of different variance curves~$V^i_j$
 per strike. While this model is theoretically more attractive its calibration is much heavier
 and its therefore of perhaps academic interest.
@@ -391,7 +395,7 @@ strikes but can still fit any observed arbitrage-free market.
 \subsubsection*{A Historical Perspective}
 
 There is a broad literature around smooth option price surface representations which aim to avoid  or mitigate arbitrage.
-Typically this involves first converting observed prices to Black~\&~Scholes
+Typically this involves first converting observed prices to Black-Scholes
 \emph{implied volatilities}, and then fit those volatilities smoothly.
 Compared to option prices implied volatilities provide a fairly intuitive interpretation of the value of an option in terms of the market's perceived variability of the underlying asset. However, the disadvantage of this common practice is that imposing no-arbitrage conditions on implied volatilities is much more
 complicated (c.f.~\cite{gatheral2014arbitrage}) than doing so on option prices directly (for which the no-arbitrage conditions are linear). In our discussion we will treat approaches for interpolating the implied volatility
@@ -504,7 +508,7 @@ $$
     \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big(K^i,K,V_j \big) \ .
 $$
 in terms of martingale densities~$q_1,\ldots,q_M$ for expiries~$T_1<\cdots<T_M$
-defined for homogeneous strikes $K_1<\cdots<K_N$ and log-normal variances $V_1<\cdots<V_M$. Here, $\mathrm{Call}(s,k,v)$ is the Black~\&~Scholes call price function 
+defined for homogeneous strikes $K_1<\cdots<K_N$ and log-normal variances $V_1<\cdots<V_M$. Here, $\mathrm{Call}(s,k,v)$ is the Black-Scholes call price function 
 for spot~$s$, strike~$k$ and variance~$v$. We find the densities~$q_1,\ldots,q_M$ to match the market
 by linear programming.
 Interpolation in time is trivial since the model enforces calendar spread
@@ -547,14 +551,14 @@ Seemingly similar are \textsl{Gaussian mixture models} which have been covered i
 and their earlier~\cite{mixedBrigo00}. Their primary focus is the construction of a local volatility
 diffusion which mimics the marginal distributions generated by Gaussian mixture models.
 %The main difference outside focus is that we do not mix a number of process starting at the same point with fixed weights over time; rather, we jump from one underlying stock price to another.
-The central difference---apart from the difference in focus---of these works to ours is that in \cite{mixedBrigo00,mixedBrigo02} the mixing is performed with fixed weights over time over a number of processes which all start at the same point; while our solution works by jumps from one underlying stock price to another:
-The latter difference can be stated more explicitly, as
+The central difference, apart from the difference in focus, of these works to ours is that in \cite{mixedBrigo00,mixedBrigo02} the mixing is performed with fixed weights over time over a number of processes which all start at the same point; while our solution works by jumps from one underlying stock price to another:
+The latter difference can be stated more explicitly, in our work as
     $$
-        \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big({\color{blue} K^i},K,V_j\big) 
+        \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big({\color{pinegreen} K^i},K,V_j\big) 
     $$
-in our work, where we used $S_0=1$ for spot and variances~$V_j$. Mixture models on the other hand do
+where we used $S_0=1$ for spot and variances~$V_j$. Mixture models on the other hand implement
     $$
-        \sum_{i=0}^N q^i_j\, \mathrm{Call}\big({\color{blue} 1},K,V_j\big) \ . 
+        \sum_{i=0}^N q^i_j\, \mathrm{Call}\big({\color{pinegreen} 1},K,V_j\big) \ . 
     $$
 The effect is that we can impose much stronger skew via the weighting functions~$q_j$, at the cost
 of needing to limit the weights~$q_j$ to densities with unit mean. As a result, we are
@@ -571,7 +575,47 @@ However, as the
 the authors point out, the most accessible parametrization
 does not always fit well to observed option markets which means they need to resort to more involved
 numerical methods to fit their low-parametric model to observed market data while retaining
-strict absence of arbitrage.
+strict absence of arbitrage.\\
+
+% \begin{tabular}{lcccc}
+%     \textbf{Method} & \textbf{Smooth} & \textbf{Arb-Free}& \textbf{Parametric} & \textbf{Linear Program} \\
+%     \hline
+%     Linear Interpolation &$\times$ & \checkmark & non-param & \checkmark\\
+%     SSVI & $\checkmark$ & \checkmark & param & $\times$\\
+%     This paper & $\checkmark$ & \checkmark & non-param & \checkmark\\
+% \end{tabular}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lcccc}
+    \toprule
+    Method
+    & Smooth
+    & Arbitrage-free
+    & Parametric
+    & Linear program \\
+    \midrule
+    Linear interpolation
+    & $\times$
+    & \checkmark
+    & No
+    & \checkmark \\
+    SSVI
+    & \checkmark
+    & \checkmark
+    & Yes
+    & $\times$ \\
+    This paper
+    & \checkmark
+    & \checkmark
+    & No
+    & \checkmark \\
+    \bottomrule
+    \end{tabular}
+    \caption{Comparison of option surface construction methods.}
+    \label{tab:placeholder}
+\end{table}
+
 
 \subsubsection*{American Options}
     In this article we focus on European options which are quoted for futures and indices. Options on single underlyings
@@ -580,7 +624,7 @@ strict absence of arbitrage.
 
 \subsubsection*{Structure of the Article}
 
-We start in section~\ref{sec:review} with a review of the concept of absence of arbitrage and its relation to linear interpolation option prices. This section also serves
+We start in Section~\ref{sec:review} with a review of the concept of absence of arbitrage and its relation to linear interpolation option prices. This section also serves
 to settle notation and ideas.
 Section~\ref{sec:smootharbfree} then covers the main two proposed call price surface models where we also present some illustrative numerical results. We also reflect on generalization
 and representation as dynamic processes. Section~\ref{sec:implementation} covers practical implementation. 
@@ -618,9 +662,9 @@ A~similar transformation is applied to obtain pure put prices, which we then con
 into pure call prices by put-call-parity. %The gist of the above is that we can focus our attention on ``pure" call prices, i.e.~those written on the underlying martingale process:\\
 With these preparations, we can henceforth focus or attention on ``pure" call prices, i.e.~those written on the underlying martingale process:\\
 
-%Furthermore, we briefly recall that the Black~\&~Scholes formula for European Call options  with spot denoted as~$s$, strike~$k$ and variance~$v$, is given in terms of the
+%Furthermore, we briefly recall that the Black-Scholes formula for European Call options  with spot denoted as~$s$, strike~$k$ and variance~$v$, is given in terms of the
 %    		normal cumulative distribution function~$\mathcal{N}$ as
-%%\sout{We will frequently use the %Black~\&~Scholes    		call price function %with spot~$s$, strike~$k$ and variance~$v$, given %in terms of the     		normal cumulative %distribution function~$\mathcal{N}$ as}
+%%\sout{We will frequently use the %Black-Scholes    		call price function %with spot~$s$, strike~$k$ and variance~$v$, given %in terms of the     		normal cumulative %distribution function~$\mathcal{N}$ as}
 %\begin{equation}\label{eq:bsc}
 %	\mathrm{Call}(s,k,v) := s \mathcal{N}(d_+) - k \mathcal{N}(d_-) \ \ \ \mbox{with} \ \ \ d_\pm = - \frac{\log k/s \pm \frac12 v }{ \sqrt{v} }  \ .
 %\end{equation}
@@ -658,29 +702,20 @@ We call a function $C:[0,\infty)^2 \rightarrow [0,\infty)$ an \emph{arbitrage-fr
 
 \noindent
 We will by convention consider derivatives of call prices in $K$ as
-right hand derivatives.\footnote{
+right hand derivatives%
+\footnote{
     i.e.~$\partial_K C(T,K) := \partial^+_K C(T,K) :=
     \lim_{\epsilon\downarrow 0} \frac1\epsilon ( C(T,K+\epsilon)-C(T,K) )$;
     see the proof of theorem~\ref{th:contarbfree} in the appendix on 
     page~\pageref{sec:appendix_absence} why this is the natural definition
-    when working with distributions.}
-%It is well known that: 
-%\HB{@Blanka: $C$ does not have to be continuous - right continuity is a consequence of convexity and boundness}
-Next, we state a theorem that formulates a list of shape requirements on a surface, which guarantee to yield an arbitrage free call price surface in the sense of definition \ref{def:arbfreecall}.
+    when working with distributions.}.
+Next, we state a theorem that formulates a list of shape requirements on a surface, which guarantee to yield an arbitrage free call price surface in the sense of Definition \ref{def:arbfreecall}.
 \begin{theorem}\label{th:contarbfree}
     A~call price surface $C:[0,\infty)^2 \rightarrow [0,\infty)$ \emph{arbitrage-free} iff
     \begin{enumerate}
         \item The market has unit expectation: $C(T,0)\equiv \E[Z_T]=1$ for all $T$;\label{it:caf_C0_1} 
         
-        \item zero is unattainable (i.e.~no atom at $0$): $\partial_K C(T,0)\equiv -1$ since then $\P[ Z_T=0 ] =0$;\footnote{
-            For fixed $T$ and $K>0$, %the map $K\mapsto (Z_T-K)^+$ is a.e.\ differentiable with $\frac{\partial}{\partial K}(Z_T-K)^+ =-\mathbf{1}_{\{Z_T>K\}}.$
-            %Then for $K>0$ 
-            we have, $ \partial_K C(T,K)
-                =\E\!\left[\partial_K(Z_T-K)^+\right]
-                =-\P(Z_T>K).$
-            Taking the right-limit as $K\downarrow 0$ yields $\partial_K C(T,0)
-                =-\P(Z_T>0)
-                =-(1-\P(Z_T=0)).$}\label{it:caf_C1m1}
+        \item zero is unattainable (i.e.~no atom at $0$): $\partial_K C(T,0)\equiv -1$;\label{it:caf_C1m1}
         \item call prices ultimately reach zero: $\lim_{K\uparrow \infty} C(T,K)=0$,\label{it:caf_limC}
         
         \item call prices are convex: $\partial_{KK} C(T,K) \geq 0$; and\label{it:caf_cvx}
@@ -695,14 +730,28 @@ Next, we state a theorem that formulates a list of shape requirements on a surfa
         \label{it:derivpos}
     \end{enumerate}
 \end{theorem}
-\begin{remark}[and outline of proof]
-Several of the above conditions are well-known in the context of related literature: Different subsets, and also different variations of the points contained in the above list appear as \textit{necessary} shape-conditions for an arbitrage-free surface. Our set of conditions, listed in Theorem \ref{th:contarbfree} differ from available sets of conditions as they also yield \emph{guarantees for the the existence} of a martingale representation in the sense of Definition \ref{def:arbfreecall}.\\ For this, we have imposed condition~\textit{\ref{it:caf_C1m1}.}
-rather than the commonly used  weaker condition $\partial_K C(T,0)\geq -1$
-to ensure that the asset price process cannot attain 
-zero. This requirement is justified as we consider an asset reaching  zero
-outside a~default event undesirable, and point to~\cite{BuehlerVolAndDivs} to incorporate ``sudden" default risk in our framework.\\
-Similarly, in several related settings, strict absence of arbitrage statements are not always fully complete: the boundary conditions~\textit{\ref{it:caf_C0_1}.} and~\textit{\ref{it:caf_limC}.}~are frequently omitted, and/or negativity of the derivative~\textit{\ref{it:derivpos}.} is not required.
-Our proof of Theorem~\ref{th:contarbfree} relies on results from~\cite[Prop~2.3]{buehler2006expensive}, a full proof is delegated to the appendix page~\pageref{sec:appendix_absence}ff. 
+\begin{remark}
+Several of the above conditions are well-known in the context of related literature. 
+In several related settings, strict absence of arbitrage statements are not always fully complete: the boundary conditions~\textit{\ref{it:caf_C0_1}.} and~\textit{\ref{it:caf_limC}.}~are frequently omitted, and/or negativity of the derivative~\textit{\ref{it:derivpos}.} is not required.
+
+Our set of conditions for theorem \ref{th:contarbfree} are minimal equivalent conditions for the
+existence of a positive true martingale in sense of definition~\ref{def:arbfreecall}.
+A~full proof is delegated to the appendix page~\pageref{sec:appendix_absence}ff. 
+\end{remark}
+
+\begin{remark}
+To ensure positivity, we have imposed condition~\textit{\ref{it:caf_C1m1}.}
+rather than the commonly used  weaker condition $\partial_K C(T,0)\geq -1$.\footnote{
+            For fixed $T$ and $K>0$, %the map $K\mapsto (Z_T-K)^+$ is a.e.\ differentiable with $\frac{\partial}{\partial K}(Z_T-K)^+ =-\mathbf{1}_{\{Z_T>K\}}.$
+            %Then for $K>0$ 
+            we have, $ \partial_K C(T,K)
+                =\E\!\left[\partial_K(Z_T-K)^+\right]
+                =-\P(Z_T>K).$
+            Taking the right-limit as $K\downarrow 0$ yields $\partial_K C(T,0)
+                =-\P(Z_T>0)
+                =-(1-\P(Z_T=0)).$}
+ This requirement is justified as we consider an asset reaching  zero
+outside a~default event undesirable, and point to~\cite{BuehlerVolAndDivs} on how to incorporate ``sudden" default risk in our framework.
 \end{remark}
 
 
@@ -853,7 +902,7 @@ matrix/vector multiplications. Equivalently, for each conditioning index $\ell\i
 We now recall the well-known result that linear interpolation in strike and expiry yields an arbitrage-free -- but not smooth -- interpolator, to motivate our later results.
 
 \begin{definition}[Linear Interpolation]\label{th:linintp}
-The linear interpolator in strikes $K$ for expiry $T_j$ is given as
+The linear interpolator in strikes $K$ for expiry $T_j$ is
 $$
     \bar C_j(K) := \sum_{i=0}^{N-1} \Big\{  dC^i_j ( \underbrace{ K-K^{i+1}) }_{\leq 0} + C^{i+1}_j \Big\}_{K^i\leq K<K^{i+1}} \ .
 $$
@@ -875,8 +924,8 @@ The function $\bar C(T,K)$ is then arbitrage-free.
     \begin{equation}\label{eq:linintp}
          \alpha_j(T):= \frac{ T - T_j }{ T_{j+1} - T_j } \ .
     \end{equation}
-    A common alternative is to interpolate in implied Black~\&~Scholes ATM variance.
-    To this end let $W_j$ be the Black~\&~Scholes implied variance for $C_j(1)$. 
+    A common alternative is to interpolate in implied Black-Scholes ATM variance.
+    To this end let $W_j$ be the Black-Scholes implied variance for $C_j(1)$. 
     For $T\in [T_j,T_{j+1})$ use for example linear interpolation
             $$
                 W(T)=W_j + \frac{ W_{j+1} - W_j}{ T_{j+1}-T_j } ( T-T_j ) \ .
@@ -995,6 +1044,7 @@ discussess implementation.
     $$
     Then $\hat C$ is a smooth call price function.
     
+    \noindent 
     Moreover, if~$q=p$, then $\hat C_j \geq \bar C_j$ with equality for $Y=1$, i.e.~$\hat C$ 
         reduces to linear interpolation.
 \end{theorem}
@@ -1057,7 +1107,7 @@ we propose a very simplistic structure which still fits market data remarkably w
     \begin{equation}\label{eq:CasSumBSC}
         \hat C_j(K) := \sum_{i=1}^{N} q_j^i\, \mathrm{Call}\big( K^i, K, V_j \big)
     \end{equation}
-    where $\mathrm{Call}(s,k,v)$ denotes the Black~\&~Scholes call price defined in~\eqref{eq:bsc} with spot $s$, strike~$k$ and variance~$v$.
+    where $\mathrm{Call}(s,k,v)$ denotes the Black-Scholes call price defined in~\eqref{eq:bsc} with spot $s$, strike~$k$ and variance~$v$.
 
 \begin{proposition}[Interpolation]\label{prop:fit}
     For any arbitrage-free set of market mid prices with non-zero spread to ask prices there
@@ -1076,19 +1126,19 @@ In practise that means that our production model is given the form
         \hat C_j(K) := \sum_{i=1}^{N} q_j^i\, \mathrm{Call}\big( K^i,\, K,\, \eta V_j \big)
 \end{equation}
 where~$\eta\in[0,1)$ controls the smoothness of our model and where~$0<V_1<\cdots<V_M$
-are input ATM variances from the market. We then solve for~$q$ to fit the model within market bid/ask prices globally (it is one fit across all expiries jointly, see section~\ref{sec:PROD}).
+are input ATM variances from the market. e then solve for~$q$ to fit the model within market bid/ask prices globally (it is one fit across all expiries jointly, see section~\ref{sec:PROD}).
 
 Essentially~$\eta$ allows controlling the desired smoothness in~\eqref{prop:fit}: if it is set to zero, and if the market
 is arbitrage-free, then our model has a solution within bid/ask and will be equivalent to the linear model discussed in section~\ref{sec:lin_surface}.
-By increasing~$\eta$ we can then smoothen our fit. Figures~\ref{fig:example1DTE},~\ref{fig:example35DTE} and~\ref{fig:example213DTE} illustrate three
+By increasing~$\eta$ we can then smoothen our fit. Figures~\ref{fig:example1DTE},~\ref{fig:example35DTE} and~\ref{fig:example1249DTE} illustrate three
 different cases of fits with $\eta=0$, $\eta=0.25^2\approx 0.06$ and~$\eta=0.5^2=0.25$. The latter is our recommended
 default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/mass-1D-lin.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-1D-0.25.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-1D-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-03-29_dte-1 DTE.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1 DTE_eta-0.06.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-03-29_dte-1 DTE_eta-0.25.pdf}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to~1~day to expiry options on SPX. The right hand side shows the density which is much smoother
     for the case~$\eta=0.25$ while actually retaining a decent fit: the biggest fitting error is~40\% of vol spread.}
     \label{fig:example1DTE}
@@ -1096,9 +1146,9 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.25.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-35-2023-08-04-0.5.png}
+    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-08-04_dte-35 DTE.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35 DTE_eta-0.06.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-08-04_dte-35 DTE_eta-0.25.pdf}
     \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~35 days to expiry. In this case~$\eta=0.06$ fits the market within bid/ask
     while imposing sufficient smoothness on the model.
     }
@@ -1107,13 +1157,13 @@ default setting.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.25.png}\\
-    \includegraphics[width=0.9\linewidth]{figs/mass-213-2023-07-18-0.5.png}
-    \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~213 days to expiry. This expiry has sparse strikes which leads to 
+    \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-07-18_dte-1249 DTE.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249 DTE_eta-0.06.pdf}\\
+    \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249 DTE_eta-0.25.pdf}
+    \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~1249 days to expiry. This expiry has sparse strikes which leads to 
     the unnatural bump on the right wing for the linear model. This is rectified by the smoother model with~$\eta=0.25$.
     }
-    \label{fig:example213DTE}
+    \label{fig:example1249DTE}
 \end{figure}
 
 \begin{remark}[Generalized Interpolation in Strike]
@@ -1303,10 +1353,11 @@ spreads.
 
 For completeness we present now an extension which provides a more
 advanced version which features a martingale~$Y$ per strike. We focus on 
-a log-normal version for clarity, but other driving models~$Y$ can be utilized:
+a log-normal version for clarity, but other driving models~$Y$ can be utilized.
+We view this model primarily as a conceptual result; in practice the production model already captures observed surfaces to high accuracy.
 
 \begin{theorem}[Iterative Smooth Call Prices]\label{th:fullsmooth}
-    Let $dV_j^i\geq 0$ be forward Black~\&~Scholes implied variances for $i=1,\ldots,N$
+    Let $dV_j^i\geq 0$ be forward Black-Scholes implied variances for $i=1,\ldots,N$
     and $j=1,\ldots,M$. Let $q_1,\ldots,q_M$ be marginal densities
     with unit mean (e.g.~they do not have
     to be martingale densities). Define iteratively
@@ -1413,7 +1464,7 @@ In the the following section~\ref{sec:PROD} we present a more practical
 approach which handles inhomogenous strikes etc.
 
 We will use~\eqref{eq:CasSumBSC}: to this end, assume that we have specified
- Black~\&~Scholes implied variances $V_j$ which are increasing in expiries, $V_j \geq V_{j-1}$ and let~$\eta\in[0,1)$ be a variance factor, e.g.~$\eta=0.25$.
+ Black-Scholes implied variances $V_j$ which are increasing in expiries, $V_j \geq V_{j-1}$ and let~$\eta\in[0,1)$ be a variance factor, e.g.~$\eta=0.25$.
 Define the matrix $\mathbf{C}_j\in \R^{ (N-2) \times N}$ for $j=1,\ldots,M$ as
 \begin{equation}\label{eq:Cdef}
     \mathbf{C}_j^{\ell,i} := \mathrm{Call}( K^i, K^\ell, \eta V_j ) \ .
@@ -1696,6 +1747,9 @@ as a dynamic process to aid intuition behind our approach.
 Our approach is a natural extension of linear option surface fitting whenever smoothness is critical to the application.
 
 
+\section*{Funding}
+A.\ Kratsios acknowledges financial support from an NSERC Discovery Grant No.\ RGPIN-2023-04482 and No.\ DGECR-2023-00230.   and by the project Bando PRIN 2022 named ``Qnt4Green - Quantitative Approaches for Green Bond Market: Risk Assessment, Agency Problems and Policy Incentives'', codice 2022JRY7EF, CUP E53D23006330006, funded by European Union – NextGenerationEU, M4c2.
+A.\ Kratsios and R. Saqur were also supported, in part, by the Province of Ontario, the Government of Canada through CIFAR, and companies sponsoring the Vector Institute\footnote{\href{https://vectorinstitute.ai/partnerships/current-partners/}{https://vectorinstitute.ai/partnerships/current-partners/}}.  
 
 
 
@@ -1853,14 +1907,14 @@ is indeed a transition operator.
         K^{i-1} \frac{ U^i_j }{ K^i - K^{i-1} }  
         +
         K^i + K^i \left( \frac{ U^i_j }{ K^i - K^{i-1} }   + \frac{ U^i_j }{ K^{i+1} - K^i } \right)
-        -
-        K^{i+1} \frac{ U^i_j }{ K^{i+1} - K^i }  \\
+        \\
+        &  &\qquad \qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad - K^{i+1} \frac{ U^i_j }{ K^{i+1} - K^i }  \\
         & = &
         K^i + 
          U^i_j \left(
          \frac{  K^i  - K^{i-1}}{ K^i - K^{i-1} }  +    
          \frac{ K^i- K^{i+1} }{ K^{io+1}{} - K^i }          
-        \right) \ = \ K^i \ .
+        \right) \\& = &  K^i \ .
     \end{eqnarray*}
 \end{itemize}
 This next step is to show that a discrete local volatility as defined in~\eqref{eq:dlv2}
@@ -1872,37 +1926,38 @@ reprices the input call prices. To do so
     $$
     hence $w$ defined in~\eqref{eq:wDLV} can be written as~\eqref{eq:wself}.
     For $i\in\{2,\ldots,N-1\}$ we therefore get
-    \begin{eqnarray*}
+    \begin{align*}
         ( Q_{j|j-1}^{-1}\cdot p_j  )^i
-        & = &
+        & = 
             - p_j^{i-1}  w^{(i-1)+}_j
             +
             p_j^{i} (1 + w^{i-}_j + w^{i+}_j)
             -
              p_j^{i+1}  w^{(i+1)-}_j
-       \\ & = &
+       \\ & = 
             p^i_j
             - ( C_j^{i-1} - C_{j-1}^{i-1} )  \bar \gamma^{(i-1)+}_j
             +
             ( C_j^{i} - C_{j-1}^{i} ) (\bar \gamma^{i-}_j + \bar \gamma^{i+}_j)
             -
             ( C_j^{i+1} - C_{j-1}^{i+1} ) \bar \gamma^{(i+1)-}_j
-        \ \supstack{(*)} = \ p_{j-1} \ .
-    \end{eqnarray*}
+        \ 
+        \\ & \supstack{(*)} =  p_{j-1} \ .
+    \end{align*}
     The last equation~$(*)$ follows from
-    $$
+    \begin{align*}
          C_{j}^{i-1}  \bar \gamma^{(i-1)+}_j
                      -
                       C_{j}^{i} (\bar \gamma^{i-}_j + \bar \gamma^{i+}_j)
                       +
                        C_{j}^{i+1} \bar \gamma^{(i+1)-}_j   
-       =
+       & =
         \Big(  C_{j}^{i+1} \bar \gamma^{(i+1)-}_j  - C_{j}^{i}  \bar \gamma^{i+}_j \Big)
         - \Big( C_{j}^{i} \bar \gamma^{i-}_j  -  C_{j}^{i-1}  \bar \gamma^{(i-1)+}_j \Big)
-        =
+       \\& =
        dC^{i+1}_j
-        - dC^{i}_j =  p^i_j \ .
-   $$
+        - dC^{i}_j \\&=  p^i_j \ .
+    \end{align*}
     For $i=1$ recall that $p^1_j = \frac{ C^2_j-C^1 }{ K_2 - K_1 }$ with $C^1=1-K^1$
     hence
    $$
