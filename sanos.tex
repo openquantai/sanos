@@ -215,7 +215,7 @@
     $\hat C(T,K)$ which are both smooth and strictly arbitrage-free across time and strike. 
     The method can be viewed as a smooth generalization of the widely-known linear interpolation scheme, 
     and retains the simplicity and transparency of that baseline.
-% 
+
 Call option prices for arbitrary strikes $K$ and some expiry $T_j$ are represented as convex combinations of Black--Scholes call payoffs anchored at quoted strikes $K^i$ with variances~$V_j$ 
 with weights~$q_j$\vspace{-0.3cm}
 $$
@@ -642,7 +642,7 @@ standard normal distribution function $\mathcal{N}$ as
 \end{equation}
  In this article we discuss construction of smooth arbitrage-free European option price surfaces for an equity denoted by~$S$. The following assumptions hold throughout the paper unless otherwise stated.
 %\BH{To fix notions and notations we recall here 
-%some Definitions and concepts we will frequently need throughout the remainder of the paper: }\HB{We do not really use much of the notation here. It's basically a pre-processing statement.}
+%some definitions and concepts we will frequently need throughout the remainder of the paper: }\HB{We do not really use much of the notation here. It's basically a pre-processing statement.}
 We will assume that the dynamics of the equity $S$ can be written in the form 
 $S_T = F_T Z_T$ where~$F$ is the forward curve\footnote{
 %\begin{remark}
@@ -709,7 +709,7 @@ right hand derivatives%
     see the proof of theorem~\ref{th:contarbfree} in the appendix on 
     page~\pageref{sec:appendix_absence} why this is the natural definition
     when working with distributions.}.
-Next, we state a theorem that formulates a list of shape requirements on a surface, which guarantee to yield an arbitrage free call price surface in the sense of Definition \ref{def:arbfreecall}.
+Next, we state a theorem that formulates a list of shape requirements on a surface, which guarantee to yield an arbitrage free call price surface in the sense of definition \ref{def:arbfreecall}.
 \begin{theorem}\label{th:contarbfree}
     A~call price surface $C:[0,\infty)^2 \rightarrow [0,\infty)$ \emph{arbitrage-free} iff
     \begin{enumerate}
@@ -948,7 +948,7 @@ The function $\bar C(T,K)$ is then arbitrage-free.
         \bar C_j(K) =
              \sum_{i=1}^{N} p_j^i\, (K^i-K)^+ \label{eq:hatCputs} \ .
     \end{equation}
-    with the market martingale density~$p$as
+    with the market martingale density~$p$ as
     defined in~\eqref{def:p}.
 \end{proposition}
 \begin{proof}
@@ -1017,17 +1017,17 @@ The density $p(T,K)$ for the full surface can only have mass in $(T,K^i)$.
 
 In most practical applications we aim to have a smooth representation of call price surfaces which allows pricing any option at any strike and expiry. Linear interpolation
 might be mathematically valid, but it is also extreme: indeed, linear interpolation of a set of arbitrage-free market prices provides "the most expensive interpolation scheme
-available"~\cite{buehler2006expensive}. That means it is not helpful for inferring insights on values of options between quoted strikes and expiries. From a practical perspective a relatively sparse linear interpolator does not allow easily the use of continuous state methods, chiefly Dupire's famous local volatility~\cite{dupire1994pricing},
+available"~\cite{buehler2006expensive}. That means it is not helpful for inferring insights on values of options between quoted strikes and expiries. From a practical perspective a relatively sparse linear interpolator does not lend itself well to the use of continuous state methods, chiefly Dupire's famous local volatility~\cite{dupire1994pricing},
 given on a smooth grid as
 $$
     \sigma(T,K)^2 := 2 \frac{ \partial_T C(T,K) }{ K^2 \partial_{KK} C(T,K) dT } \ .
 $$
-Indeed, in~\cite{DLV} we presented with ``discrete local volatilities" an alternative
-to Dupire's local volatility which works with large time steps and discrete market data.
+(In~\cite{DLV} we presented with ``discrete local volatilities" an alternative
+to Dupire's local volatility which works with large time steps and discrete market data.)
  
 We now present an alternative to interpolate a set of arbitrage-free market call prices with smooth functions such that the resulting surface is itself also smooth.
 We start with the following reference model which performs surprisingly well
-despite its simplicity. We managed it to a wide range of SPX market data.
+despite its simplicity. We managed to fit it to a wide range of SPX market data.
 Section~\ref{sec:implementation} on page~\pageref{sec:implementation} 
 discussess implementation.
 
@@ -1038,14 +1038,14 @@ discussess implementation.
     \begin{equation}\label{eq:CasSumC}
         \hat C_j(K) := \sum_{i=1}^{N} q_j^i\ \E[ ( K^i Y_j - K )^+ ] \ .        
     \end{equation}
-    Moreover, define using~\eqref{eq:intT}
+    Using~\eqref{eq:intT} let
     $$
         \hat C(T,K) := \alpha_j(T) \hat C_{j+1}(K) + (1-\alpha_j(T)) \hat C_j(K) \ .
     $$
     Then $\hat C$ is a smooth call price function.
     
     \noindent 
-    Moreover, if~$q=p$, then $\hat C_j \geq \bar C_j$ with equality for $Y=1$, i.e.~$\hat C$ 
+    Moreover, if~$q=p$, then $\hat C_j \geq \bar C_j$ with equality if $Y=1$. In this case~$\hat C$ 
         reduces to linear interpolation.
 \end{theorem}
 \noindent
@@ -1058,7 +1058,7 @@ where $X\sim q$.
 
 \begin{proof}[Proof of the theorem]
 Strictly speaking~\eqref{eq:Zmart} is sufficient to prove that 
-$\hat C$ is arbitrage-free. For clairty with still provide a brief proof:
+$\hat C$ is arbitrage-free. For clarity with still provide a brief proof:
     \begin{enumerate}
         \item $\hat C_j(0) = \sum_i q_j^i\, K^i \E[ Y_j ] = 1$ because $q_j$ and $Y_j$ has unit mean.
         \item $\partial_K \hat C_j(0)= - \sum_i q_j^i\, \P[ K^iY_j > 0 ] = -1$ because $Y_j>0$ and~$m_j$ has unit mean.
