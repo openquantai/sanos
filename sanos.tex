@@ -197,7 +197,7 @@
 % University of Oxford, Vector Institute
 % }
 
-\date{January 14th, 2026}
+\date{Feburary 21st, 2026{\small \\First version January 14th, 2006}}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{document}
@@ -216,14 +216,14 @@
     The method can be viewed as a smooth generalization of the widely-known linear interpolation scheme, 
     and retains the simplicity and transparency of that baseline.
 
-Call option prices for arbitrary strikes $K$ and some expiry $T_j$ are represented as convex combinations of Black--Scholes call payoffs anchored at quoted strikes $K^i$ with variances~$V_j$ 
+Call option prices for arbitrary strikes $K$ and some expiry $T_j$ are represented as convex combinations of Black--Scholes call payoffs anchored at strikes $K^i_j$ with variances~$V_j$ 
 with weights~$q_j$\vspace{-0.3cm}
 $$
-\vspace{-0.1cm}\hat C(T_j,K)=\sum_{i=0}^{N} q_j^i\,\mathrm{Call}(K^i,K,V_j).\vspace{-0.05cm}
+\vspace{-0.1cm}\hat C(T_j,K)=\sum_{i=0}^{N_j} q_j^i\,\mathrm{Call}(K^i_j,K,V_j).\vspace{-0.05cm}
 $$ 
 which are free of arbitrage across time and strike. This is extended to the full model $\hat C(T,K)$ to include arbitrary non-quoted expiries. The~$q_j$'s are shown  to have a natural interpretation as discrete space transition densities.
 
-Calibration of the model to observed market quotes is formulated as a linear program, allowing bid--ask spreads to be incorporated directly via linear penalties or inequalities, and delivering materially lower computational cost than most of the currently available implied-volatility surface fitting routines.
+Calibration of the model to observed market quotes on different expiries and strikes than those supporting the model is formulated as a linear program, allowing bid--ask spreads to be incorporated directly via linear penalties or inequalities, and delivering materially lower computational cost than most of the currently available implied-volatility surface fitting routines.
 
 As a further contribution, we derive an equivalent parameterization of the proposed surface in terms of strictly positive “discrete local volatility” \cite{DLV} variables. This yields, to our knowledge, the first construction of smooth, strictly arbitrage-free option price surfaces while requiring only trivial parameter constraints (positivity). We illustrate the approach using S\&P\,500 index options.
 \end{abstract}
@@ -261,9 +261,10 @@ Calibration of the model to observed market quotes is formulated as a linear pro
 
 
 
-This article tackles the problem of fitting a discrete set of observed European option bid-ask prices efficiently and develops  a \textit{non-parametric, strictly arbitrage-free,  smooth surface} representation of option prices to model prices for a full continuous range of strikes and maturities beyond the observed market quotes. We also present a version of our model which requires only positivity of the input parameters,
-making our model the first known smooth strictly arbitrage-free model whose parameters are subject to only trivial constraints. As long as bid/ask spreads of option prices
-are not zero, we can always find a version of our model which fits the market.\\
+This article tackles the problem of fitting a discrete set of observed European option bid-ask prices efficiently and develops  a \textit{smooth, strictly arbitrage-free, non-parametric surface} representation of option prices to model prices for a full continuous range of strikes and maturities beyond the observed market quotes. As long as bid/ask spreads of option prices
+are not zero, and if the market is free of arbitrage, we can always find a version of our model which fits the market.
+We also present a version of our model which requires only positivity of the input parameters,
+making our model the first known smooth strictly arbitrage-free model whose parameters are subject to only trivial constraints. \\
 
 %On this subject, a~picture speaks more than a 1000~words: Figure~\ref{fig:initialexample} shows the examples of fitting our model to SPX index options ith a fairly trivial non-optimized implementation of our model. Execution time for a global linear programming fit to all options across all expiries is negligible.
 Figure~\ref{fig:initialexample} makes the strength of the calibration immediately apparent. In a way, these plots speak more than a 1000~words: Across the full range of strikes and maturities shown, the model curves closely track the observed S\&P\,500 option data, with deviations that are difficult to discern at the scale of the plots and no evident systematic bias in any particular region of the surface. Notably, this high-quality fit is achieved with negligible runtime—solving a single global linear program over the full cross-section of options across all expiries completes essentially instantaneously.
@@ -285,27 +286,52 @@ Figure~\ref{fig:initialexample} makes the strength of the calibration immediatel
     \label{fig:initialexample}
 \end{figure}
 
-A convenient feature of our model is that it strictly arbitrage-free and does not require any of the compromises in fit and arbitrage that other currently available approaches rely on: such as Lagrange multipliers, penalties, or reliance on ``observations in experiments". Moreover,
+A convenient feature of our model is that it strictly arbitrage-free and does not require any of the compromises between fitting and avoiding arbitrage that other currently available approaches rely on: such as Lagrange multipliers, penalties, or reliance on ``observations in experiments''. Moreover,
 its implementation is simple and fast enough to be used in high speed trading environments or
 as part of machine learning models
 trained using gradient descent or other heavy numerical methods.
 
-Our approach boils down to writing
-$$
-    \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big(K^i,K,V_j \big) \ .
-$$
+Our proposed production variant boils down to writing
+\begin{equation}\label{eq:intromodel}
+    \hat C(T_j,K) := \sum_{i=0}^{N_j} q^i_j\, \mathrm{Call}\big(K^i_j,K,V_j \big) \ .
+\end{equation}
 in terms of martingale densities~$q_1,\ldots,q_M$ for expiries~$T_1<\cdots<T_M$
-defined for homogeneous strikes $K_1<\cdots<K_N$ and log-normal variances $V_1<\cdots<V_M$. Here, $\mathrm{Call}(s,k,v)$ is the Black-Scholes call price function 
+defined for strikes $K^1_j<\cdots<K^{N_j}_j$ and log-normal variances $0<V_1<\cdots<V_M$. Here, $\mathrm{Call}(s,k,v)$ is the Black-Scholes call price function 
 for spot~$s$, strike~$k$ and variance~$v$. We find the densities~$q_1,\ldots,q_M$ to match the market
-bid/ask by linear programming.
-The method enforces absence of arbitrage in both time and strike space; that means extending our
-model for call options for arbitrary expiries trivally amounts to specifying
-an increasing interpolation function~$\alpha$ such that
+bid/ask using linear programming.
+
+The method enforces absence of arbitrage in both time and strike space for the marginals~$\hat C(T_k,\cdot)$. 
+In order to retain the linear structure of our approach with respect to~$q$ we postulate that the model price for an arbitrary expiry~$T\in (T_{j-1},T_j]$
+and strike~$K$ can be written in terms of some increasing weight function $\alpha_j(T) \in [0,1]$ as
+\begin{equation}\label{eq:intro_full_C}
+    \hat C(T, K) := \left\{
+            \begin{array}{rl}
+               \alpha_j(T) & \sum_{i=1}^{N_j} {\color{pinegreen} q_j^i} \mathrm{Call}\!\left( K^i_j,  K, {\color{pinegreen} V(T) } \right)  \\
+        + (1 - \alpha_j(T)) & \sum_{i=1}^{N_{j-1}} {\color{pinegreen}q_{j-1}^i } \mathrm{Call}\!\left( K^i_{j-1}, K, {\color{pinegreen}V(T)} \right) 
+        \end{array}
+        \right.
+\end{equation}
+where we use the interpolated
 $$
-    \hat C(T,K) := \alpha_j(T)  \hat C(T_{j+1},K) + (1-\alpha_j(T))  \hat C(T_j,K) \ .
+    V(T) := \alpha_j(T) V_j + (1-\alpha_j(T)) V_{j-1} \ .
 $$
+Here $\alpha_j(T)\in[0,1]$ is an increasing function with $\alpha_j(T_{j-1})=0$ and $\alpha_j(T_j)=1$
+such as the linear
+$$
+    \alpha_j(T) := \frac{ ( T\wedge T_j - T_{j-1} )^+ }{ T_j - T_{j-1} } 
+$$
+In  practice a first order smooth monotone spline is preferable. (In the above $N_0=1$, $q_0^1:=1$ and $K^1_1:=1$.)
+
+\subsubsection*{Fitting to Market Data}
+
+Assume now our market has expiries $0=\tau_0<\cdots<\tau_m$ with market strikes $k^i_\ell$ for $\ell=1,\ldots,m$
+and $i=1,\ldots,n_\ell$.
+The model price~$\hat C(\tau_\ell, k^i_\ell)$ for each $k^i_\ell$ with $\tau_\ell\in (T_{j-1}, T_j]$ given in~\eqref{eq:intro_full_C} is linear in the variables~$q$, hence we can fit $q$ to market bid/ask prices by linear/convex programming provided our objective is linear/convex. This is discussed in 
+section~\ref{sec:PROD} on implementation on page~\pageref{sec:PROD}.
+
 Our model fits market data surprisingly well and is by construction strictly free of arbitrage and smooth. Our model has a simple interpretation as a discrete jump process multiplied
-by an underlying martingale process.\\
+by an underlying martingale process.
+
 
 \removeblock{
 With this model we provide a very efficient solution to the challenge posed in~\cite{gatheral2014arbitrage}:
@@ -319,7 +345,8 @@ In particular, even when an implied-volatility surface is arbitrage-free in the 
 In addition to our production model, we also present extensions to other underlying processes than Black-Scholes, and generalize our approach to a theoretically more
 appealing model  which allows specification of different variance curves~$V^i_j$
 per strike. While this model is theoretically more attractive its calibration is much heavier
-and its therefore of perhaps academic interest.
+and its therefore perhaps of more academic interest.
+
 
 \subsubsection*{Accessible Parametrization}
 
@@ -554,11 +581,11 @@ diffusion which mimics the marginal distributions generated by Gaussian mixture 
 The central difference, apart from the difference in focus, of these works to ours is that in \cite{mixedBrigo00,mixedBrigo02} the mixing is performed with fixed weights over time over a number of processes which all start at the same point; while our solution works by jumps from one underlying stock price to another:
 The latter difference can be stated more explicitly, in our work as
     $$
-        \hat C(T_j,K) := \sum_{i=0}^N q^i_j\, \mathrm{Call}\big({\color{pinegreen} K^i},K,V_j\big) 
+        \hat C(T_j,K) := \sum_{i=0}^{N_j} q^i_j\, \mathrm{Call}\big({\color{pinegreen} K^i_j},K,V_j\big) 
     $$
 where we used $S_0=1$ for spot and variances~$V_j$. Mixture models on the other hand implement
     $$
-        \sum_{i=0}^N q^i_j\, \mathrm{Call}\big({\color{pinegreen} 1},K,V_j\big) \ . 
+        \sum_{i=0}^{N_j} q^i_j\, \mathrm{Call}\big({\color{pinegreen} 1},K,V_j\big) \ . 
     $$
 The effect is that we can impose much stronger skew via the weighting functions~$q_j$, at the cost
 of needing to limit the weights~$q_j$ to densities with unit mean. As a result, we are
@@ -615,7 +642,6 @@ strict absence of arbitrage.\\
     \caption{Comparison of option surface construction methods.}
     \label{tab:placeholder}
 \end{table}
-
 
 \subsubsection*{American Options}
     In this article we focus on European options which are quoted for futures and indices. Options on single underlyings
@@ -742,14 +768,14 @@ A~full proof is delegated to the appendix page~\pageref{sec:appendix_absence}ff.
 \begin{remark}
 To ensure positivity, we have imposed condition~\textit{\ref{it:caf_C1m1}.}
 rather than the commonly used  weaker condition $\partial_K C(T,0)\geq -1$.\footnote{
-            For fixed $T$ and $K>0$, %the map $K\mapsto (Z_T-K)^+$ is a.e.\ differentiable with $\frac{\partial}{\partial K}(Z_T-K)^+ =-\mathbf{1}_{\{Z_T>K\}}.$
+            For fixed $T$ and $K>0$, %the map $K\mapsto (X_T-K)^+$ is a.e.\ differentiable with $\frac{\partial}{\partial K}(X_T-K)^+ =-\mathbf{1}_{\{X_T>K\}}.$
             %Then for $K>0$ 
             we have, $ \partial_K C(T,K)
-                =\E\!\left[\partial_K(Z_T-K)^+\right]
-                =-\P(Z_T>K).$
+                =\E\!\left[\partial_K(X_T-K)^+\right]
+                =-\P(X_T>K).$
             Taking the right-limit as $K\downarrow 0$ yields $\partial_K C(T,0)
-                =-\P(Z_T>0)
-                =-(1-\P(Z_T=0)).$}
+                =-\P(X_T>0)
+                =-(1-\P(X_T=0)).$}
  This requirement is justified as we consider an asset reaching  zero
 outside a~default event undesirable, and point to~\cite{BuehlerVolAndDivs} on how to incorporate ``sudden" default risk in our framework.
 \end{remark}
@@ -775,107 +801,120 @@ outside a~default event undesirable, and point to~\cite{BuehlerVolAndDivs} on ho
 
 
 
-\subsection{Discrete Market Data}
+\subsection{Discrete Martingales}
+
 
 In this section we recall results from~\cite{DLV} which we also use to
-fix notation and ideas for the remainder of the paper. 
+fix notation and ideas for the remainder of the paper.  The purpose of this section is to anchor our
+model in its non-smooth limit of linear interpolation between model prices.
 
-Assume now we are given a homogeneous grid of strikes $0=K^0<K^1<\cdots<1<\cdots<K^N$ and expiries $0=T_0<T_1<\cdots<T_M$ with market call prices $C^0_0,\ldots,C_M^{N}$
-where $C_j^i$ denotes the price of the call expiring in $T_j$ with strike $K^i$. 
-Define for $i=0, \ldots, N-1$
+Assume therefore for now we are given expiries $0=T_0<T_1<\cdots<T_M$ each with $N_j$ strikes
+ $0=K^0_j<K^1_j<\cdots<1<\cdots<K^{N_j}_j$ and call prices $C^0_j,\ldots,C^{N_j}_j$
+where $C_j^i$ denotes the price of the call expiring in $T_j$ with strike $K^i_j$. We also assume w.l.g.~(see remark~\ref{rem:extendstrikes}) that the boundary strikes $K^1_j\equiv K^{\min}$ and $K^{N_j}_j\equiv K^{\max}$ are
+all the same.
+Define for $i=0, \ldots, N_j-1$
 \begin{equation}\label{def:dC}
-    dC^i_j := \frac{ C^{i+1}_j - C_j^i }{ K^{i+1}_j - K_j^i }  
+    dC^i_j := \frac{ C^{i+1}_j - C_j^i }{ K^{i+1}_j - K^i_j }  
 \end{equation}
-and set $dC_j^{N}:=0$.
-\begin{theorem}
-    A market of call prices $C_j^i$ is arbitrage-free in the sense that 
-    there exists a positive (discrete state) martingale~$Z$ with unit expectation which satisfies
-    $C^i_j=\E_\P[(Z_{T_j}-K^i)^+]$
-    iff
+and set $dC_j^{N_j}:=0$. We wish to understand when this set of market data is ``arbitrage-free'':
+\begin{theorem}\label{th:noarb}
+    A market of call prices $C_j^i$ is \emph{arbitrage-free} in the sense that 
+    there exists a positive (discrete state) martingale~$X$ with unit expectation which satisfies
+    $C^i_j=\E_\P[(X_{T_j}-K^i_j)^+]$
+    if
     \begin{enumerate}
     		\item the market has unit expectation: $C_j^{0}=1$;
-    		\item zero is unattainable: $dC_j^{0}=-1$ which with the above and \eqref{def:dC} implies $C^1_j=1-K^1$;\footnote{%\paragraph{Why $dC_j^{0}=-1$ implies $C_j^{1}=1-K^{1}$.}
+    		\item zero is unattainable: $dC_j^{0}=-1$ which with the above and \eqref{def:dC} implies $C^1_j=1-K^{\min}$;\footnote{
 Equation \eqref{def:dC} (for $i=0$), and  condition $dC^0_j=-1$ gives
 $
-    (C^{1}_j - C^{0}_j)/(K^{1}-K^{0})=-1
+    (C^{1}_j - C^{0}_j)/(K^{1}_j-K_j^{0})=-1
 $,
 hence 
-$C^{1}_j = C^{0}_j - (K^{1}-K^{0}).$
-Using  $C^{0}_j=1$ (condition~1.), and the fact that $K^{0}=0$, gives
-$C^{1}_j = 1 - (K^{1}-0)=1-K^{1}.$
+$C^{1}_j = C^{0}_j - (K_j^{1}-K_j^{0}).$
+Using  $C^{0}_j=1$ (condition~1.), and the fact that $K_j^{0}=0$, gives
+$C^{1}_j = 1 - (K_j^{1}-0)=1-K_j^{1}.$
 }
-        \item call prices ultimately reach zero: $C_j^{N}=0$;
-        \item call prices are convex: $ dC^i_j \leq dC^{i+1}_j$; and
-        \item call prices are increasing in time, $C_j^i \leq C_{j+1}^i$.
+        \item call prices ultimately reach zero: $C_j^{N_j}=0$;
+        \item call prices are convex: $ dC^i_j \leq dC^{i+1}_j$; and\label{item:distimedc}
+        \item call prices are increasing in time when linearly interpolated in the following sense:
+          for $K^i_{j+1} \in [ K_j^\ell, K_j^{\ell+1})$ we have
+          \begin{equation}\label{eq:arbfreeinT}              
+                 C_j^\ell \frac{K_j^{\ell+1} - K_{j+1}^i}{K_j^{\ell+1} - K_j^\ell}
+                 +
+                 C_j^{\ell+1} \frac{K_{j+1}^i - K_j^{\ell} }{K_j^{\ell+1} - K_j^\ell}                 
+                 \leq
+                 C_{j+1}^i \ .
+          \end{equation}
+          If the strikes are homogeneous across expiries this reduces to
+          the simpler
+          $$
+            dC^i_j \leq dC^i_{j+1} \ .
+          $$
+          
+
+        
     \end{enumerate}
     As a consequence we also have
     \begin{enumerate}\setcounter{enumi}{5}
-        \item $C_j^i \geq (1-K^i)^+$ and
+        \item $C_j^i \geq (1-K^i_j)^+$ and
         \item $dC_j^i\in [-1,0]$.
     \end{enumerate}
 \end{theorem}
 \noindent
-\begin{remark}
-We use homogeneous strikes across expiries here to avoid cluttering our discussion with more indices than necessary; however in section~\ref{sec:implementation}
-on implementation (and in our code) we allow for a different set of strikes per expiry.
-\end{remark}
 \begin{proof}
-See~\cite{DLV} for a constructive proof of the existance of a martingale $Z$ with these marginal distributions in the more general case of non-homogeneous grids.\footnote{
-    The main difference for non-homogeneous grids where the strikes differ per expriry is the condition
-    that call prices increase in time: for the non-homogeneous grid any call price $C_j^i=C(T_j,K^i)$
-    must exceed the linear interpolation of the call prices of the earlier expiry.
-} It is also shown there that the corresponding martingale~$Z$ only has mass in $K^1,\ldots,K^N$.
+See~\cite{DLV} theorems~3.1 and~3.2 and subsequent statements there for a constructive proof of the existence of a martingale $X$ with these marginal distributions in the  general case of non-homogeneous grids.
+ It is also shown there that the corresponding martingale~$X$ only has mass in $K^1_j,\ldots,K^{N_j}_j$.
 \end{proof}
 
-\begin{remark}
-A common practise\footnote{
-        A~viable strategy is as follows: first, to find~$K^0$ let $K^*_j$ be the strike where the intrinsic value intersects with the line from $(K^2,C^2_j)$ through $(K^1,C^1_j)$, 
-        i.e.~it satsifies $C^1_j+dC^1_j (K^*_j-K_1) = 1-K^*_j$.
+\begin{remark}\label{rem:extendstrikes}
+A common practice\footnote{
+        A~viable strategy is as follows: first, to find~$K^{\max}$ let $K^*_j$ be the strike where the intrinsic value intersects with the line from $(K^3_j,C^3_j)$ through $(K^2_j,C^2_j)$, 
+        i.e.~it satisfies $C^2_j+dC^2_j (K^*_j-K^3_j) = 1-K^*_j$.
          It is therefore the biggest strike we can insert with a call price equal to
-        intrinsic value such that the call price remain convex. Then set $K_0:=1/10 \min_j K^*_j$.
+        intrinsic value such that call prices remain convex. Then set $K^{\min} := 1/10 \min_j K^*_j$.
         
-        To determine $K^N$ find per expiry the strike $K^\#_j$ where the line from $(K^{N-2},C^{N-2}_j)$ through $(K^{N-2},C^{N-2}_j)$ intersects with zero, i.e.~$C^{N-1}_j + dC^{N-2} ( K^\#_j - K^{N-1}) = 0$.
-        Then define $K^N:=1.5 \max_j K^\#_j$.
+        To determine $K^{\max}$ find per expiry the strike $K^\#_j$ where the line from $(K^{N_j-2},C^{N_j-2}_j)$ through $(K^{N_j-1},C^{N_j-1}_j)$ intersects with zero, i.e.~$C^{N_j-1}_j + dC^{N_j-2}_j ( K^\#_j - K^{N_j-1}_j) = 0$.
+        Then define $K^{\max}:=1.5 \max_j K^\#_j$.
 } when working with real market data to satisfy the conditions on the strikes
-in the previous theorem is to consider actual market strikes $K^2<\cdots<1<\cdots<K^{N-1}$ with calls $C^i_j > (1-K^i)^+$ and $1>C^2_j>\cdots > C^{N-1}_j>0$
-which satisfy $-1 < dC^2_j \leq \cdots \leq dC_j^{N-2} < 0$,
+in the previous theorem is to first consider strikes $0\ll K^2_j<\cdots<1<\cdots<K_j^{N_j-1}$ with calls $C^i_j > (1-K_j^i)^+$ and $1>C^2_j>\cdots > C^{N_j-1}_j>0$
+which satisfy $-1 < dC^2_j \leq \cdots \leq dC_j^{N_j-1} < 0$,
 and then to insert the missing data as follows:
 \begin{enumerate}
-    \item $K^0:=0$ with $C^0_j:=1$;
-    \item $K^1\ll K^2$ with $C^1_j:=1-K^1$ such that $-1=dC^0_j < dC^1_j < dC^2_j$ for all $j$; and
-    \item $K^N\gg K^{N-1}$ with $C^N=0$ such that $dC^{N-2}_j < dC_j^{N-1} < dC_j^N:=0$ for all $j$.
+    \item $K^0_j:=0$ with $C^0_j:=1$;
+    \item $K^1_j := K^{\min} \ll \min_j K^2_j$ with $C^1_j:=1-K^{\min}$ such that $-1=dC^0_j < dC^1_j < dC^2_j$ for all $j$;
+    \item $K^N_j :- K^{\max} \gg \max_j K^{N_j-1}_j$ with $C_j^{N_j}=0$ such that $dC^{N_j-2}_j < dC_j^{N_j-1} < 0$ for all $j$.
 \end{enumerate}
 \end{remark}
 
-Given a discrete state martingale~$Z$ as per above, let us denote with slight abuse
-of notation by $Z_j:=Z_{T_j}$
+Given a discrete state martingale~$X$ as per above, let us denote with slight abuse
+of notation by $X_j:=X_{T_j}$
 the corresponding discrete state and discrete time martingale Markov chain.
-Given strikes $K=(K^1,\ldots,K^N)'$ and a Markov chain $(Z_j)_{j=0,\ldots,M}$ with
-$\P(Z_j=K^i)=:p_j^i$, define the transition probabilities
-\[
-P_{j|j-1}^{i|\ell}:=\P\!\left[Z_j=K^i \mid Z_{j-1}=K^\ell\right], \qquad i,\ell\in\{1,\ldots,N\}.
-\]
-Let $P_{j|j-1}\in\R^{N\times N}$ denote the matrix with entries $(P_{j|j-1})_{i,\ell}=P_{j|j-1}^{i|\ell}$.
+Given strikes $K_j=(K^1_j,\ldots,K^{N_j}_j)'$ and a Markov chain $(X_j)_{j=0,\ldots,M}$ with
+$\P(X_j=K^i_j)=:p_j^i$, define the transition probabilities
+\begin{equation}\label{eq:transX}
+P_{j|j-1}^{i|\ell}:=\P\!\left[X_j=K^i_j \mid X_{j-1}=K^\ell_{j-1}\right], \qquad i=1,\ldots,N_j;\ \ell=1,\ldots,N_{j-1}.
+\end{equation}
+Let $P_{j|j-1}\in\R^{N_j\times N_{j-1}}$ denote the matrix with entries $(P_{j|j-1})_{i,\ell}=P_{j|j-1}^{i|\ell}$.
 (Thus columns correspond to the conditioning state $\ell$.)
 \begin{definition}[Martingale transition operator]\label{def:transiop}
-A matrix $P\in\R^{N\times N}$ is called a \emph{(discrete) martingale transition operator}
-with respect to strikes $K=(K^1,\ldots,K^N)'$ if
+A matrix $P\in\R^{N_j\times N_{j-1}}$ is called a \emph{(discrete) martingale transition operator}
+with respect to strikes $K_j$ and $K_{j-1}$ if
 \begin{enumerate}
     \item it is column-stochastic: $P\ge 0$ and $1' \cdot P=1'$;
-    \item it satisfies the martingale property: $K'\cdot P=K'$,
+    \item it satisfies the martingale property: $K_j'\cdot P=K_{j-1}'$,
 \end{enumerate}
 where we used ``$\cdot$'' to denote
 matrix/vector multiplications. Equivalently, for each conditioning index $\ell\in\{1,\ldots,N\}$, the above properties translate into 
 \[
-    \sum_{i=1}^N P^{i|\ell}=1,
+    \sum_{i=1}^{N_j} P^{i|\ell}=1,
     \qquad\text{and}\qquad
-    \sum_{i=1}^N K^{i}\,P^{i|\ell}=K^{\ell}.
+    \sum_{i=1}^{N_j} K^{i}_j\,P^{i|\ell}=K^{\ell}_{j-1}.
 \]
 \end{definition}
 \begin{definition}[Martingale Density]\label{def:martdens}
-    A~sequence $p=(p_j)_{j=1,\ldots,M}$ of densities $p_j\in \R^{N}_{\geq 0}$ defined over strikes $0<K^1,\ldots,K^N$ with unit mean is called a \emph{martingale density}
+    A~sequence $p=(p_j)_{j=0,\ldots,M}$ of densities $p_j\in \R^{N}_{\geq 0}$ each defined for expiries $0=T_0<\cdots<T_M$ over strikes $K_j$ with unit mean is called a \emph{martingale density}
     if there exist\footnote{
-         As pointed out in~\cite{buehler2006expensive} transition operators
+         As pointed out in~\cite{buehler2006expensive} discrete time transition operators
     are by no means unique for given marginal distributions.    
     } martingale transition operators $P_{j|j-1}\in\R^{N\times N}$  such that
     $$
@@ -883,8 +922,9 @@ matrix/vector multiplications. Equivalently, for each conditioning index $\ell\i
     $$
     written out as
     $$
-        p_j^{i_j} = \sum_{i_{j-1}=1}^{N} P_{j|j-1}^{i_j|i_{j-1}} p_{j-1}^{i_{j-1}} \ .
-    $$       
+        p_j^{i_j} = \sum_{i_{j-1}=1}^{N_{j-1}} P_{j|j-1}^{i_j|i_{j-1}} p_{j-1}^{i_{j-1}} \ .
+    $$     
+    (The initial density $p_0=(1)$ is trivially defined for $N_0=1$ and strike $K_0^1:=1$).
 \end{definition}
 
 \begin{remark}
@@ -892,8 +932,8 @@ matrix/vector multiplications. Equivalently, for each conditioning index $\ell\i
     \begin{equation}\label{def:p}
         p_j^i := dC_j^i - dC_j^{i-1} \geq 0 \ .
     \end{equation}
-    for $i=1,\ldots,N$
-    with $dC^i_j$ defined in~\eqref{def:dC}. Theorem~\ref{th:dlvtrs} on page~\pageref{th:dlvtrs} shows how to construct respective transition operators.   
+    for $i=1,\ldots,N_j$
+    with $dC^i_j$ defined in~\eqref{def:dC}. We also let $p_0^1:=1$. (Theorem~\ref{th:dlvtrs} on page~\pageref{th:dlvtrs} shows how to construct respective transition operators.   
 \end{remark}
 
 
@@ -904,43 +944,39 @@ We now recall the well-known result that linear interpolation in strike and expi
 \begin{definition}[Linear Interpolation]\label{th:linintp}
 The linear interpolator in strikes $K$ for expiry $T_j$ is
 $$
-    \bar C_j(K) := \sum_{i=0}^{N-1} \Big\{  dC^i_j ( \underbrace{ K-K^{i+1}) }_{\leq 0} + C^{i+1}_j \Big\}_{K^i\leq K<K^{i+1}} \ .
+    \bar C_j(K) := \sum_{i=0}^{N_j-1} \Big\{  dC^i_j ( \underbrace{ K-K_j^{i+1}) }_{\leq 0} + C^{i+1}_j \Big\}_{K_j^i\leq K<K_j^{i+1}} \ .
 $$
 with the trivial $\bar C_0(K):=(1-K)^+$. To interpolate in time without causing
 calendar arbitrage,
 any increasing interpolation along fixed strikes will be sufficient. Assume 
-therefore that ~$\alpha_j:[T_j,T_{j+1}]\rightarrow [0,1]$ defined for $T\in[T_j, T_{j+1})$   
+therefore that ~$\alpha_j:(T_{j-1},T_j]\rightarrow [0,1]$ 
 is increasing with
-with $\alpha_j(T_j)=0$ and $\alpha_j(T_{j+1})=1$. Then let
+with $\alpha_j(T_{j-1})=0$ and $\alpha_j(T_j)=1$. Then let
 \begin{equation}\label{eq:intT}
-    \bar C(T,K) := \bar C_{j+1}(K) \alpha_j(T) + (1-\alpha_j(T) ) \bar C_j(K) \ .
+    \bar C(T,K) := \bar C_j(K) \alpha_j(T) + (1-\alpha_j(T) ) \bar C_{j-1}(K) \ .
 \end{equation}
-The function $\bar C(T,K)$ is then arbitrage-free.
 \end{definition}   
 
  \begin{remark}
     A~naive choice for the time-interpolation functions~$\alpha_j$ is
     linear interpolation
     \begin{equation}\label{eq:linintp}
-         \alpha_j(T):= \frac{ T - T_j }{ T_{j+1} - T_j } \ .
+         \alpha_j(T):= \frac{ T\wedge T_j - T_{j-1} }{ T_j - T_{j-1} } \ .
     \end{equation}
-    A common alternative is to interpolate in implied Black-Scholes ATM variance.
+    A common alternative is to interpolate smoothly in implied Black-Scholes ATM variance.
     To this end let $W_j$ be the Black-Scholes implied variance for $C_j(1)$. 
-    For $T\in [T_j,T_{j+1})$ use for example linear interpolation
-            $$
-                W(T)=W_j + \frac{ W_{j+1} - W_j}{ T_{j+1}-T_j } ( T-T_j ) \ .
-            $$
-    		This yields the interpolation function
-            $$
-            \alpha_j(T) := \frac{ \mathrm{Call}\big(1, 1, W(T)\big) - C_j(1) }
-            { C_{j+1}(1) - C_j(1) } \ .
-            $$
-    Instead of piecewise linear interpolationa production setting would use a $C^1$ monotone spline~\cite{MonSpline} of ATM variances to increase smoothness.\footnote{Monotone splines are implemented in 
-    scipy's \texttt{PchipInterpolator}.
-    }
+    Define an increasing interpolation function $W(T)$ with $W(T_j)=W_j$
+    for example an interpolating monotone $C^1$ spline\footnote{Monotone splines are implemented in 
+    scipy's \texttt{PchipInterpolator}.} Then set
+    $$
+    \alpha_j(T) := \frac{ \mathrm{Call}\big(1, 1, W(T)\big) - C_{j-1}(1) }
+    { C_j(1) - C_{j-1}(1) } \1_{T\in(T_{j-1},T_j]} \ .
+    $$
     
 \end{remark}
 
+\noindent
+For simplicity we will continue refer to $\bar C$ as ``linear interpolation'' even if~$\alpha$ may not be linear.
 
 \begin{proposition}\label{prop:linintp}
     It holds that 
@@ -948,7 +984,7 @@ The function $\bar C(T,K)$ is then arbitrage-free.
         \bar C_j(K) =
              \sum_{i=1}^{N} p_j^i\, (K^i-K)^+ \label{eq:hatCputs} \ .
     \end{equation}
-    with the market martingale density~$p$ as
+    with the martingale density~$p$ as
     defined in~\eqref{def:p}.
 \end{proposition}
 \begin{proof}
@@ -957,31 +993,34 @@ $$
     C^{i+1}_j = 
     \left( C^{i+1}_j - C^{i+2}_j \right) + \left( C^{i+2}_j - C^{i+3}_j \right) + \cdots + \left( dC_j^{N-1} - dC_j^{N}\right)
     =   
-    \sum_{\ell=i+1}^{N-1} dC^\ell_j ( \underbrace{K^\ell - K^{\ell+1}}_{\leq 0} )
+    \sum_{\ell=i+1}^{N-1} dC^\ell_j ( \underbrace{K_j^\ell - K_j^{\ell+1}}_{\leq 0} )
 $$
 hence
 \begin{eqnarray}
     \bar C_j(K) & = & \nonumber
-    \sum_{i=0}^{N-1} \1_{K^i\leq K<K^{i+1}} \left\{
-    dC^i_j (  \underbrace{ K-K^{i+1} }_{\leq 0})  +
-        \sum_{\ell=i+1}^{N-1} dC^\ell_j ( \underbrace{K^\ell - K^{\ell+1}}_{\leq 0} ) \right\}\\
+    \sum_{i=0}^{N_j-1} \1_{K_j^i\leq K<K_j^{i+1}} \left\{
+    dC^i_j (  \underbrace{ K-K_j^{i+1} }_{\leq 0})  +
+        \sum_{\ell=i+1}^{N_j-1} dC^\ell_j ( \underbrace{K_j^\ell - K_j^{\ell+1}}_{\leq 0} ) \right\}\\
     & = &
-        \sum_{i=0}^{N-1} dC_j^i \Big( (K^i-K)^+ - (K^{i+1}-K)^+  \Big) \label{eq:hatCsumdC}\\
+        \sum_{i=0}^{N_j-1} dC_j^i \Big( (K_j^i-K)^+ - (K^{i+1}_j-K)^+  \Big) \label{eq:hatCsumdC}\\
     & = &
-        \underbrace{ dC^0_j (K^0 - K)^+ }_{=0}
+        \underbrace{ dC^0_j (K_j^0 - K)^+ }_{=0}
         -
-        dC^{N-1}_j (K^{N} - K)^+
+        dC^{N_j-1}_j (K_j^{N_j} - K)^+
         +
-        \sum_{i=1}^{N-1} \Big( \underbrace{ dC_j^i - dC_j^{i-1} }_{\geq 0} \Big) (K^i-K)^+ \nonumber
+        \sum_{i=1}^{N_j-1} \Big( \underbrace{ dC_j^i - dC_j^{i-1} }_{\geq 0} \Big) (K_j^i-K)^+ \nonumber
         \\
     & = & 
-        \sum_{i=1}^{N} \Big( \underbrace{ dC_j^i - dC_j^{i-1} }_{= p_j^i \geq 0} \Big) (K^i-K)^+  \ = \eqref{eq:hatCputs}  \  .
+        \sum_{i=1}^{N_j} \Big( \underbrace{ dC_j^i - dC_j^{i-1} }_{= p_j^i \geq 0} \Big) (K_j^i-K)^+  \ = \eqref{eq:hatCputs}  \  .
 \end{eqnarray}
-where we used that we had defined~$dC_j^{N}:=0$.
+where we used that we had defined~$dC_j^{N_j}:=0$.
 
 The fact that $p_j$ is non-negative and sums up to~1 is clear. To show that $p_j$ has unit expectation follows from $\bar C_j(0)=1$.
 \end{proof}
 \begin{proposition}
+    Assume the market is arbitrage-free in the sense of theorem~\ref{th:noarb}.
+    
+    Then, linear interpolation
     $\bar C$
     is arbitrage-free.
 \end{proposition}
@@ -992,17 +1031,17 @@ The fact that $p_j$ is non-negative and sums up to~1 is clear. To show that $p_j
 \item 
 Equation~\eqref{eq:hatCsumdC} shows
 $
-    \bar C_j(0) = \sum_{i=0}^{N-1} dC_j^i ( K^i - K^{i+1} ) = 0 - (-1) = 1 
+    \bar C_j(0) = \sum_{i=0}^{N-1} dC_j^i ( K^i_j - K^{i+1}_j ) = 0 - (-1) = 1 
 $.
 \item
-With $\partial K (K^i-K)^+|_{K=0} = \1_{K>K^0}$ we also see
+With $\partial K (K^i_j-K)^+|_{K=0} = \1_{K>K_j^0}$ we also see
 $
     \partial_K \bar C_j(K)|_{K=0} = dC^0_j = -1 
 $.
 \item 
-$\lim_{K\uparrow K} \bar C_j(K)=0$ is satisfied by constriction since $C_j(K^N)=0$.
+$\lim_{K\uparrow \infty} \bar C_j(K)=0$ is satisfied by constriction since $C_j(K^{N_j}_j)=0$.
 \item Equation~\eqref{eq:hatCputs} shows that $\bar C_j$ is convex.
-\item $\bar C$ is increasing in $T$ by construction~\eqref{eq:intT}. Note that a convex
+\item Considering~\eqref{eq:arbfreeinT} and~\eqref{eq:intT} $\bar C$ is increasing in $T$. Note that a convex
 combination of two convex functions remains convex.
 \end{enumerate}
 \end{proof}
@@ -1012,12 +1051,12 @@ combination of two convex functions remains convex.
 
 In this section we present the main results of this article: 
 While linear interpolation is a simple and powerful tool construct arbitrage-free call price surfaces, it essentially represents
-a state-discrete underlying process. Indeed, $\bar C$ is not smooth with $\partial_{KK} \bar C(T,K)=0$ for all $K\not\in \{K^1,\ldots,K^{N}\}$ or $T\not\in\{ T_1,\ldots,T_M \}$.
-The density $p(T,K)$ for the full surface can only have mass in $(T,K^i)$.
+a state-discrete underlying process. Indeed, $\bar C$ is not smooth with $\partial_{KK} \bar C(T,K)=0$ for all $K\not\in \{K^1_1,\ldots,K^{N_M}_M\}$ or $T\not\in\{ T_1,\ldots,T_M \}$.
+The density $p(T,K)$ for the full surface can only have mass in $(T,K^i_j)$.
 
 In most practical applications we aim to have a smooth representation of call price surfaces which allows pricing any option at any strike and expiry. Linear interpolation
-might be mathematically valid, but it is also extreme: indeed, linear interpolation of a set of arbitrage-free market prices provides "the most expensive interpolation scheme
-available"~\cite{buehler2006expensive}. That means it is not helpful for inferring insights on values of options between quoted strikes and expiries. From a practical perspective a relatively sparse linear interpolator does not lend itself well to the use of continuous state methods, chiefly Dupire's famous local volatility~\cite{dupire1994pricing},
+might be mathematically valid, but it is also extreme: indeed, linear interpolation of a set of arbitrage-free market prices provides ``the most expensive interpolation scheme
+available''~\cite{buehler2006expensive}. That means it is not helpful for inferring insights on values of options between quoted strikes and expiries. From a practical perspective a relatively sparse linear interpolator does not lend itself well to the use of continuous state methods, chiefly Dupire's famous local volatility~\cite{dupire1994pricing},
 given on a smooth grid as
 $$
     \sigma(T,K)^2 := 2 \frac{ \partial_T C(T,K) }{ K^2 \partial_{KK} C(T,K) dT } \ .
@@ -1029,61 +1068,71 @@ We now present an alternative to interpolate a set of arbitrage-free market call
 We start with the following reference model which performs surprisingly well
 despite its simplicity. We managed to fit it to a wide range of SPX market data.
 Section~\ref{sec:implementation} on page~\pageref{sec:implementation} 
-discussess implementation.
+discusses implementation.
 
 \begin{theorem}[Smooth Call Prices]\label{th:simplersmooth}
-    Let $Y=(Y_1,\ldots,Y_M)$ be a positive martingale with unit mean.
-    Let $q$ be a martingale density as defined in definition~\ref{def:martdens} 
+    Let $Y=(Y_t)_{t\geq 0}$ be a positive martingale with unit mean.
+    Set $Y_j:=Y_{T_j}$.
+    Let $q=(q_0,\ldots,q_M)$ be a martingale density as defined in definition~\ref{def:martdens} 
     and let
     \begin{equation}\label{eq:CasSumC}
         \hat C_j(K) := \sum_{i=1}^{N} q_j^i\ \E[ ( K^i Y_j - K )^+ ] \ .        
     \end{equation}
-    Using~\eqref{eq:intT} let
-    $$
-        \hat C(T,K) := \alpha_j(T) \hat C_{j+1}(K) + (1-\alpha_j(T)) \hat C_j(K) \ .
-    $$
+    Using a time-interpolation scheme~$\alpha$ such as~\eqref{eq:intT} we define call prices for expiries $T\in(T_{j-1},T_j]$
+    as
+    \begin{equation}\label{eq:alpha_prod}
+        \hat C(T,K) := \alpha_j(T) \sum_{i=1}^{N_j} q_j^i\ \E[ ( K^i_j Y_T - K )^+ ] + (1-\alpha_j(T)) \sum_{i=1}^{N_{j-1}} q_{j-1}^i\ \E[ ( K^i_{j-1} Y_T - K )^+ ] \ .
+    \end{equation}
+    For $T>T_M$ we extrapolate using $Y$:
+    \begin{equation}\label{eq:extra}
+        \hat C(T,K) := \sum_{i=1}^{N_M} q_j^i\ \E[ ( K^i_M Y_T - K )^+ ]  \ .
+    \end{equation}
+
+    
     Then $\hat C$ is a smooth call price function.
     
-    \noindent 
-    Moreover, if~$q=p$, then $\hat C_j \geq \bar C_j$ with equality if $Y=1$. In this case~$\hat C$ 
+    Moreover, if~$q=p$, then $\hat C_j \geq \bar C_j$ with equality if $Y\equiv 1$. In this case~$\hat C$ 
         reduces to linear interpolation.
 \end{theorem}
+
 \noindent
-The discrete-time martingale representation for~$\hat C$ is given by
+The discrete-time martingale representation for~$\hat C_0,\ldots,\hat C_M$ is given by
 \begin{equation}\label{eq:Zmart}
     Z_j := X_j Y_j     
 \end{equation}
 in the sense that $\E[ (Z_j-K)^+] = \hat C_j(K)$
-where $X\sim q$.
+where $X\sim q$ is the discrete state Markov martingale~\eqref{eq:transX}.
 
 \begin{proof}[Proof of the theorem]
 Strictly speaking~\eqref{eq:Zmart} is sufficient to prove that 
 $\hat C$ is arbitrage-free. For clarity with still provide a brief proof:
     \begin{enumerate}
-        \item $\hat C_j(0) = \sum_i q_j^i\, K^i \E[ Y_j ] = 1$ because $q_j$ and $Y_j$ has unit mean.
-        \item $\partial_K \hat C_j(0)= - \sum_i q_j^i\, \P[ K^iY_j > 0 ] = -1$ because $Y_j>0$ and~$m_j$ has unit mean.
+        \item $\hat C_j(0) = \sum_i q_j^i\, K^i_j \E[ Y_j ] = 1$ because $q_j$ and $Y_j$ has unit mean.
+        \item $\partial_K \hat C_j(0)= - \sum_i q_j^i\, \P[ K^i_j Y_j > 0 ] = -1$ because $Y_j>0$ and~$m_j$ has unit mean.
         \item $\lim_{K\uparrow \infty} \hat C_j(K) = 0$ because $\E[Y_j]=1$ and dominated convergence applies.
         \item $\partial_{KK} \hat C_j(K) > 0$ by construction for $K>0$.
         \item To show that call prices are increasing in time, consider
         \begin{eqnarray}
-             \sum_{i=1}^{N} q_{j+1}^i\, \E[ ( K^i Y_{j+1}- K )^+ ] \nonumber
+             \sum_{i=1}^{N_{j+1}} q_{j+1}^i\, \E[ ( K^i_{j+1} Y_{j+1}- K )^+ ] \nonumber
              & \supstack{(*)}\geq &
-             \sum_{i=1}^{N} q_{j+1}^i\, \E[ ( K^i Y_j - K )^+ ] \nonumber\\
+             \sum_{i=1}^{N_{j+1}} q_{j+1}^i\, \E[ ( K^i_{j+1} Y_j - K )^+ ] \nonumber\\
               & \supstack{d\P^Y := Y d\P}= &
-            \E^Y\left[  \sum_{i=1}^{N} q_{j+1}^i\, ( K^i  - K/Y_j  )^+ \right] \nonumber\\
+            \E^Y\left[  \sum_{i=1}^{N_{j+1}} q_{j+1}^i\, ( K^i_{j+1}  - K/Y_j  )^+ \right] \nonumber\\
              & \supstack{(**)}\geq&
-            \E^Y\left[  \sum_{i=1}^{N} q_j^i\,  ( K^i - K/Y_j  )^+ \right] \nonumber\\
+            \E^Y\left[  \sum_{i=1}^{N_j} q_j^i\,  ( K^i_j - K/Y_j  )^+ \right] \nonumber\\
              & =&
-             \sum_{i=1}^{N} q_j^i\, \E[ ( K^i Y_j - K )^+ ] \nonumber
+             \sum_{i=1}^{N_j} q_j^i\, \E[ ( K^i_j Y_j - K )^+ ] \nonumber
         \end{eqnarray}
         where $(*)$ follows because~$Y$ is a martingale, and $(**)$ follows as before because
-        $m$ is a martingale density which means, in particular,
+        $q$ is a martingale density which means, in particular,
         $$
-        \sum_{i=1}^{N+1} q_{j+1}^i\, ( K^i - K )^+ 
+        \sum_{i=1}^{N_{j+1}} q_{j+1}^i\, ( K^i_{j+1} - K )^+ 
         \geq
-             \sum_{i=1}^{N+1} q_j^i\, ( K^i - K )^+ 
+             \sum_{i=1}^{N_j} q_j^i\, ( K^i_j - K )^+ 
         $$
         for all $K$. Applying the linear expectation operator~$\E^Y[\cdot]$ preserves the inequality.
+
+        It is clear that monotonicity for arbitrary $T$ is preserved by our time-interpolation  scheme.
     \end{enumerate}
 \end{proof}
 \begin{remark}
@@ -1097,40 +1146,21 @@ as a background martingale.
 \end{remark}
 
 
-
 \subsection{Production Model}\label{sec:prod_model}
 
 For our proposed production model whose implementation we will discuss in section~\ref{sec:implementation}
-we propose a very simplistic structure which still fits market data remarkably well: To this end we notice that 
-    if $Y$ is log-normal with variances $0<V_1<\cdots<V_M$ then
-    we can write~\eqref{eq:CasSumC} as
-    \begin{equation}\label{eq:CasSumBSC}
-        \hat C_j(K) := \sum_{i=1}^{N} q_j^i\, \mathrm{Call}\big( K^i, K, V_j \big)
-    \end{equation}
-    where $\mathrm{Call}(s,k,v)$ denotes the Black-Scholes call price defined in~\eqref{eq:bsc} with spot $s$, strike~$k$ and variance~$v$.
-
-\begin{proposition}[Interpolation]\label{prop:fit}
-    For any arbitrage-free set of market mid prices with non-zero spread to ask prices there
-    exist a smooth representation~\eqref{eq:CasSumBSC} which is strictly arbitrage-free.
-\end{proposition}
-\begin{proof}
-This is a trivial consequence of the fact that 
-$$
-\sigma\rightarrow \hat C_j^{(\sigma)}(\cdot) := \sum_{i=1}^{N} p_j^i\, \mathrm{Call}\big( K^i, \cdot, \sigma^2 T_j \big)
-$$
-is a smooth map with $\hat C_j^{(\sigma)} \downarrow \bar C_j$ uniformly as~$\sigma\downarrow 0$.
-\end{proof}
-
-In practise that means that our production model is given the form
+we propose a very simplistic structure which still fits market data remarkably well: we will basically assume $Y$ is log-normal.
+Assume that $V_1<\cdots<V_M$ are ATM variances from the market for model expiries $0<T_1<\cdots<T_M$ and let $\eta\in[0,1)$ be a parameter which controls the smoothness
+of our model. Given model strikes $K^i_j$ our production model is then given as
 \begin{equation}\label{eq:prod_model}
-        \hat C_j(K) := \sum_{i=1}^{N} q_j^i\, \mathrm{Call}\big( K^i,\, K,\, \eta V_j \big)
+        \hat C_j(K) := \sum_{i=1}^{N_j} q_j^i\, \mathrm{Call}\big( K^i,\, K,\, \eta V_j \big)
 \end{equation}
-where~$\eta\in[0,1)$ controls the smoothness of our model and where~$0<V_1<\cdots<V_M$
-are input ATM variances from the market. e then solve for~$q$ to fit the model within market bid/ask prices globally (it is one fit across all expiries jointly, see section~\ref{sec:PROD}).
+We then solve for~$q$ to globally fit the model within market bid/ask prices for market expiries and strikes.
 
-Essentially~$\eta$ allows controlling the desired smoothness in~\eqref{prop:fit}: if it is set to zero, and if the market
-is arbitrage-free, then our model has a solution within bid/ask and will be equivalent to the linear model discussed in section~\ref{sec:lin_surface}.
-By increasing~$\eta$ we can then smoothen our fit. Figures~\ref{fig:example1DTE},~\ref{fig:example35DTE} and~\ref{fig:example1249DTE} illustrate three
+The parameter~$\eta$ allows controlling the desired smoothness of~\eqref{eq:prod_model}: if it is set to zero, 
+the model is equivalent to the linear model discussed in section~\ref{sec:lin_surface}.
+By increasing~$\eta$ we can then smoothen our model. In the extreme case $\eta=1$ the model can only fit ATM options.
+Figures~\ref{fig:example1DTE},~\ref{fig:example35DTE} and~\ref{fig:example1249DTE} illustrate three
 different cases of fits with $\eta=0$, $\eta=0.25^2\approx 0.06$ and~$\eta=0.5^2=0.25$. The latter is our recommended
 default setting.
 
@@ -1160,8 +1190,7 @@ default setting.
     \includegraphics[width=0.9\linewidth]{figs/linearvol_2023-07-18_dte-1249DTE.pdf}\\
     \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249DTE_eta-0.06.pdf}\\
     \includegraphics[width=0.9\linewidth]{figs/smoothvol_2023-07-18_dte-1249DTE_eta-0.25.pdf}
-    \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~1249 days to expiry. This expiry has sparse strikes which leads to 
-    the unnatural bump on the right wing for the linear model. This is rectified by the smoother model with~$\eta=0.25$.
+    \caption{Fit of our model with different smoothness parameters~$\eta$ to SPX options with~1249 days to expiry. 
     }
     \label{fig:example1249DTE}
 \end{figure}
@@ -1177,7 +1206,7 @@ default setting.
     In the log-normal case translates to using different variances
     per strike
     \begin{equation}\label{eq:inhC}
-        {\hat {\hat C}}_j(K)= \sum_{i=1}^{N} q_j^i\, \mathrm{Call}\big( K^i, K, V_j^i \big) \  .
+        {\hat {\hat C}}_j(K)= \sum_{i=1}^{N} q_j^i\, \mathrm{Call}\big( K^i, K, \eta V_j^i \big) \  .
     \end{equation}
     We have provided an implementation of this idea in our code base
     which uses for $V^i_j$ the market bid variance at strike~$K^i_j$
@@ -1228,7 +1257,9 @@ on discrete grids of strikes.
 With our approach here
 such generative model is now able to generate smooth arbitrage-free option surfaces.
 
-The following therom is from~\cite{DLV} with notations aligned:
+We start first with the case of homogeneous strikes $0=K^0<K^1<\cdots<1<\cdots<K^N$
+across expiries which is much simpler and an ingredient into the inhomogeneous case.
+This material is from~\cite{DLV} with notations aligned.
 
 \begin{theorem}[Transition Operators from Discrete Local Volatilities]\label{th:dlvtrs}
 Let~$\Sigma^i_j\geq 0$ for $i=2,\ldots,N-1$ and $j=1,\ldots,M$ be
@@ -1242,7 +1273,7 @@ and define
     w^{i\pm}_j := \frac12 (\Sigma^i_j K^i)^2 (T_j-T_{j-1})\ \gamma^{i\pm}_j 
 \end{equation}
 and $w^{1\pm}_j = w^{N\pm}_j : = 0$.
-The the inverse~$Q_{j|j-1}$ of the tri-band matrix
+Then the inverse~$Q_{j|j-1}$ of the tri-band matrix
 \begin{equation}\label{eq:implicit}
     Q^{-1}_{j|j-1} :=
     \left( 
@@ -1262,32 +1293,14 @@ The the inverse~$Q_{j|j-1}$ of the tri-band matrix
 \end{equation}
 is a martingale transition operator.
 
-Starting in~$q_0$ we then obtain the corresponding martingale densities
+Starting in~$q_0=(1)$ we then obtain the corresponding martingale densities
 $$
     q_j :=  Q_{j|j-1} \cdot q_{j-1} \ . 
 $$
-Moreover, the transition operator~$Q_{j|j-1}$ reproduces discrete input call prices
-$C^1_1,\ldots,C^N_M$ in the sense
-that $p_j = Q_{j|j-1} p_{j-1}$ iff we set
-    \begin{equation}\label{eq:dlv2}
-        \Sigma^i_j := \sqrt{ 2 \frac{  \Theta_j^i }{ K^i{}^2 \, \Gamma_j^i } }
-        \ \ \ \mbox{with}\ \ \
-        \Theta_j^i :=\frac{ C_j^i - C_{j-1}^i }{ T_j - T_{j-1}}
-        \ \ \ \mbox{and}\ \ \ 
-        \Gamma_j^i := \frac{ dC_j^i - dC_j^{i-1} }{ \frac12 (K^{i+1} - K^{i-1}) } 
-    \end{equation}
-    for $j=1,\ldots,M$ and $i=2,\ldots,N-1$ with $0/0:=0$.
-    In this case
-    \begin{equation}\label{eq:wself}
-        w^{i\pm}_j =  \frac{ C_j^i - C_{j-1}^i }{ p_j^i }  \bar \gamma^{i\pm}_j
-        \ \ \ \mbox{with} \ \ \
-        \bar \gamma^{i+}_j:=\frac1{K^{i+1}-K^i}
-        \ , \ \ \
-        \bar \gamma^{i-}_j:=\frac1{K^i-K^{i-1}} \ .
-    \end{equation}
 \end{theorem}
+
 \noindent
-We present the proofs to both statement in appendix~\ref{sec:appendix_DLV} on page~\pageref{sec:appendix_DLV}
+The proof is provided in appendix~\ref{sec:appendix_DLV} on page~\pageref{sec:appendix_DLV}.
 
 \begin{remark} The tri-band matrix $Q^{-1}_{j|j-1}$ can be written in terms of a vector
 $\Sigma_j=(0, \Sigma^2_j,\ldots, \Sigma^{N-1}_j, 0)$
@@ -1326,7 +1339,93 @@ $$
 $$
 \end{remark}
 
-Essentially the statement is that in order to simulate a smooth arbitrage-free
+We now expand our definition to inhomogeneous strikes. 
+Assume therefore we are given general strikes $0=K_0<K^{\min}=K^1_j<\cdots<1<\cdots<K^{N_j}_j=K^{\max}$
+    and discrete local volatilities $\Sigma_j=(\Sigma^2_j,\ldots,\Sigma^{N_j-1}_j)'$
+    which each imply a transition operator $Q_{j|j-1}\in\R^{N_j\times N_j}$, with the caveat that the latter is defined
+    to transition a density $\bar q_{j-1}$ defined over strikes $K_j$ into a density $q_j$, also
+    defined over $K_j$. However, the previous density $q_{j-1}$ is given over strikes $K_{j-1}$.
+We apply the idea from~\cite{DLV} to apply linear interpolation between expiries i.e.
+\begin{equation}\label{eq:barcintlp}
+    \bar C_{j-1}^\ell := \sum_{i=1}^{N_{j-1}} q_{j-1}^i ( K^i_{j-1} - K^\ell_j )^+    
+\end{equation}
+for $\ell=0,\ldots,N_j$. We note that $\bar C^{0}_{j-1} = 1$ and $\bar C^{N_j}_{j-1} = 0$. These call prices are arbitrage-free and imply a density
+\begin{eqnarray*}
+    \bar p^\ell_j & := &
+        \frac{ \bar C_{j-1}^{\ell+1} - \bar C_{j-1}^{\ell} }{ K^{\ell+1}_j - K^{\ell}_j }
+        - 
+        \frac{ \bar C_{j-1}^{\ell} - \bar C_{j-1}^{\ell-1} }{ K^{\ell}_j - K^{\ell-1}_j }
+        \\
+        &  = &
+        \sum_{i=1}^{N_{j-1}} q_{j-1}^i
+        \left( 
+        \frac{ ( K^i_{j-1} - K^{\ell+1}_j )^+ - ( K^i_{j-1} - K^\ell_j )^+ }{ K^{\ell+1}_j - K^{\ell}_j }
+        -
+        \frac{ ( K^i_{j-1} - K^{\ell}_j )^+ - ( K^i_{j-1} - K^{\ell-1}_j )^+ }{ K^{\ell}_j - K^{\ell-1}_j }
+        \right)
+\end{eqnarray*}
+for $\ell=1,\ldots,N_j$ where $K^{N_j+1} > K^{N_j}$ is arbitrary. The term on the right is $L^{\ell,i}_{j|j-1}$
+for $\ell=1,\ldots,N_j$ and $i=1,\ldots,N_{j-1}$. That means:
+
+\begin{theorem}\label{th:lintransition}
+    Assume that $q_{j-1}$ is a density over $K_j$ with unit mean.
+    Define the matrix $L_{j|j-1} \in \R^{N_j\times N_{j-1}}_{\geq0}$ with elements
+    \begin{equation}\label{eq:L}
+        L_{j|j-1}^{\ell,i} := 
+        \frac{ ( K^i_{j-1} - K^{\ell+1}_j )^+ - ( K^i_{j-1} - K^\ell_j )^+ }{ K^{\ell+1}_j - K^{\ell}_j }
+        -
+        \frac{ ( K^i_{j-1} - K^{\ell}_j )^+ - ( K^i_{j-1} - K^{\ell-1}_j )^+ }{ K^{\ell}_j - K^{\ell-1}_j }
+        \geq 0
+    \end{equation}
+    for $\ell=1,\ldots,N_j$ and $i=1,\ldots,N_{j-1}$.
+    Then
+    $$
+        \bar q_{j-1} = L_{j|j-1} q_{j-1} \in \R^{N_j} 
+    $$
+    is a density with unit mean over~$K_j$ where $\bar q_{j-1}$ represents the density
+    implied by linearly interpolated call prices computed using $p_{j-1}$ at strikes~$K_j$.
+    
+    Finally,
+    $$
+        K_j L_{j|j-1} = K_{j-1} \ .
+    $$
+\end{theorem}
+\noindent 
+The proof that $1L_{j|j-1}=1$ and $ K_j L_{j|j-1} = K_{j-1}$ is in the appendix.
+
+
+
+\begin{theorem}[Implied Discrete Local Volatilities]\label{th:dlvtoQ}
+Assume that the discrete call prices $C^i_j$ for $j=1,\ldots,M$ and $i=1,\ldots,N_j$
+are arbitrage-free and define
+    \begin{equation}\label{eq:dlv2}
+        \Sigma^i_j := \sqrt{ 2 \frac{  \Theta_j^i }{ K^i_j{}^2 \, \Gamma_j^i } }
+        \ \ \ \mbox{with}\ \ \
+        \Theta_j^i :=\frac{ C_j^i - \bar C_{j-1}^i }{ T_j - T_{j-1}}
+        \ \ \ \mbox{and}\ \ \ 
+        \Gamma_j^i := \frac{ dC_j^i - dC_j^{i-1} }{ \frac12 (K_j^{i+1} - K_j^{i-1}) } 
+    \end{equation}
+    for $j=1,\ldots,M$ and $i=2,\ldots,N_j-1$ with $0/0:=0$. Here, $\bar C_{j-1}^i$
+    is again given by linear interpolation of~$C_{j-1}$ as in~\eqref{eq:barcintlp}.
+    
+    In this case
+    \begin{equation}\label{eq:wself}
+        w^{i\pm}_j =  \frac{ C_j^i - \bar C_{j-1}^i }{ p_j^i }  \bar \gamma^{i\pm}_j
+        \ \ \ \mbox{with} \ \ \
+        \bar \gamma^{i+}_j:=\frac1{K_j^{i+1}-K_j^i}
+        \ , \ \ \
+        \bar \gamma^{i-}_j:=\frac1{K_j^i-K_j^{i-1}} \ .
+    \end{equation}
+Then, the transition operator~$Q_{j|j-1}$ reproduces discrete input call prices
+$C^1_1,\ldots,C^N_M$ in the sense
+that $p_j = Q_{j|j-1} \tilde p_{j-1}$.
+\end{theorem}
+\noindent
+The proof is also provided in appendix~\ref{sec:appendix_DLV} on page~\pageref{sec:appendix_DLV}.
+\\
+
+
+Essentially the statement of this section is that in order to simulate a smooth arbitrage-free
 option surface, fix (or also simulate) increasing $0<V_1<\cdots<V_M$ and
 a $(N-2)\times M$ grid of discrete non-negative local volatilities~$\Sigma^i_j$. They have
 the natural scale of annualized volatilities (indeed, as the grid density
@@ -1335,8 +1434,38 @@ local volatility). The only constraint on the discrete local volatilities
 is non-negativity, making them unique suitable for simulation and descriptive 
 statistics. This is subject to further work.
 
-See~\cite{DLV} for the case where the strikes are not homogeneous across
-expiries.
+\subsection{Smoothed Linear Interpolation within Bid/Ask}
+
+In most of this article balance of focus is towards smoothness vs perfection of fit.
+Indeed, the main purpose of our model is to ``fit'' a bigger number of market option prices with
+a smooth model with fewer model strikes and expiries.
+However, our approach can also be used for what we call ``smoothed linear interpolation'' within the bid/ask spread.
+
+For this application we assume the model expiries match market expiries and that our (inner) model strikes $K^2_1,\ldots,K_M^{N_M-1}$
+correspond to actual market strikes. Assume now that asks $A^i_j$ and bids $B^i_j$ for $j=1,\ldots,M$ and $i=2,\ldots,N_j-1$
+have a non-zero spread. Assume further there exist arbitrage-free prices $C^i_j$
+such that $B^i_j\leq C^i_j<A^i_j$ outside $i=0,1,N_j$. (We set $C^i_j:=(1-K^i_j)^+$ for $i=0,1,N_j$ in line with
+theorem~\ref{th:noarb}.) We may find $C$ using linear programming.
+Denote by $p$ the density implied by~$C$ via~\eqref{def:p}.
+
+Similar to our production model, let
+$$
+    \hat C_j^i(\theta) := \sum_{\ell=1}^{N_j} p_j^\ell \mathrm{Call}\!\left( K_j^\ell, K^i_j, \theta T \right) \ .
+$$
+\begin{proposition}[Smoothed Linear Interpolation within Bid/Ask]\label{prop:interpol}
+For all $\theta\geq 0$ we have $\hat C_i^\ell(\theta)\geq B_j^i$ for $i=2,\ldots,N_j-1$.
+
+Moreover 
+there exists a maximal $\theta^*>0$ such that $\hat C$ \emph{interpolates within bid/ask} in the sense that $B_j^i\leq \hat C_i^\ell(\theta^*)\leq A^i_j$
+for $i=2,\ldots,N_j-1$.
+\end{proposition}
+\begin{proof}
+This is a trivial consequence of the fact that 
+$
+\hat C_j^i(\theta) \downarrow C^i_j \geq B^i_j
+$
+smoothly as $\theta\downarrow 0$ for each pair $(j,i)$ with $i=2,\ldots,N_j-1$.
+\end{proof}
 
 
 \subsection{Generalization}\label{sec:genr}
@@ -1345,15 +1474,9 @@ The model~\eqref{eq:CasSumC} shines due to its simplicity. From a practical poin
 of view it is entirely sufficient for fitting observed market data within bid/ask
 spreads.
 
-
-
-
-
-
-
 For completeness we present now an extension which provides a more
 advanced version which features a martingale~$Y$ per strike. We focus on 
-a log-normal version for clarity, but other driving models~$Y$ can be utilized.
+a log-normal version for homogeneous strikes $0<K^1<\cdots<K^N$ for clarity, but other driving models~$Y$ can be utilized.
 We view this model primarily as a conceptual result; in practice the production model already captures observed surfaces to high accuracy.
 
 \begin{theorem}[Iterative Smooth Call Prices]\label{th:fullsmooth}
@@ -1449,7 +1572,6 @@ and correlated to~$X$). This idea can be trivially extended to processes with ju
 \end{remark}
 
 
-
 \section{Implementation}\label{sec:implementation}
 
 We now discuss the practical implementation of fitting our model variants to observed market data. We will start with the
@@ -1463,7 +1585,7 @@ the exact problem stated in theorem~\ref{th:simplersmooth}.
 In the the following section~\ref{sec:PROD} we present a more practical 
 approach which handles inhomogenous strikes etc.
 
-We will use~\eqref{eq:CasSumBSC}: to this end, assume that we have specified
+We will use~\eqref{eq:prod_model}: to this end, assume that we have specified
  Black-Scholes implied variances $V_j$ which are increasing in expiries, $V_j \geq V_{j-1}$ and let~$\eta\in[0,1)$ be a variance factor, e.g.~$\eta=0.25$.
 Define the matrix $\mathbf{C}_j\in \R^{ (N-2) \times N}$ for $j=1,\ldots,M$ as
 \begin{equation}\label{eq:Cdef}
@@ -1475,7 +1597,7 @@ $$
      \mathbf{U}^{\ell,i} := ( K^i - K^\ell )^+ \ .
 $$
 
-The candidate call prices based on $m$ for strikes $K$ at expiry $T_j$ are per~\eqref{eq:CasSumBSC} given in terms of a density~$q_j$ as
+The candidate call prices based on $m$ for strikes $K$ at expiry $T_j$ are per~\eqref{eq:prod_model} given in terms of a density~$q_j$ as
 $$
      \mathbf{c}_j := \mathbf{C}_j \cdot  q_j  \in \R^{N-2} 
 $$
@@ -1510,14 +1632,16 @@ Our example implementation we provided computes the tensor expressions in every 
 means the algorithm has quadratic execution time and is in its current form not suitable
 for production use.
 
-\subsection{Production Model}\label{sec:PROD}
+\subsection{Production Model for Imhomogenous Grids}\label{sec:PROD}
 
 In practise the strikes in the market are not constant in time, in particular not when normalized by the forward
 into "pure" strikes. When using real market data, it is also sometimes
 necessary to add additional strikes when market strikes are far away from each other
 (e.g.~after filtering by minimum quoted volumes). The code we used to test our
 model adds strikes whenever market strikes are further apart than some maximum~$dx$,
-and adds additional strikes outside the observed strike range.
+and adds additional strikes outside the observed strike range.\footnote{The function~\texttt{vec\_max\_dx} in \texttt{smoothvol.py}.}
+
+{\color{red} TODO: need to add time interpolation.}
 
 Therefore, assume first that we are given boundary strikes $0<K^{\min}<1<K^{\max}$ which lie
 outside any observed market prices. Assume further that we are given for every expiry~$j$:
@@ -1533,7 +1657,7 @@ outside any observed market prices. Assume further that we are given for every e
     the market strikes~$k_j$.
 
 \item 
-    \textbf{Weights} $w_j\in\R^{n_j}_{\geq 0}$ typically the inverse of the prevailing bid/ask spread
+    \textbf{Weights} $w_j\in\R^{n_j}_{\geq 0}$ typically the inverse of the prevailing bid/ask spread,  
     or the inverse of Vega to approximate a fit in implied volatilities.
 
 \item  
@@ -1583,18 +1707,12 @@ Our linear program then becomes:
 
 In order to ensure absence of arbitrage in time condition~$(*)$ must be
 satisfied with $\omega=0$ as this ensures that the discrete strike marginal
-densities constitute a martingale density.\footnote{
-    As explained in~\cite{DLV} for two densities $m_1$ and $m_2$ to be in convex
-    order of inhomogeneous strikes $K^i_j$ it is sufficient that
-    the call prices computed with $m_1$ for strikes $K_2$ are below
-    the call prices computed with $m_2$ for strikes $K_2$. This is because
-    using $m_2$ for computing call prices is akin to linear interpolation
-    which is such the "most expensive" interpolation, i.e.~gives the highest possible
-    call prices.}
-However, from a practical and numerical perspective it is more
+densities constitute a martingale density (see remark~\ref{rem:inhom_noarb}
+on page~\pageref{rem:inhom_noarb}).
+However, as noted in remark~\ref{rem:inhom_noarb} this is a sufficient but not necessary
+condition for absence of arbitrage. From a practical and numerical perspective it is also more
 natural to impose the price condition in observed price space, which
-is the case for~$w=1$.
-
+is the case for~$w=1$. However, this does then not guarantee strict absence of arbitrage.
 
 \begin{remark}[Bid/Ask Spreads]
     Actual markets do not have a mid-price to fit to; instead we observe bid $B_j^i$ and
@@ -1631,6 +1749,14 @@ is the case for~$w=1$.
         using weights~\eqref{eq:bidaskweight}.
         \end{enumerate}
     All of these fit into a linear or quadratic programming framework. 
+\end{remark}
+
+\begin{remark}
+    In our implementation we have assumed that model strikes are defined for all
+    market expiries. However, this is not necessary: as long as the $\alpha$
+    in our proposed time interpolation scheme~\eqref{eq:alpha_prod} is fixed 
+    the problem of fitting to market expiries other than model expiries remains
+    linear and can be solved with the same methods as above.
 \end{remark}
 
 
@@ -1734,6 +1860,9 @@ the $j$th expiry, $q_j\in [0,1]^{N_j}$.
     \right. \tag{GNR}
 \end{equation}
 
+\section{Further Applications}
+
+Thge S
 
 \section{Conclusion}
 
@@ -1882,13 +2011,13 @@ Finally,~$1' M = 1'$ implies~$1'  = 1' M^{-1}$, i.e.~the columns of~$M^{-1}$
 add up to~1, too. Similarly, if~$K' M = K'$, then~$K' = K' M^{-1}$.\
 \end{proof}
 
-\begin{proof}[Proof of theorem~\ref{th:dlvtrs}]
+\begin{proof}[Proof of theorem~\ref{th:dlvtrs} on page~\pageref{th:dlvtrs}]
 We show that~$Q_{j|j-1}$ defined in~\eqref{eq:implicit} on page~\pageref{eq:implicit}
 is indeed a transition operator.
 \begin{itemize}
     \item The inverse satisfies the conditions of theorem~\eqref{th:zmatrix} hence
     $Q_{j|j-1}$ is a transition matrix.
-    \item We now show $K'\cdot Q_{j|j-1}=K'$ by showing
+    \item We now show $K_j'\cdot Q_{j|j-1}=K_j'$ by showing
     $K'=K'\cdot Q_{j|j-1}^{-1}$. Let
     $$
         U^i_j := \frac{ (\Sigma_{i,j} K^i)^2 (T_j-T_{j-1})}{ K^{i+1} - K^{i-1} } \ .
@@ -1913,16 +2042,68 @@ is indeed a transition operator.
         K^i + 
          U^i_j \left(
          \frac{  K^i  - K^{i-1}}{ K^i - K^{i-1} }  +    
-         \frac{ K^i- K^{i+1} }{ K^{io+1}{} - K^i }          
-        \right) \\& = &  K^i \ .
+         \frac{ K^i- K^{i+1} }{ K^{i+1}{} - K^i }          
+        \right)\ = \  K^i \ .
     \end{eqnarray*}
 \end{itemize}
+\end{proof}
+
+\begin{proof}[Proof of theorem~\ref{th:lintransition} on page~\pageref{th:lintransition}]
+\begin{eqnarray}
+    1 L^{\cdot,i}_{j|j-1} & = &
+            \sum_{\ell=1}^{N_j} 
+        \left( 
+        \frac{ ( K^i_{j-1} - K^{\ell+1}_j )^+ - ( K^i_{j-1} - K^\ell_j )^+ }{ K^{\ell+1}_j - K^{\ell}_j }
+        -
+        \frac{ ( K^i_{j-1} - K^{\ell}_j )^+ - ( K^i_{j-1} - K^{\ell-1}_j )^+ }{ K^{\ell}_j - K^{\ell-1}_j }
+        \right)
+        \\
+        & = &
+        \frac{ ( K^i_{j-1} - K^{N_j+1}_j )^+ - ( K^i_{j-1} - K^{N_j}_j )^+ }{ K^{N_j+1}_j - K^{N_j}_j }
+        -
+        \frac{ ( K^i_{j-1} - K^1_j )^+ - ( K^i_{j-1} - K^0_j )^+ }{ K^1_j - K^0_j }
+        \\
+        & = &
+        0
+        -
+        \frac{ ( K^i_{j-1} - K^1_j )^+ - ( K^i_{j-1} - K^0_j )^+ }{ K^1_j - K^0_j } \ = \ 1 \ .
+\end{eqnarray}
+Define for each $K^i_{j-1}$ $l(i) := \min\{\ell=0,\ldots,N_j+1:\,K^i_{j-1} > K^\ell_j\}$
+where we added a fictitious $K^{N_j+1}_j\gg K^{N_j}_j$. Then
+\begin{eqnarray}
+    K_j L^{\cdot,i}_{j|j-1} & = &
+            \sum_{\ell=1}^{N_j} K_j^\ell
+        \left( 
+        \frac{ ( K^i_{j-1} - K^{\ell+1}_j )^+ - ( K^i_{j-1} - K^\ell_j )^+ }{ K^{\ell+1}_j - K^{\ell}_j }
+        -
+        \frac{ ( K^i_{j-1} - K^{\ell}_j )^+ - ( K^i_{j-1} - K^{\ell-1}_j )^+ }{ K^{\ell}_j - K^{\ell-1}_j }
+        \right)
+        \\
+        & = &
+            \sum_{\ell=0}^{N_j} ( K_j^\ell - K_j^{\ell+1} )  
+        \frac{ ( K^i_{j-1} - K^{\ell+1}_j )^+ - ( K^i_{j-1} - K^\ell_j )^+ }{ K^{\ell+1}_j - K^{\ell}_j }
+        \\
+        & = &
+            \sum_{\ell=0}^{N_j} 
+        ( K^i_{j-1} - K^\ell_j )^+ - ( K^i_{j-1} - K^{\ell+1}_j )^+ 
+        \\
+        & = &
+            \sum_{\ell=0}^{N_j} \1_{K^i_{j-1} \geq K^{\ell+1}_j } ( K^\ell_j - K^{\ell+1}_j ) 
+            +  \sum_{\ell=0}^{N_j}  \1_{K^{\ell}_j < K^i_{j-1} \leq K^{\ell+1}_j } ( K^i_{j-1}  - K^\ell_j  )
+        \\
+        & = &
+            K^{l(i)}_j
+            + ( K^i_{j-1}  - K^{l(i)}_j  )  \ = \ K^i_{j-1} \ .
+\end{eqnarray}
+\end{proof}
+
+\begin{proof}[Proof of theorem~\ref{th:dlvtoQ} on page~\pageref{th:dlvtoQ}]
 This next step is to show that a discrete local volatility as defined in~\eqref{eq:dlv2}
 reprices the input call prices. To do so
     we re-iterate the proof of section~4.3.2 in~\cite{DLV}
-    and show that with $\Sigma$ as defined above $ Q_{j|j-1}^{-1} p_j = p_{j-1}$. We first note that
+    and show that with $\Sigma$ as defined above $ Q_{j|j-1}^{-1} p_j = \bar p_{j-1}$. We first note that
     $$
-        \Sigma^2_{i,j} := \frac{2}{(K^i)^2} \left( \frac{ C_j^i - C_{j-1}^i }{ (T_j - T_{j-1}) } \right)/\left( \frac{ p^i_j}{ \frac12 (K^{i+1}-K^{i-1}) } \right)
+        \Sigma^2_{i,j} := \frac{2}{(K^i)^2} \left( \frac{ C_j^i - \bar C_{j-1}^i }{ T_j - T_{j-1} } \right)/\left( \frac{ p^i_j}{ \frac12 (K^{i+1}_j-K_j^{i-1}) } \right)
     $$
     hence $w$ defined in~\eqref{eq:wDLV} can be written as~\eqref{eq:wself}.
     For $i\in\{2,\ldots,N-1\}$ we therefore get
@@ -1936,13 +2117,13 @@ reprices the input call prices. To do so
              p_j^{i+1}  w^{(i+1)-}_j
        \\ & = 
             p^i_j
-            - ( C_j^{i-1} - C_{j-1}^{i-1} )  \bar \gamma^{(i-1)+}_j
+            - ( C_j^{i-1} - \bar C_{j-1}^{i-1} )  \bar \gamma^{(i-1)+}_j
             +
-            ( C_j^{i} - C_{j-1}^{i} ) (\bar \gamma^{i-}_j + \bar \gamma^{i+}_j)
+            ( C_j^{i} - \bar C_{j-1}^{i} ) (\bar \gamma^{i-}_j + \bar \gamma^{i+}_j)
             -
-            ( C_j^{i+1} - C_{j-1}^{i+1} ) \bar \gamma^{(i+1)-}_j
+            ( C_j^{i+1} - \bar C_{j-1}^{i+1} ) \bar \gamma^{(i+1)-}_j
         \ 
-        \\ & \supstack{(*)} =  p_{j-1} \ .
+        \\ & \supstack{(*)} =\bar   p_{j-1} \ .
     \end{align*}
     The last equation~$(*)$ follows from
     \begin{align*}
@@ -1958,20 +2139,20 @@ reprices the input call prices. To do so
        dC^{i+1}_j
         - dC^{i}_j \\&=  p^i_j \ .
     \end{align*}
-    For $i=1$ recall that $p^1_j = \frac{ C^2_j-C^1 }{ K_2 - K_1 }$ with $C^1=1-K^1$
+    For $i=1$ recall that $p^1_j = \frac{ C^2_j-C^1_j }{ K^2_j - K^1_j }$ with $C^1_j=1-K_j^1$
     hence
    $$
             ( Q_{j|j-1}^{-1} \cdot p_j  )^1
-            = p_j^1 - \left( C^2_j - C^2_{j-1} \right)\frac1{ K^2-K^1 } 
-            = \frac{ C^2_j-C^1 }{ K_2 - K_1 }- \left( C^2_j - C^2_{j-1} \right)\frac1{ K^2-K^1 } = p^1_{j-1} \ .
+            = p_j^1 - \left( C^2_j - \bar C^2_{j-1} \right)\frac1{ K^2_j-K^1_j } 
+            = \frac{ C^2_j-C^1_j }{ K^2_j - K^1_j }- \left( C^2_j -\bar  C^2_{j-1} \right)\frac1{ K^2_j-K^1_j } = \bar p^1_{j-1} \ .
     $$
-    Similarly, for $i=N$ we have $p^N_j = \frac{ C^{N+1}-C^N_j }{ K_{N+1} - K_1 }$
-    with $C^{N+1}=0$ such that
+    Similarly, for $i=N$ we have $p^N_j = \frac{ C^{N+1}_j-C^N_j }{ K_{N+1} - K_1 }$
+    with $C^{N+1}_j=0$ such that
     $$
-        ( Q_{j|j-1}^{-1} \cdot p_j  )^N
-        = p^N_j - ( C^N_j - C^N_{j-1} ) \frac1{ K_{N+1} - K_N }
-        = \frac{ C^{N+1}-C^N_j }{ K_{N+1} - K_1 } - ( C^N_j - C^N_{j-1} ) \frac1{ K_{N+1} - K_N }
-        = p^N_{j-1} \ .
+        ( Q_{j|j-1}^{-1} \cdot p_j  )^{N_j}
+        = p^{N_j}_j - ( C^{N_j}_j -\bar  C^{N_j}_{j-1} ) \frac1{ K^{N_j+1}_j - K^{N_j}_j }
+        = \frac{ C^{{N_j}+1}_j-C^{N_j}_j }{ K^{{N_j}+1}_j - K^{N_j}_j } - ( C^{N_j}_j - \bar C^{N_j}_{j-1} ) \frac1{ K^{{N_j}+1}_j - K^{N_j}_j }
+        = \bar p^{N_j}_{j-1} \ .
     $$
 \end{proof}
 
