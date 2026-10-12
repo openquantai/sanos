@@ -35,6 +35,8 @@ logs, and temporary files must remain outside this Git working tree.
 - `src/sanos/`: Python package and CLI.
 - `tests/`: offline tests; ordinary tests never contact WRDS.
 - `tex/`: paper sources and figures imported from the original repository.
+- `reference/quant_data/`: exact, non-installed migration snapshot with filtered
+  source history; never a runtime or data dependency.
 - `configs/`: checked-in portable dataset and experiment configurations.
 - `docs/`: architecture, data contracts, compatibility decisions, and runbooks.
 - `PORTING.md`: source revisions and migration provenance.
@@ -48,4 +50,3 @@ default. The four classes are raw, intermediate, dataset, and experiment.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.
-

@@ -31,10 +31,22 @@ must be completed before a release.
 - Reviewed clean commit: `de15be96d2f283b6c31e60d3ea47325a0c093ff0`
 - Relevant SANOS/WIDB paths were clean at the start of migration.
 
-No Python implementation has been imported in Phase 0. Phase 1 will create a
-function-by-function traceability inventory and identify the exercised
-production path before source is copied. Each later imported module must record
-its original path and revision here before refactoring.
+A filtered history containing 55 code, documentation, and offline-test paths
+was imported beneath `reference/quant_data/` before refactoring. It was made
+from a fresh local clone at the reviewed commit using `git-filter-repo 2.47.0`
+with `--paths-from-file` and `--to-subdirectory-filter reference/quant_data`.
+The resulting filtered head is
+`ab9743926bd53e98f160e33223bc5bab8c1e92fe`; the reviewed source commit itself
+became empty in the filtered history because it changed only unrelated files.
+Every imported HEAD blob was compared with the corresponding blob at
+`de15be96d2f283b6c31e60d3ea47325a0c093ff0` and matched exactly. The committed
+path list is `docs/quant-data-import-paths.txt`.
+
+The imported snapshot is not installed as part of the SANOS package and is not
+a data-pipeline input. Phase 1 will map functions and tests before moving the
+required implementations into `src/sanos/`; files found to be historical or
+unexercised will remain provenance only and can be removed from the working
+tree after their history is retained.
 
 Existing `quant_data` raw, processing, training, and experiment artifacts are
 not build inputs. The existing 891-date fitted dataset is a read-only parity
