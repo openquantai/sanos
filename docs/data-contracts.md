@@ -1,9 +1,251 @@
 # Data contracts
 
-The four storage classes are raw, intermediate, dataset, and experiment.
-Generated artifacts live outside Git. Detailed schemas and manifest versions
-will be frozen during Phases 1 and 2 of `PROGRAM_PLAN.md`.
+The four and only four storage classes are **raw**, **intermediate**,
+**dataset**, and **experiment**. Generated artifacts live outside Git. The
+existing 891-date SPX collection from 2022-01-03 through 2025-08-29 is a
+read-only parity oracle and is never an upstream input to the fresh build.
 
-The existing 891-date SPX dataset from 2022-01-03 through 2025-08-29 is the
-read-only parity oracle. It is never an upstream input to the fresh build.
+## Common rules
 
+- Raw, intermediate and dataset tabular artifacts are Parquet read and written
+  with Polars. HDF5 is permitted only for disposable experiment
+  materializations and the read-only legacy oracle.
+- Until time-series assembly, a transformation accepts and returns exactly one
+  Polars `DataFrame` for one trading day. One atomic Parquet artifact contains
+  all quote data, expiry geometry, masks, no-arbitrage results, SANOS/DLV state,
+  fitted values and diagnostics for that day. There are no sibling
+  quote/expiry/surface caches.
+- A published dataset is self-contained. Successful shallow validation never
+  requires raw or intermediate artifacts to exist.
+- Dates use ISO calendar dates; timestamps, where unavoidable in vendor data,
+  carry an explicit timezone. Monetary vendor fields retain documented vendor
+  currency/units in raw data.
+- Configuration, schemas and deterministic transforms use `@version` from
+  `cdxcore.version`. Artifact identity includes canonical configuration,
+  schema/stage version and upstream content identity.
+- Every write is temporary-file plus fsync plus atomic replace. A completion
+  manifest is written last.
+
+## Raw
+
+Raw data is durable, minimally transformed vendor data. The natural root is
+`QUANT_DATA_RAW/wrds/optionmetrics/`. The fresh SPX dependency closure includes:
+
+| Logical source | Candidate WRDS table | Natural partition |
+|---|---|---|
+| security identity | `securd` or `securd1` | snapshot/query identity |
+| option books | `opprcdYYYY` or `opprcd` | table/year/secid/date |
+| underlying close | `secprd` or `secprdYYYY` | table/year/secid/date |
+| vendor forward | `fwdprdYYYY` or `fwdprd` | table/year/secid/date |
+| zero curve | `zerocd` | table/date |
+
+Raw option rows preserve source fields such as symbol, option ID, side,
+exercise style, strike, expiry, bid/ask, volume, open interest, vendor implied
+volatility/Greeks, settlement flags, expiry indicator and contract size. The
+raw writer may canonicalize column names/types and add provenance columns, but
+does not apply SANOS population filters.
+
+Each table root has `README.md` describing source/query/fields and a manifest
+with query identity, selected columns, partitions, counts and checksums. It does
+not contain credentials. The requested start date also plans/downloads the
+fresh previous-business-day close and any earlier observations required by the
+eventual explicitly approved public return rule. CD-004 currently blocks that
+formula; a planner may conservatively expose the boundary dependencies but may
+not label a computed field as forward-adjusted before approval.
+
+## Intermediate daily frame
+
+Intermediate artifacts are reproducible and safely deletable. The canonical
+daily frame is logically long-form at the paired call/put strike level. It
+preserves the observable legacy columns below (with Polars-native dtypes) and
+adds stage/provenance fields. Per-day and per-expiry values may repeat by row;
+typed list/struct columns hold state whose geometry is not quote-aligned.
+
+### Identity and daily fields
+
+`ticker`, `trading_date`, `spot`, `previous_spot`, `is_half_day`,
+`source_secid`, `stage_version`, `configuration_id`, `raw_artifact_id`.
+
+The internal frame may contain source identifiers and absolute levels. They are
+forbidden in the public projection.
+
+### Paired book and expiry fields
+
+`call_symbol`, `put_symbol`, `call_option_id`, `put_option_id`, `expiry_id`,
+`expiry_date`, `is_american`, `expiry_is_am`, `strike`, `vendor_forward`,
+`discount_factor`, `business_dte`, `calendar_dte`, `time_to_expiry_years`,
+call/put bid and ask, and call/put log-volume/open-interest.
+
+The trading-session `is_half_day` flag is distinct from `expiry_is_am`.
+Business DTE counts sessions in `(trading_date, expiry_date]`; AM settlement
+subtracts `1 - overnight_variance_fraction`. The compatibility default is
+`overnight_variance_fraction=0.2`. Calendar DTE and business DTE are never
+interchanged.
+
+### Enrichment and filter fields
+
+`implied_forward`, `normalized_moneyness`, `atm_normalized_moneyness`, synthetic
+call book, bid/ask implied volatilities and Greeks, combined liquidity fields,
+`normalized_strike = K/F`, pure bid/ask price `C/(DF*F)`, and the corresponding
+pure Greeks.
+
+Each population-changing predicate is represented by a named boolean eligibility
+or rejection field before rows are physically removed at publication. The
+initial compatibility ordering is documented in `docs/reference-baseline.md`.
+
+### No-arbitrage, SANOS and DLV fields
+
+The same frame contains no-arbitrage masks, expiry-fit and surface-fit prices,
+volatilities/Greeks, the smooth SANOS fitted call/put values, active real-book
+masks, fit diagnostics and the complete model state. Model-state list/struct
+columns include:
+
+- ordered model expiry times and settlement geometry;
+- normalized strike support for every expiry;
+- unsmoothed density masses and squared-DLV values, including boundaries and
+  model time increments;
+- smooth SANOS parameters/density state and separately named smoothing-kernel
+  input total variances; and
+- solver status, objective, tolerances, quote-containment and failure
+  diagnostics.
+
+Smoothing-kernel input variances are not labelled as fitted ATM volatility.
+All geometry needed to price/invert either state is explicit.
+
+The minimum exact reconstructing state is not a generic parameter blob:
+
+- Common geometry records ordered positive model expiries `T` in year
+  fractions, `dt = diff(T, prepend=0)`, the selected pricing mode, and all
+  boundary/mode flags.
+- Smooth surface mode records `smoothness`, the separately named input total
+  variances `V`, and, for every expiry, ordered normalized support
+  `mstrikes[t]` with probability masses `mdensities[t]`. If expiry-mode pricing
+  is exposed, it additionally records `xstrikes`, `xdensities`, and
+  `xix_to_mix` so the per-expiry support is not confused with the surface
+  support. Each mass vector is non-negative, sums to one, and has normalized
+  first moment one within the versioned numerical tolerances.
+- Discrete DLV mode records its own ordered normalized `xstrikes`, probability
+  masses `xdensities`, and annualized squared-DLV values in `1/year` on the
+  interior strikes. A full-support encoding is allowed only with explicit zero
+  values at both boundaries. The time step for the first expiry is measured
+  from zero and later steps from the preceding model expiry.
+
+The legacy pricing rule is part of the state contract. For `t < ONE_MINUTE`, a
+call is intrinsic, `max(1-k, 0)`. For every positive query before the first
+model expiry (outside that intrinsic tolerance), the implementation uses the
+**first fitted density immediately**; it does not interpolate from the
+time-zero Dirac mass. A query within `ONE_MINUTE` of a model expiry uses that
+node. Between model expiries, the two density-implied call prices are linearly
+interpolated in time. After the last expiry, the last density is used. The
+default `ArbFreePricer` mode chooses the surface support when a surface fit is
+present and the expiry support otherwise. This pre-first-expiry jump is frozen
+by CD-014.
+
+For smooth pricing at query time `t`, let `tc = clip(t, T[0], T[-1])`. The
+Black-mixture kernel uses annual volatility
+`sqrt(smoothness * interp(tc, T, V) / tc)` and the actual query horizon
+`sqrt(t)`; the resulting payoff is integrated against the selected density.
+When smoothness is absent, or when the stored expiry-linear flag selects the
+linear per-expiry kernel, pricing integrates the ordinary call payoff. The
+input `V` curve is not a fitted ATM implied-volatility curve.
+
+The initial parity implementation preserves legacy float32 cast boundaries even
+when solvers operate in float64. A future dtype change is versioned and tested
+as a semantic change.
+
+## Internal dataset
+
+The internal WIDB dataset is curated, validated and immutable. It normally uses
+partitioned Parquet (ticker/year/date) and includes the nearly complete filtered
+option history, all eligibility masks, expiry geometry, no-arbitrage results,
+smooth SANOS state, unsmoothed DLV state, fitted values and diagnostics. A
+published identity contains:
+
+- `README.md` with coverage, fields, units, sources, exclusions and exact CLI
+  reproduction/validation commands;
+- `config.json` with the complete canonical configuration;
+- `manifest.json` with distribution status, schema/pipeline versions, Git
+  commit, upstream identities, date/row/population counts and checksums; and
+- Parquet partitions plus a completion marker written last.
+
+The 0.2D AM observations belong in the complete internal dataset when otherwise
+eligible. Their exclusion is an explicit daily-front experiment selection, not
+an ingestion default.
+
+## Public SANOS/DLV projection
+
+Public release is a separate deliberately lossy dataset identity. The intended
+physical representation has **one Polars row per trading day** and typed
+list/struct columns. The exporter starts from an explicit allowlist and fails on
+every unexpected input column.
+
+The proposed version-1 logical allowlist is below. Fields governed by CD-004
+and CD-009 remain blocked and provisional until the user approves their exact
+formula and units:
+
+| Level | Fields and units |
+|---|---|
+| day | `trading_date`, trading-session `is_half_day`, `forward_adjusted_spot_return`; the first return is null |
+| expiries | expiry date, business DTE, calendar DTE, expiry `is_am`, model time, and dimensionless interpreting geometry including `discounted_forward_over_spot = DF*(F/S)` |
+| books | `expiry_index`, call/put side, `normalized_strike = K/F`, `half_spread_spot = (ask-bid)/(2S)` for every book surviving the exact daily-front filter below |
+| smooth SANOS | complete smooth parameter/density state, supports, expiry/time increments and separately named smoothing input variances |
+| unsmoothed DLV | complete discrete density and squared-DLV state, supports, boundaries and expiry/time increments |
+
+The proposed version-1 public book population reproduces the daily-front
+reference. For
+each call and put side independently, a book is initially active only when the
+pre-smooth no-arbitrage mask is true, bid/ask are finite, bid is non-negative
+and ask is strictly above bid. It is retained only when the option is European,
+the corresponding smooth fitted call/put value is finite, the expiry is not an
+explicitly excluded 0.2-business-day node, the expiry lies at or before the
+70-business-day model horizon, and `K/F` is inside the **inclusive** AF-ATM NMS
+interval `[-3, 2]`. Calls and puts remain separate observations. A different
+filter is a different explicitly approved dataset configuration and identity.
+
+Model prices reconstructed in memory from the retained state are expressed in
+discounted-forward units `C/(DF*F)`; no redundant per-book model-price column is
+stored. The proposed dimensionless conversion is:
+
+```text
+C/S = [DF*(F/S)] * [C/(DF*F)]
+h/(DF*F) = (h/S) / [DF*(F/S)]
+```
+
+The exact public return formula and this unit bridge remain explicit decisions
+in `docs/compatibility-decisions.md`; publication cannot proceed until approved.
+
+The exporter forbids raw bids/asks/mids, absolute spot/strike/price levels,
+volume, open interest, option symbols/IDs, security IDs, vendor implied
+volatilities/Greeks, redundant per-book fitted model price/IV arrays and all
+other unapproved source fields. It also rejects a schema containing a forbidden
+field even if the value is null. Validation may derive model prices and ATM
+implied volatilities from the published state in memory; those derived values
+are not stored columns.
+
+A public manifest is initially `public_candidate`. Transition to immutable
+`public` additionally requires release license, rights basis, approver,
+approval date and a durable governing reference. Numeric transformation alone
+does not establish redistribution rights.
+
+Capability flags may advertise normalized SANOS/DLV dynamics and normalized
+spread experiments. They explicitly do not advertise vendor-book
+reconstruction, quote-containment replay, liquidity models, absolute-dollar
+tick effects or contract-level trading replay. Public validation runs all
+advertised capabilities with WRDS and the internal dataset unavailable.
+
+## Experiment
+
+An experiment is a disposable model-specific materialization from an immutable
+dataset. HDF5 may contain padding, masks, fixed arrays, splits and model-specific
+selections. Beside every HDF5 file are the source dataset identity, full
+experiment configuration, schema/producer version and checksums. Deleting an
+experiment never deletes its source dataset.
+
+## Output-first validation
+
+A dataset or experiment request first validates the requested artifact's own
+manifest, canonical configuration identity, schema, completion and checksums.
+It does not require lineage files under shallow validation. `version="*"` may
+ignore only producer-code-version comparison for an already complete matching
+artifact; it still validates every other property, warns visibly, records the
+override in the run result and fails rather than building on a miss.

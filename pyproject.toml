@@ -30,6 +30,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+reference = [
+  "h5py>=3.10,<4",
+]
 wrds = [
   "pandas>=2.2,<4",
   "wrds>=3.2,<4",
@@ -41,11 +44,13 @@ experiment = [
   "h5py>=3.10,<4",
 ]
 test = [
+  "h5py>=3.10,<4",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
 ]
 dev = [
   "build>=1.2,<2",
+  "h5py>=3.10,<4",
   "mypy>=1.11,<2",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
@@ -77,9 +82,13 @@ select = ["E", "F", "I", "UP"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 check_untyped_defs = true
 disallow_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["h5py.*", "quantdata.*"]
+ignore_missing_imports = true

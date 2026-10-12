@@ -11,9 +11,13 @@ parity reference; the new dataset will be built from a fresh WRDS extraction.
 
 ## Current status
 
-Phase 0 is in progress. The Python package and command hierarchy exist, but data
-pipeline commands intentionally fail with an actionable "not implemented"
-message until their reviewed phases land. No command connects to WRDS yet.
+Phase 0 is complete and Phase 1 is at its review gate. The Python package and
+command hierarchy exist, the exact 2022–2025 reference endpoint and numerical
+baseline are catalogued, but data-pipeline commands intentionally fail with an
+actionable "not implemented" message until their reviewed phases land. No
+command connects to WRDS yet. See
+[the reference baseline](docs/reference-baseline.md) for the 891-date parity
+oracle and the distinction between its legacy artifact populations.
 
 ## Development installation
 

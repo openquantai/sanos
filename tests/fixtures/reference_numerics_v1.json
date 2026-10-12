@@ -1,0 +1,64 @@
+{
+  "densities": [
+    [
+      4.927896896801867e-05,
+      0.01379811131104523,
+      0.9727668474286888,
+      0.012874855333614994,
+      0.0005109069576831347
+    ],
+    [
+      9.211090581229766e-05,
+      0.021942487069714172,
+      0.9567468344920738,
+      0.020310426183460746,
+      0.0009081413489390316
+    ]
+  ],
+  "dlvsqs": [
+    [
+      0.0400000000000773,
+      0.08999999999999998,
+      0.16
+    ],
+    [
+      0.05000000000002699,
+      0.1,
+      0.15000000000000002
+    ]
+  ],
+  "metadata": {
+    "description": "Synthetic DLV-density-price and density-projection oracle",
+    "evidence_runtime_baseline": "reviews/phase-1/reference-runtime-baseline.json",
+    "quant_data_revision": "de15be96d2f283b6c31e60d3ea47325a0c093ff0",
+    "reference_functions": [
+      "quantdata.sanos.sanos_tools.SanosPricer.densities_from_dlvsqs",
+      "quantdata.sanos.sanos_tools.SanosPricer.dlvsqs",
+      "quantdata.sanos.sanos_tools.SanosPricer.__call__",
+      "quantdata.sanos.sanos_tools.repair_density_nonnegative"
+    ],
+    "schema": "sanos-reference-numerics-v1"
+  },
+  "prices": [
+    [
+      0.4000049278968969,
+      0.20070468925624263,
+      0.0034741673122453158,
+      0.0007970148539856907,
+      5.1090695768313515e-05
+    ],
+    [
+      0.40001842218116246,
+      0.2022310930692963,
+      0.0066380126644016435,
+      0.002394299157921689,
+      0.0001816282697878065
+    ]
+  ],
+  "repair": [
+    0.0,
+    0.5152690582959641,
+    0.3854932735426009,
+    0.09923766816143494
+  ]
+}

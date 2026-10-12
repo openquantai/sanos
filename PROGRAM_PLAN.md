@@ -1,6 +1,7 @@
 # SANOS standalone program plan
 
-Status: proposed plan; no WRDS access or pipeline implementation has started.
+Status: implementation in progress; Phase 0 is complete and Phase 1 is at its
+review gate. No WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -370,8 +371,11 @@ self-describing Polars frame.
   no-arbitrage and SANOS cores.
 - Retain all quote, liquidity, expiry, eligibility, fitted, SANOS/DLV, and
   diagnostic columns in one daily frame.
-- Use float64 through fitting. Any storage downcast requires an explicit
-  numerical error budget and parity test.
+- Preserve the reference implementation's explicit float32 daily-frame cast
+  boundaries before selected numerical arrays are promoted back to float64 by
+  the solvers. A float64-through-fit variant requires measured parity evidence,
+  an explicit numerical error budget, a new version, and approval under
+  CD-011.
 - Preserve deterministic ordering by date, expiry, settlement, normalized
   strike, and side. Prefer one row per retained expiry with nested list/struct
   columns, provided the Phase 1 schema parity review confirms that it preserves
@@ -404,40 +408,52 @@ under an existing identity.
 - Materialize a distinct one-row-per-trading-day Polars dataset from the
   completed internal dataset.
 - Use an explicit allowlist containing only date, trading half-day status,
-  a required and precisely defined `forward_adjusted_spot_return` into the date,
+  a proposed `forward_adjusted_spot_return` into the date pending CD-004,
   smooth SANOS state and geometry, unsmoothed DLV state and geometry, normalized
   surviving strike/side/half-spread books, and retained
   expiry/DTE/settlement geometry.
-- Store the fitted SANOS and DLV option-price arrays on the retained normalized
-  books, together with their annualized Black implied-volatility arrays computed
-  by `cdxcore.bs`.  These are model prices, not market mid prices.  Store each
-  model's state and interpreting geometry separately so every published price
-  and volatility can be independently reconstructed and checked.
-- Store, for every retained expiry, the normalized forward `F/S`, discount
-  factor, and annualized ATM volatility.  Preserve model-specific SANOS and DLV
-  ATM volatilities when the two fitted geometries imply different values.
+- Store each model's complete state and interpreting geometry so model prices
+  and volatilities can be reconstructed, rather than publishing redundant
+  fitted price or implied-volatility arrays on every retained book.
 - Preserve the legacy simple close-to-close `spot_return` in the internal
   reference-compatible dataset, but do not label it forward-adjusted or use it
-  as the public field. Phase 1 must recover or define and obtain approval for the
-  public `forward_adjusted_spot_return` formula, forward tenor/interpolation,
-  missing-data behavior, and parity oracle. Public publication remains blocked
-  until that contract is approved.
-- Resolve the unit bridge between SANOS prices in discounted-forward units and
-  requested half-spreads in spot-one units. Quant review must approve either a
-  pure-unit spread or dimensionless `discounted_forward_over_spot` interpreting
-  geometry before the schema is frozen.
-- Freeze the public units and geometry in Phase 1: strikes as `K/F`, SANOS prices
-  in `DF*F` units, half-spreads as `half_spread/S` plus the approved unit bridge,
-  annualized squared-DLV/time units, model time increments, expiry interpolation,
-  and boundary flags.
+  as the public field. The proposed public calculation for retained dates
+  `t[i-1]` and `t[i]` uses previous-date carry
+  `c[i]=F_(t[i-1])(t[i])/S_(t[i-1])` and
+  `r_fwd[i]=(S[i]/S[i-1])/c[i]-1`. Positive forward and discount curves are
+  proposed to interpolate log-linearly in business DTE with an anchor of one at
+  DTE zero. The first retained date has a null return. This formula remains
+  blocked by CD-004 until explicitly approved; its inputs need not themselves
+  be public fields.
+- The proposed unit bridge is `C/S=DF*(F/S)*C/(DF*F)` and
+  `h/(DF*F)=(h/S)/(DF*(F/S))`. Pending CD-009, the proposed interpreting
+  geometry stores `discounted_forward_over_spot=DF*(F/S)` and half-spreads in
+  spot-one units. Model prices are reconstructed in memory from state and
+  expressed in discounted-forward units; they are not redundant public fields.
+- Freeze the other public units and geometry in Phase 1: strikes as `K/F`, SANOS
+  prices in `DF*F` units, half-spreads as `half_spread/S`, annualized
+  squared-DLV/time units, model time increments, expiry interpolation, and
+  boundary flags.
 - Exclude absolute spot and all source identifiers, raw quotes, market mids,
-  volume, open interest, vendor Greeks/IVs, and contract symbols.  Explicitly
-  distinguish the allowed fitted SANOS/DLV price and implied-volatility arrays
-  from prohibited market midpoint arrays in the schema and leakage tests.
+  volume, open interest, vendor Greeks/IVs, contract symbols, and redundant
+  per-book model price/IV arrays. Leakage tests reconstruct model prices and
+  implied volatilities from the allowed states in memory without adding them to
+  the public schema.
 - Record explicit capability flags in the manifest for supported normalized
   SANOS/DLV dynamics and spread experiments, and explicit non-capabilities for
   exact vendor-book reconstruction, quote-containment replay, liquidity models,
   absolute-dollar ticks, and contract-level replay.
+- Reproduce the recovered daily-front public-book profile: separate call and
+  put books, active finite valid books after the pre-smooth no-arbitrage mask,
+  European style, finite smooth fitted values, at most 70 business days,
+  explicit 0.2D exclusion, and inclusive AF-ATM NMS `[-3,2]`. A different
+  estimation grid or experiment hedge screen is an explicit downstream
+  experiment configuration, not an implicit public serialization rule.
+- Keep SANOS smoothing-kernel input total variances explicitly named as inputs,
+  not fitted ATM implied volatilities. Model ATM implied volatility is derived
+  by pricing the retained state at `K/F=1` and inverting with `cdxcore.bs`.
+  Also retain the kernel-input annualized ATM curve used to convert the chosen
+  NMS population screen to `K/F`, so selection can be independently verified.
 - Publish initially as `public_candidate`. A separate approval action records
   license, rights basis, approver, date, and durable reference before immutable
   `public` publication.
@@ -521,10 +537,10 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
   set-inclusion test is oriented permissively, despite stricter error text.
 - `enrich_day()` has schema validation after an early empty-data return and the
   validation therefore appears unreachable on that path.
-- Legacy `spot_ret` is `spot / previous_spot - 1`, not visibly
-  forward-adjusted. It remains an internal compatibility field. The public
-  projection requires a distinct approved `forward_adjusted_spot_return`; it
-  cannot replace or be mislabeled as the old one.
+- Legacy `spot_ret` is `spot / previous_spot - 1` and remains an internal
+  compatibility field. The public projection needs a distinct
+  `forward_adjusted_spot_return`; the proposed contract in Phase 8 remains
+  blocked by CD-004 and must not relabel the legacy field.
 - Some fit-percentage documentation/log messages disagree about whether the
   reported fraction is inside or outside the bid/ask spread.
 - Solver timeout is excluded from the current cache identity even though it may
@@ -536,9 +552,15 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
   reference dataset's actual population rule must be recovered, not guessed.
 - A FLEX 4.8-business-day first-node convention may encode a different 20%
   overnight clock from WIDB AM settlement. Preserve each behavior until traced.
-- Public half-spreads requested in spot-one units are not directly commensurate
-  with SANOS prices normalized by discounted forward. The public schema needs
-  an approved dimensionless unit bridge without adding an absolute spot level.
+- Public half-spreads in spot-one units and model prices reconstructed in
+  discounted-forward units would use the proposed dimensionless `DF*(F/S)`
+  bridge in Phase 8. CD-009 blocks treating that proposal as normative until
+  explicitly approved.
+- The ndarray branch of `_compute_market_fit` references undefined variables;
+  CD-013 blocks silently copying or fixing the unexercised interface.
+- Both retained legacy pricers jump from the time-zero intrinsic branch to the
+  first fitted density for positive times before the first model expiry.
+  CD-014 freezes this initially and blocks changing it without approval.
 
 The configurable overnight fraction is not an unapproved semantic change at
 its default: `0.2` must reproduce the existing output exactly. Any new default
