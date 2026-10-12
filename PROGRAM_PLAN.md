@@ -1,8 +1,8 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0 through 7 and Phase 9 are complete
-with dual review. Phase 8 awaits user approval of CD-004 and CD-009. No live
-WRDS access has occurred.
+Status: implementation in progress; Phases 0 through 9 are complete with dual
+review. Public redistribution approval remains a separate human/legal action.
+No live WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -347,10 +347,11 @@ review. See `reviews/phase-4/`.
   validation and refresh. Keep direct secid override blocked under CD-010 until
   the legacy ignored-argument defect has an approved replacement contract.
 - Compute raw dependency closure before download. For a build beginning on
-  2022-01-03, freshly download the previous business-day underlying close and
-  every earlier observation required by the approved forward-adjusted-return
-  rule. Show those boundary prerequisites in dry-run output; never fill them
-  from legacy data or silently emit a missing first return.
+  2022-01-03, freshly download the previous business-day underlying close used
+  by the internal legacy-compatible return. The approved public return is null
+  on its first retained row and therefore requires no pre-start forward or zero
+  curve. Show the exact boundary prerequisites in dry-run output and never fill
+  them from legacy data.
 
 Acceptance: mocked failure/retry/concurrency tests pass; an offline test proves
 that every non-live command refuses network access; no live WRDS query occurs in
@@ -427,10 +428,15 @@ under an existing identity.
 
 ### Phase 8 — Public research projection
 
+Status: complete; final code and quantitative/data reviews passed on
+2026-10-13. The repository publishes technical `public_candidate` artifacts
+and provides a distinct rights-gated `public` release workflow, but records no
+actual redistribution approval. See `reviews/phase-8/`.
+
 - Materialize a distinct one-row-per-trading-day Polars dataset from the
   completed internal dataset.
 - Use an explicit allowlist containing only date, trading half-day status,
-  a proposed `forward_adjusted_spot_return` into the date pending CD-004,
+  the approved `forward_adjusted_spot_return` into the date under CD-004,
   smooth SANOS state and geometry, unsmoothed DLV state and geometry, normalized
   surviving strike/side/half-spread books, and retained
   expiry/DTE/settlement geometry.
@@ -439,16 +445,15 @@ under an existing identity.
   fitted price or implied-volatility arrays on every retained book.
 - Preserve the legacy simple close-to-close `spot_return` in the internal
   reference-compatible dataset, but do not label it forward-adjusted or use it
-  as the public field. The proposed public calculation for retained dates
+  as the public field. The approved public calculation for retained dates
   `t[i-1]` and `t[i]` uses previous-date carry
   `c[i]=F_(t[i-1])(t[i])/S_(t[i-1])` and
   `r_fwd[i]=(S[i]/S[i-1])/c[i]-1`. Positive forward and discount curves are
-  proposed to interpolate log-linearly in business DTE with an anchor of one at
-  DTE zero. The first retained date has a null return. This formula remains
-  blocked by CD-004 until explicitly approved; its inputs need not themselves
-  be public fields.
-- The proposed unit bridge is `C/S=DF*(F/S)*C/(DF*F)` and
-  `h/(DF*F)=(h/S)/(DF*(F/S))`. Pending CD-009, the proposed interpreting
+  interpolate log-linearly in business DTE with an anchor of one at
+  DTE zero. The first retained date has a null return. Approved CD-004 fixes
+  this formula; its inputs need not themselves be public fields.
+- The approved unit bridge is `C/S=DF*(F/S)*C/(DF*F)` and
+  `h/(DF*F)=(h/S)/(DF*(F/S))`. Under CD-009, the interpreting
   geometry stores `discounted_forward_over_spot=DF*(F/S)` and half-spreads in
   spot-one units. Model prices are reconstructed in memory from state and
   expressed in discounted-forward units; they are not redundant public fields.
@@ -565,9 +570,9 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
 - `enrich_day()` has schema validation after an early empty-data return and the
   validation therefore appears unreachable on that path.
 - Legacy `spot_ret` is `spot / previous_spot - 1` and remains an internal
-  compatibility field. The public projection needs a distinct
-  `forward_adjusted_spot_return`; the proposed contract in Phase 8 remains
-  blocked by CD-004 and must not relabel the legacy field.
+  compatibility field. The public projection uses the distinct approved
+  `forward_adjusted_spot_return` contract from CD-004 and must not relabel the
+  legacy field.
 - Some fit-percentage documentation/log messages disagree about whether the
   reported fraction is inside or outside the bid/ask spread.
 - Solver timeout is excluded from the current cache identity even though it may
@@ -580,9 +585,8 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
 - A FLEX 4.8-business-day first-node convention may encode a different 20%
   overnight clock from WIDB AM settlement. Preserve each behavior until traced.
 - Public half-spreads in spot-one units and model prices reconstructed in
-  discounted-forward units would use the proposed dimensionless `DF*(F/S)`
-  bridge in Phase 8. CD-009 blocks treating that proposal as normative until
-  explicitly approved.
+  discounted-forward units use the approved dimensionless `DF*(F/S)` bridge
+  from CD-009. This technical approval does not grant redistribution rights.
 - The ndarray branch of `_compute_market_fit` references undefined variables;
   CD-013 blocks silently copying or fixing the unexercised interface.
 - Both retained legacy pricers jump from the time-zero intrinsic branch to the

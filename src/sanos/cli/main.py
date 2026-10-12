@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import platform
@@ -16,7 +17,14 @@ from typing import Any
 import click
 
 from sanos import __version__
-from sanos.artifacts import ArtifactError, ArtifactPointer, ArtifactStore, StorageClass
+from sanos.artifacts import (
+    MANIFEST_NAME,
+    ArtifactError,
+    ArtifactPointer,
+    ArtifactStore,
+    StorageClass,
+    atomic_write_json,
+)
 from sanos.config import (
     LocationConfigurationError,
     LocationOverrides,
@@ -28,9 +36,23 @@ from sanos.config import (
 from sanos.datasets import (
     DatasetBuildOptions,
     InternalDatasetConfig,
+    PublicApproval,
+    PublicBuildOptions,
+    PublicProjectionConfig,
+    PublicReleaseConfig,
     build_internal_dataset,
+    build_public_candidate,
+    build_public_release,
     plan_internal_dataset,
+    plan_public_candidate,
+    plan_public_release,
     validate_internal_dataset,
+    validate_public_dataset,
+)
+from sanos.datasets.public import (
+    open_public_dataset,
+    public_candidate_label,
+    public_frame_logical_sha256,
 )
 from sanos.experiments import (
     ExperimentBuildOptions,
@@ -212,6 +234,26 @@ def _read_dataset_config(path: Path) -> InternalDatasetConfig:
     return InternalDatasetConfig.from_document(document)
 
 
+def _read_public_dataset_config(path: Path) -> PublicProjectionConfig:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read public Dataset configuration {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Public Dataset configuration must contain a JSON object")
+    return PublicProjectionConfig.from_document(document)
+
+
+def _read_public_release_config(path: Path) -> PublicReleaseConfig:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read public release configuration {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Public release configuration must contain a JSON object")
+    return PublicReleaseConfig.from_document(document)
+
+
 def _read_experiment_config(path: Path) -> ExperimentConfig:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -361,6 +403,9 @@ def status(context: CliContext) -> None:
         intermediate_build_available=True,
         dataset_build_available=True,
         dataset_validate_available=True,
+        public_candidate_build_available=True,
+        public_candidate_validate_available=True,
+        public_release_approval_available=True,
         experiment_build_available=True,
         experiment_validate_available=True,
         live_wrds_verified=False,
@@ -951,6 +996,422 @@ def dataset_validate(
         context,
         "dataset_validation_result",
         status="passed",
+        artifact=pointer,
+        path=store.path_for(pointer),
+        identity=pointer.artifact_id,
+        semantic=not integrity_only,
+        deep_lineage=deep_lineage,
+        network_accessed=False,
+        filesystem_modified=False,
+        config=None if config is None else canonical_value(config),
+        reuse_record=reuse_record,
+        summary=None if summary is None else summary.as_dict(),
+    )
+
+
+@dataset.group("public")
+def public_dataset() -> None:
+    """Build, approve, and validate public candidates and releases."""
+
+
+@public_dataset.command("build")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict portable public-candidate JSON configuration.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete candidate.",
+)
+@click.pass_obj
+def public_dataset_build(
+    context: CliContext,
+    config_path: Path,
+    version_request: str,
+) -> None:
+    """Project an internal Dataset into an immutable public_candidate."""
+
+    try:
+        locations = context.locations.require_complete()
+        config = _read_public_dataset_config(config_path)
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "public_candidate_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        with warnings.catch_warnings(record=True) as warning_records:
+            warnings.simplefilter("always")
+            result = build_public_candidate(
+                locations,
+                config,
+                PublicBuildOptions(
+                    version_override="*" if version_request == "*" else None,
+                ),
+                dry_run=context.dry_run,
+                progress=progress,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "public_candidate_result",
+        distribution="public_candidate",
+        artifact=result.artifact,
+        path=result.path,
+        identity=result.artifact.artifact_id,
+        plan_id=result.plan.plan_id,
+        built=result.built,
+        reused=result.reuse is not None,
+        reuse_record=None if result.reuse is None else result.reuse.as_log_record(),
+        dry_run=result.dry_run,
+        source_accessed=result.source_accessed,
+        network_accessed=False,
+        validation=None if result.validation is None else result.validation.as_dict(),
+    )
+
+
+@public_dataset.command("approval-template")
+@click.option("--candidate-name", required=True, help="Exact public-candidate name.")
+@click.option(
+    "--candidate-artifact-id",
+    required=True,
+    help="Exact 64-hex public-candidate artifact identity.",
+)
+@click.option("--release-license", required=True, help="Approved release license name.")
+@click.option(
+    "--redistribution-basis",
+    required=True,
+    help="Recorded basis for redistribution rights.",
+)
+@click.option("--approver", required=True, help="Person or authority granting approval.")
+@click.option(
+    "--approval-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Approval date (YYYY-MM-DD).",
+)
+@click.option(
+    "--approval-reference",
+    required=True,
+    help="Durable governing terms or approval reference.",
+)
+@click.option(
+    "--license-file",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Exact approved license text whose bytes are bound to the release.",
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="New release configuration JSON path.",
+)
+@click.pass_obj
+def public_dataset_approval_template(
+    context: CliContext,
+    candidate_name: str,
+    candidate_artifact_id: str,
+    release_license: str,
+    redistribution_basis: str,
+    approver: str,
+    approval_date: datetime,
+    approval_reference: str,
+    license_file: Path,
+    output: Path,
+) -> None:
+    """Bind explicit legal input and exact candidate evidence into release config."""
+
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        pointer = ArtifactPointer(
+            StorageClass.DATASET,
+            f"sanos/public-candidate/name-{public_candidate_label(candidate_name)}",
+            candidate_artifact_id,
+        )
+        validated = store.validate(pointer)
+        validate_public_dataset(store, validated)
+        candidate = open_public_dataset(store, validated)
+        if candidate.distribution.value != "public_candidate":
+            raise ValueError("Approval evidence must identify a public_candidate")
+        license_bytes = license_file.read_bytes()
+        approval = PublicApproval(
+            candidate_dataset=pointer,
+            candidate_manifest_sha256=hashlib.sha256(
+                validated.path.joinpath(MANIFEST_NAME).read_bytes()
+            ).hexdigest(),
+            candidate_logical_content_sha256=public_frame_logical_sha256(
+                candidate.load()
+            ),
+            release_license=release_license,
+            redistribution_basis=redistribution_basis,
+            approver=approver,
+            approval_date=approval_date.date(),
+            approval_reference=approval_reference,
+            license_sha256=hashlib.sha256(license_bytes).hexdigest(),
+        )
+        release = PublicReleaseConfig(projection=candidate.config, approval=approval)
+        if output.exists() or output.is_symlink():
+            raise ValueError(f"Release configuration already exists: {output}")
+        if not context.dry_run:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(output, release.to_document())
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "public_release_approval_template",
+        status="planned" if context.dry_run else "written",
+        candidate=pointer,
+        output=output,
+        release_configuration=release.to_document(),
+        filesystem_modified=not context.dry_run,
+        source_accessed=False,
+        network_accessed=False,
+    )
+
+
+@public_dataset.command("approve")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict self-contained release approval and projection configuration.",
+)
+@click.option(
+    "--license-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Exact approved license bytes; required for a concrete release miss.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete public release.",
+)
+@click.pass_obj
+def public_dataset_approve(
+    context: CliContext,
+    config_path: Path,
+    license_file: Path | None,
+    version_request: str,
+) -> None:
+    """Reproject an approved candidate into a distinct immutable public release."""
+
+    try:
+        locations = context.locations.require_complete()
+        config = _read_public_release_config(config_path)
+        license_bytes = None if license_file is None else license_file.read_bytes()
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "public_release_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        with warnings.catch_warnings(record=True) as warning_records:
+            warnings.simplefilter("always")
+            result = build_public_release(
+                locations,
+                config,
+                license_bytes,
+                PublicBuildOptions(
+                    version_override="*" if version_request == "*" else None,
+                ),
+                dry_run=context.dry_run,
+                progress=progress,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "public_release_result",
+        distribution="public",
+        artifact=result.artifact,
+        path=result.path,
+        identity=result.artifact.artifact_id,
+        plan_id=result.plan.plan_id,
+        built=result.built,
+        reused=result.reuse is not None,
+        reuse_record=None if result.reuse is None else result.reuse.as_log_record(),
+        dry_run=result.dry_run,
+        source_accessed=result.source_accessed,
+        network_accessed=False,
+        validation=None if result.validation is None else result.validation.as_dict(),
+    )
+
+
+@public_dataset.command("validate")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Resolve a public candidate or release identity from strict configuration.",
+)
+@click.option("--name", help="Public Dataset name for exact-ID validation.")
+@click.option("--artifact-id", help="Exact 64-hex public Dataset artifact identity.")
+@click.option(
+    "--distribution",
+    "distribution_name",
+    type=click.Choice(("public_candidate", "public")),
+    default="public_candidate",
+    show_default=True,
+    help="Namespace used for exact-ID validation; config-based validation infers it.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only with --config to find an existing compatible artifact.",
+)
+@click.option(
+    "--deep-lineage",
+    is_flag=True,
+    help="Also require the completed internal source Dataset and its lineage.",
+)
+@click.option(
+    "--integrity-only",
+    is_flag=True,
+    help="Check immutable files and documents without running public capabilities.",
+)
+@click.pass_obj
+def public_dataset_validate(
+    context: CliContext,
+    config_path: Path | None,
+    name: str | None,
+    artifact_id: str | None,
+    distribution_name: str,
+    version_request: str,
+    deep_lineage: bool,
+    integrity_only: bool,
+) -> None:
+    """Validate a public candidate or release without rebuilding or WRDS."""
+
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        warning_records: Sequence[warnings.WarningMessage] = ()
+        if config_path is not None:
+            if name is not None or artifact_id is not None:
+                raise ValueError("Use either --config or --name with --artifact-id, not both")
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise ValueError("Public validation configuration must be a JSON object")
+            if set(document) == {"public_dataset"}:
+                config: PublicProjectionConfig | PublicReleaseConfig = (
+                    PublicProjectionConfig.from_document(document)
+                )
+                plan = plan_public_candidate(config)
+            elif set(document) == {"public_release"}:
+                config = PublicReleaseConfig.from_document(document)
+                plan = plan_public_release(config)
+            else:
+                raise ValueError(
+                    "Public validation config must contain public_dataset or public_release"
+                )
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
+                reuse = store.resolve(
+                    plan.dataset_spec,
+                    version="*" if version_request == "*" else None,
+                )
+            warning_records = tuple(caught_warnings)
+            if reuse is None:
+                raise ValueError(
+                    "Requested public Dataset is absent; validation never builds it"
+                )
+            pointer = reuse.artifact.pointer
+            reuse_record: Any = reuse.as_log_record()
+        else:
+            if name is None or artifact_id is None:
+                raise ValueError("Provide --config or both --name and --artifact-id")
+            if version_request == "*":
+                raise ValueError("--version '*' requires --config; exact-ID validation is concrete")
+            config = None
+            namespace_kind = (
+                "public-candidate" if distribution_name == "public_candidate" else "public"
+            )
+            pointer = ArtifactPointer(
+                StorageClass.DATASET,
+                f"sanos/{namespace_kind}/name-{public_candidate_label(name)}",
+                artifact_id,
+            )
+            reuse_record = None
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "public_dataset_validation_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        summary = validate_public_dataset(
+            store,
+            pointer,
+            semantic=not integrity_only,
+            deep_lineage=deep_lineage,
+            progress=progress,
+        )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "public_dataset_validation_result",
+        status="passed",
+        distribution=(
+            "public_candidate"
+            if pointer.namespace.startswith("sanos/public-candidate/")
+            else "public"
+        ),
         artifact=pointer,
         path=store.path_for(pointer),
         identity=pointer.artifact_id,

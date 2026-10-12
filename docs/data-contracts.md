@@ -57,9 +57,8 @@ Each table root has `README.md` describing source/query/fields and a manifest
 with query identity, selected columns, partitions, counts and checksums. It does
 not contain credentials. The requested start date also plans/downloads the
 fresh previous-business-day close and any earlier observations required by the
-eventual explicitly approved public return rule. CD-004 currently blocks that
-formula; a planner may conservatively expose the boundary dependencies but may
-not label a computed field as forward-adjusted before approval.
+approved public return rule. CD-004 fixes that formula and the retained-date
+policy; the planner exposes its boundary dependencies explicitly.
 
 ## Intermediate daily frame
 
@@ -239,9 +238,8 @@ physical representation has **one Polars row per trading day** and typed
 list/struct columns. The exporter starts from an explicit allowlist and fails on
 every unexpected input column.
 
-The proposed version-1 logical allowlist is below. Fields governed by CD-004
-and CD-009 remain blocked and provisional until the user approves their exact
-formula and units:
+The approved version-1 logical allowlist is below. CD-004 and CD-009 freeze the
+exact return formula, retained-date policy, normalized units, and unit bridge:
 
 | Level | Fields and units |
 |---|---|
@@ -271,8 +269,9 @@ C/S = [DF*(F/S)] * [C/(DF*F)]
 h/(DF*F) = (h/S) / [DF*(F/S)]
 ```
 
-The exact public return formula and this unit bridge remain explicit decisions
-in `docs/compatibility-decisions.md`; publication cannot proceed until approved.
+The exact public return formula and unit bridge are approved technical
+contracts in `docs/compatibility-decisions.md`. This approval permits a
+`public_candidate`; it does not establish redistribution rights.
 
 The exporter forbids raw bids/asks/mids, absolute spot/strike/price levels,
 volume, open interest, option symbols/IDs, security IDs, vendor implied
@@ -285,7 +284,16 @@ are not stored columns.
 A public manifest is initially `public_candidate`. Transition to immutable
 `public` additionally requires release license, rights basis, approver,
 approval date and a durable governing reference. Numeric transformation alone
-does not establish redistribution rights.
+does not establish redistribution rights. The release is reprojected from the
+same internal Dataset, must be exactly logically equal to the approved
+candidate, and has its own identity, manifest, README, approval record, and
+license bytes. It never aliases or mutates the candidate.
+
+Candidate identity also fixes the coverage start/end and exact permitted
+typed-empty date/reason records. Shallow validation binds the complete logical
+frame and return vector to stored evidence and runs public-only capabilities;
+deep validation additionally reprojects from the internal source to prove the
+private-input CD-004 and CD-009 calculations.
 
 Capability flags may advertise normalized SANOS/DLV dynamics and normalized
 spread experiments. They explicitly do not advertise vendor-book

@@ -12,16 +12,15 @@ dataset will be the canonical reference dataset.
 
 ## Current status
 
-Phases 0 through 7 and Phase 9 are complete with code and quantitative review.
-Phase 8's public projection remains blocked on two explicit unit contracts. The daily
+Phases 0 through 9 are complete with code and quantitative review. The daily
 no-arbitrage, filtering, compatibility-DLV and smooth-SANOS stages are available
 through the CLI, together with output-first internal Dataset build and
 validation commands. CD-020's all-valid-day failure is preserved for parity;
 repairing it remains an optional future change requiring approval. All ordinary
 tests, including the guarded WRDS layer, are offline; no live WRDS
 access has occurred yet. The exact 2022–2025 legacy comparison endpoint and
-numerical baseline are catalogued. Public-Dataset projection remains gated
-until its reviewed unit contracts are approved. See
+numerical baseline are catalogued. A technically validated projection remains
+`public_candidate` until separate redistribution approval is recorded. See
 [the legacy baseline](docs/reference-baseline.md) for the 891-date parity oracle
 and the distinction between its legacy artifact populations.
 
@@ -132,6 +131,31 @@ Pass `--deep-lineage` before cleanup when you also want to validate all recorded
 fitted and Raw ancestors. `--version '*'` can reuse a complete compatible
 Dataset but cannot build one. See the full
 [internal Dataset runbook](docs/internal-datasets.md).
+
+## Public-candidate Dataset projection
+
+Project the complete internal Dataset into the one-row-per-day normalized
+SANOS/DLV research contract:
+
+```bash
+sanos --root /path/to/quant-data --dry-run dataset public build \
+  --config configs/sanos-public-candidate-reference.json
+sanos --root /path/to/quant-data dataset public build \
+  --config configs/sanos-public-candidate-reference.json
+sanos --root /path/to/quant-data dataset public validate \
+  --config configs/sanos-public-candidate-reference.json
+```
+
+The output is a self-contained `public_candidate`, not a redistribution
+approval. It contains normalized returns, SANOS/DLV state and geometry, and
+spot-one half-spreads, while excluding absolute levels, source identifiers,
+vendor analytics, liquidity fields, and raw books. Output-first reuse and
+shallow validation do not need the internal Dataset to remain present. See the
+[public Dataset runbook](docs/public-datasets.md) for the exact schema, units,
+capabilities, leakage boundary, wildcard behavior, and separate
+`approval-template`/`approve` rights-gated release workflow. Shallow validation
+checks public-only integrity and capabilities; `--deep-lineage` reprojects from
+the exact internal source to re-establish source-bound values.
 
 ## Internal Experiment materialization
 

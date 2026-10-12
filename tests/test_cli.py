@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from click.testing import CliRunner
 
+from sanos.artifacts import ArtifactPointer, StorageClass
 from sanos.cli import main
 from sanos.config import canonical_sha256, canonical_value
+from sanos.datasets.public import (
+    PublicApproval,
+    PublicProjectionConfig,
+    PublicReleaseConfig,
+)
 from sanos.widb import DailyWidbConfig
 
 
@@ -23,6 +30,13 @@ def test_help_lists_stable_command_groups() -> None:
         "dataset",
         "experiment",
     ):
+        assert command in result.output
+
+
+def test_public_dataset_help_lists_human_release_workflow() -> None:
+    result = CliRunner().invoke(main, ["dataset", "public", "--help"])
+    assert result.exit_code == 0, result.output
+    for command in ("build", "validate", "approval-template", "approve"):
         assert command in result.output
 
 
@@ -66,6 +80,9 @@ def test_status_json_reports_daily_intermediate_capability(tmp_path: Path) -> No
     assert payload["intermediate_build_available"] is True
     assert payload["dataset_build_available"] is True
     assert payload["dataset_validate_available"] is True
+    assert payload["public_candidate_build_available"] is True
+    assert payload["public_candidate_validate_available"] is True
+    assert payload["public_release_approval_available"] is True
     assert payload["experiment_build_available"] is True
     assert payload["experiment_validate_available"] is True
     assert payload["live_wrds_verified"] is False
@@ -270,6 +287,125 @@ def test_dataset_validate_never_builds_a_missing_dataset(tmp_path: Path) -> None
     assert payload["event"] == "error"
     assert "never builds or publishes" in payload["message"]
     assert not (tmp_path / "data").exists()
+
+
+def test_public_candidate_build_dry_run_is_structured_offline_and_non_mutating(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    config = Path(__file__).parents[1] / "configs" / "sanos-public-candidate-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "dataset",
+            "public",
+            "build",
+            "--config",
+            str(config),
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["event"] == "public_candidate_result"
+    assert payload["distribution"] == "public_candidate"
+    assert payload["built"] is False
+    assert payload["reused"] is False
+    assert payload["dry_run"] is True
+    assert payload["source_accessed"] is False
+    assert payload["network_accessed"] is False
+    assert len(payload["identity"]) == 64
+    assert not root.exists()
+
+
+def test_public_candidate_validate_never_builds_a_missing_candidate(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "configs" / "sanos-public-candidate-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "--log-format",
+            "json",
+            "dataset",
+            "public",
+            "validate",
+            "--config",
+            str(config),
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 4
+    payload = json.loads(result.output)
+    assert payload["event"] == "error"
+    assert "validation never builds" in payload["message"]
+    assert not (tmp_path / "data").exists()
+
+
+def test_public_release_approve_dry_run_is_offline_and_needs_no_license_file(
+    tmp_path: Path,
+) -> None:
+    projection = PublicProjectionConfig.from_document(
+        json.loads(
+            (
+                Path(__file__).parents[1]
+                / "configs"
+                / "sanos-public-candidate-reference.json"
+            ).read_text(encoding="utf-8")
+        )
+    )
+    release = PublicReleaseConfig(
+        projection=projection,
+        approval=PublicApproval(
+            candidate_dataset=ArtifactPointer(
+                StorageClass.DATASET,
+                "sanos/public-candidate/name-test",
+                "a" * 64,
+            ),
+            candidate_manifest_sha256="b" * 64,
+            candidate_logical_content_sha256="c" * 64,
+            release_license="TEST-ONLY",
+            redistribution_basis="Dry-run fixture",
+            approver="pytest",
+            approval_date=date(2026, 10, 12),
+            approval_reference="test://dry-run",
+            license_sha256="d" * 64,
+        ),
+    )
+    config_path = tmp_path / "release.json"
+    config_path.write_text(json.dumps(release.to_document()), encoding="utf-8")
+    root = tmp_path / "data"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "dataset",
+            "public",
+            "approve",
+            "--config",
+            str(config_path),
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["event"] == "public_release_result"
+    assert payload["distribution"] == "public"
+    assert payload["dry_run"] is True
+    assert payload["source_accessed"] is False
+    assert payload["network_accessed"] is False
+    assert not root.exists()
 
 
 def test_experiment_build_dry_run_is_structured_offline_and_non_mutating(

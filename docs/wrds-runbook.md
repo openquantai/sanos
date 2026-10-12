@@ -33,10 +33,10 @@ sanos --dry-run raw download \
 
 The dry run neither reads WRDS credentials nor creates a data root. It reports
 the requested NYSE sessions, cache hits and misses, and boundary partitions.
-For the first date, the conservative boundary closure includes the fresh
-previous-session close, forward curve, and zero curve needed to evaluate the
-proposed forward-adjusted-return rule. Downloading those inputs does not approve
-or implement that still-open semantic rule (CD-004).
+For the first date, the boundary closure includes the fresh previous-session
+close needed by the internal legacy-compatible return. CD-004 makes the first
+public return null, so it requires no pre-start forward or zero curve. A planner
+may report such inputs as conservative over-fetch, but not as a requirement.
 
 Use `--table options` (repeatable) to select logical tables. Security identity
 is always included. Direct secid override is deliberately unavailable while the

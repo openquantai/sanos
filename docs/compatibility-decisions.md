@@ -48,19 +48,32 @@ both accepted it. Only `approved` may alter reference behavior.
 
 ## CD-004 — Public forward-adjusted spot return
 
-- **Status:** open for explicit user approval; legacy behavior is frozen.
+- **Status:** approved for the standalone public-projection contract on
+  2026-10-12. The user authorized the dual-reviewed Phase 8 recommendation to
+  proceed while they were away. Legacy internal behavior remains frozen.
 - **Evidence:** legacy `normalize_day` records `spot_ret = S_t/S_previous - 1`.
   It does not carry-adjust the return and must not be relabelled.
-- **Proposed public contract:** for consecutive retained observations, compute
-  the previous-date carry
-  `c_t = F_(t-1)(t)/S_(t-1)`, its discount factor, and
-  `forward_adjusted_spot_return = (S_t/S_(t-1))/c_t - 1`. Interpolate positive
-  forward and discount curves log-linearly in business DTE with a DTE-zero
-  anchor of one. Publish only the resulting return; the first retained date is
-  null. Record the formula and required boundary inputs in configuration and
-  provenance rather than adding carry fields to the public allowlist.
-- **Expected impact:** adds a distinct public field and fresh raw boundary
-  dependencies; it does not replace internal `spot_ret`.
+- **Approved public contract:** public rows contain exactly the populated
+  retained internal dates in ascending order. Policy-owned typed-empty dates
+  are omitted and recorded in coverage evidence; any other empty date or a
+  populated date with no retained public book fails publication. For each pair
+  of consecutive public rows, let `h_t` be the number of NYSE business
+  sessions in `(t-1,t]`. From the previous public date's distinct expiry curve,
+  form positive nodes `q_j=F_j/S_(t-1)` and `d_j=DF_j`, add `(0,1)` anchors,
+  require increasing business-DTE nodes with consistent duplicates, and
+  interpolate `log(q)` and `log(d)` linearly at `h_t`. Exact nodes use the
+  exact value; extrapolation beyond the final node is forbidden. Validate the
+  discount interpolation as build evidence, but do not publish it. With
+  `c_t=q(h_t)`, publish
+  `forward_adjusted_spot_return = (S_t/S_(t-1))/c_t - 1` in Float64. The first
+  public row is null. After an omitted typed-empty date, use the immediately
+  preceding public row and the corresponding multi-session horizon. Weekends
+  and holidays affect only the session count; a half-day counts as one
+  session. Publish neither the absolute spots nor carry/discount inputs.
+- **Expected impact:** adds a distinct public field and uses each preceding
+  retained public day's forward curve. Because the first public return is null,
+  it adds no pre-start forward/zero boundary dependency and does not replace
+  internal `spot_ret`.
 
 ## CD-005 — Fit-percentage label ambiguity
 
@@ -122,15 +135,19 @@ both accepted it. Only `approved` may alter reference behavior.
 
 ## CD-009 — Public spread/model-price unit bridge
 
-- **Status:** open for explicit user approval; the dimensionally consistent
-  proposal is frozen for review.
+- **Status:** approved for the standalone public-projection contract on
+  2026-10-12. The user authorized the dual-reviewed Phase 8 recommendation to
+  proceed while they were away. This approval is technical, not a grant of
+  redistribution rights.
 - **Evidence:** legacy pure model prices use `C/(DF*F)`, while the requested
   public spreads use `half_spread/S`. They cannot be compared without carry.
-- **Proposed public contract:** retain fitted prices in discounted-forward units
-  and half-spreads in spot-one units, plus per-expiry
-  `discounted_forward_over_spot = DF*(F/S)`. Then
+- **Approved public contract:** model prices remain reconstructed in
+  discounted-forward units. Publish only per-expiry
+  `discounted_forward_over_spot = DF*(F/S)` in positive finite Float64 and
+  per-book `half_spread_spot = half_spread/S` in positive finite Float64. Then
   `C/S = discounted_forward_over_spot * C/(DF*F)` and
-  `h/(DF*F) = (h/S)/discounted_forward_over_spot`.
+  `h/(DF*F) = (h/S)/discounted_forward_over_spot`. Do not publish `DF`, `F/S`,
+  spot, forward, absolute strikes, absolute prices, or carry separately.
 - **Expected impact:** adds dimensionless interpreting geometry without an
   absolute spot field or reconstructable vendor price level.
 
@@ -346,10 +363,10 @@ both accepted it. Only `approved` may alter reference behavior.
 
 ## User decision required before affected implementation
 
-The first decisions requiring an explicit choice are CD-002, CD-003, CD-004,
-CD-006, CD-009, CD-010, CD-012, CD-013, CD-015, CD-020, and CD-021. CD-014 and
+The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
+CD-010, CD-012, CD-013, CD-015, CD-020, and CD-021. CD-014 and
 CD-016 through CD-019 need a choice only if their preserved compatibility
 behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
-scaffolding while those specific behavior points remain blocked. CD-022 is
-resolved by the approved corrected inverse and its irregular-grid regressions.
+scaffolding while those specific behavior points remain blocked. CD-004,
+CD-009, and CD-022 are resolved by their approved contracts and regressions.

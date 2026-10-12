@@ -199,9 +199,8 @@ c - p = 1 - k
 The legacy internal `spot_ret` is only `S_t / S_previous - 1`; it is not the
 public forward-adjusted return. Requested public half-spreads use
 `half_spread / S`. A model price in discounted-forward units can be converted
-by `C/S = DF*(F/S)*C/(DF*F)`. The proposal under CD-009 would therefore retain
-the dimensionless `DF*(F/S)` interpreting bridge without exposing absolute
-spot, but that public field is not normative until explicitly approved.
+by `C/S = DF*(F/S)*C/(DF*F)`. Approved CD-009 therefore retains the
+dimensionless `DF*(F/S)` interpreting bridge without exposing absolute spot.
 
 The exact reconstructing state and expiry-pricing policy are frozen in
 `docs/data-contracts.md`. In particular, surface support/densities
