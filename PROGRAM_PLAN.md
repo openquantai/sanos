@@ -1,6 +1,6 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0 through 6 are complete with dual
+Status: implementation in progress; Phases 0 through 7 are complete with dual
 review. No live WRDS access has occurred.
 
 Initial review anchors are paper commit

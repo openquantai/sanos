@@ -14,8 +14,11 @@ import polars as pl
 import pytest
 from cdxcore.bs import bs
 
+import sanos.datasets.internal as internal_dataset_module
 import sanos.widb.surface as surface_module
-from sanos.config import canonical_sha256
+from sanos.config import canonical_json, canonical_sha256
+from sanos.datasets import InternalDatasetConfig
+from sanos.datasets.internal import DatasetValidationError, validate_fitted_partition
 from sanos.widb import (
     ENRICHED_SCHEMA,
     FILTERED_SCHEMA,
@@ -491,6 +494,230 @@ def test_initial_and_smooth_states_match_pinned_reference(
     )
 
 
+def test_two_expiry_fitted_frame_passes_dataset_quantitative_boundary(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    config = InternalDatasetConfig(
+        name="two-expiry-validation",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=DailySurfaceConfig(),
+    )
+    statistics = validate_fitted_partition(
+        fitted,
+        config=config,
+        trading_date=date(2024, 1, 3),
+        typed_empty_reason=None,
+    )
+    assert statistics.input_expiries == 2
+    assert statistics.smooth_retained_expiries == 2
+    assert statistics.residual_maxima["dlv_density_roundtrip"] <= 2.0e-14
+
+
+def test_dataset_quantitative_boundary_rejects_state_config_and_clock_corruption(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    config = InternalDatasetConfig(
+        name="two-expiry-adversarial-validation",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=DailySurfaceConfig(),
+    )
+
+    def inconsistent_last(column: str, value: str) -> pl.DataFrame:
+        return (
+            fitted.with_row_index("__row")
+            .with_columns(
+                pl.when(pl.col("__row") == fitted.height - 1)
+                .then(pl.lit(value))
+                .otherwise(pl.col(column))
+                .alias(column)
+            )
+            .drop("__row")
+        )
+
+    def clear_first_true(column: str) -> pl.DataFrame:
+        row = int(
+            np.flatnonzero(fitted.get_column(column).to_numpy().astype(bool))[0]
+        )
+        return (
+            fitted.with_row_index("__row")
+            .with_columns(
+                pl.when(pl.col("__row") == row)
+                .then(pl.lit(False))
+                .otherwise(pl.col(column))
+                .alias(column)
+            )
+            .drop("__row")
+        )
+
+    corruptions = {
+        "duplicate_expiry_strike_key": pl.concat(
+            (fitted.slice(0, 1), fitted), how="vertical"
+        ),
+        "configuration_id": fitted.with_columns(
+            pl.lit("0" * 64).alias("configuration_id")
+        ),
+        "stage_version": fitted.with_columns(pl.lit("corrupt").alias("stage_version")),
+        "raw_options_artifact_id": fitted.with_columns(
+            pl.lit("1" * 64).alias("raw_options_artifact_id")
+        ),
+        "surface_min_half_spread": fitted.with_columns(
+            pl.lit(0.123).alias("surface_min_half_spread")
+        ),
+        "pure_fit1_price": fitted.with_columns(
+            (pl.col("pure_fit1_price") + 0.01).alias("pure_fit1_price")
+        ),
+        "mask_arb_free": clear_first_true("mask_arb_free"),
+        "smooth_fit_mask": clear_first_true("smooth_fit_mask"),
+        "pure_bid_delta": fitted.with_columns(
+            (pl.col("pure_bid_delta") + 0.25).alias("pure_bid_delta")
+        ),
+        "pure_bid_delta_nan": fitted.with_columns(
+            pl.lit(float("nan"), dtype=pl.Float32).alias("pure_bid_delta")
+        ),
+        "pure_fitX_gamma_positive_infinity": fitted.with_columns(
+            pl.lit(float("inf"), dtype=pl.Float32).alias("pure_fitX_gamma")
+        ),
+        "smooth_pcnt_fit_negative_infinity": fitted.with_columns(
+            pl.lit(float("-inf"), dtype=pl.Float64).alias("smooth_pcnt_fit")
+        ),
+        "fit1_volatility": fitted.with_columns(
+            (pl.col("fit1_volatility") + 0.25).alias("fit1_volatility")
+        ),
+        "pure_fit1_delta": fitted.with_columns(
+            (pl.col("pure_fit1_delta") + 0.25).alias("pure_fit1_delta")
+        ),
+        "fitX_volatility": fitted.with_columns(
+            (pl.col("fitX_volatility") + 0.25).alias("fitX_volatility")
+        ),
+        "pure_fitX_gamma": fitted.with_columns(
+            (pl.col("pure_fitX_gamma") + 0.25).alias("pure_fitX_gamma")
+        ),
+        "initial_expiry_density": fitted.with_columns(
+            pl.col("initial_expiry_model_density")
+            .list.eval(pl.element() * 0.0)
+            .alias("initial_expiry_model_density")
+        ),
+        "smooth_expiry_density": fitted.with_columns(
+            pl.col("smooth_expiry_model_density")
+            .list.eval(pl.element() * 0.0)
+            .alias("smooth_expiry_model_density")
+        ),
+        "smooth_surface_strikes_nan": fitted.with_columns(
+            pl.col("smooth_surface_model_strikes")
+            .list.eval(pl.element() * float("nan"))
+            .alias("smooth_surface_model_strikes")
+        ),
+        "initial_mapping": fitted.with_columns(
+            pl.col("initial_x_to_surface_indices")
+            .list.eval(pl.element() * 0)
+            .alias("initial_x_to_surface_indices")
+        ),
+        "smooth_mapping": fitted.with_columns(
+            pl.col("smooth_x_to_surface_indices")
+            .list.eval(pl.element() * 0)
+            .alias("smooth_x_to_surface_indices")
+        ),
+        "spot_return": fitted.with_columns(
+            pl.lit(999.0, dtype=pl.Float32).alias("spot_return")
+        ),
+        "calendar_dte": fitted.with_columns(
+            (pl.col("calendar_dte") + pl.lit(1, dtype=pl.Int32)).alias("calendar_dte")
+        ),
+        "business_dte": fitted.with_columns(
+            (pl.col("business_dte") + pl.lit(1.0, dtype=pl.Float32)).alias("business_dte")
+        ),
+        "smooth_expiry_fit_price": fitted.with_columns(
+            (pl.col("smooth_expiry_fit_price") + 0.01).alias("smooth_expiry_fit_price")
+        ),
+        "smooth_fit_summary": fitted.with_columns(
+            (pl.col("smooth_pcnt_fit") + 0.01).alias("smooth_pcnt_fit")
+        ),
+        "no_arb_diagnostics": inconsistent_last("no_arb_diagnostics_json", "{}"),
+        "filter_diagnostics": inconsistent_last("filter_diagnostics_json", "{}"),
+        "smooth_diagnostics": inconsistent_last("smooth_diagnostics_json", "{}"),
+    }
+    for corrupted in corruptions.values():
+        with pytest.raises(DatasetValidationError, match=".+"):
+            validate_fitted_partition(
+                corrupted,
+                config=config,
+                trading_date=date(2024, 1, 3),
+                typed_empty_reason=None,
+            )
+
+
+def test_dataset_finiteness_gate_covers_every_present_float_field(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    bad_values = (float("nan"), float("inf"), float("-inf"))
+    checked: list[str] = []
+    for field_index, (column, dtype) in enumerate(FITTED_SCHEMA.items()):
+        bad_value = bad_values[field_index % len(bad_values)]
+        series = fitted.get_column(column)
+        if dtype in (pl.Float32, pl.Float64):
+            present = np.flatnonzero(series.is_not_null().to_numpy())
+            if not len(present):
+                continue
+            row_index = int(present[0])
+            corrupted = (
+                fitted.with_row_index("__row")
+                .with_columns(
+                    pl.when(pl.col("__row") == row_index)
+                    .then(pl.lit(bad_value, dtype=dtype))
+                    .otherwise(pl.col(column))
+                    .alias(column)
+                )
+                .drop("__row")
+            )
+        elif dtype in (pl.List(pl.Float32), pl.List(pl.Float64)):
+            values = series.to_list()
+            row_index = next(
+                (
+                    index
+                    for index, items in enumerate(values)
+                    if items is not None and len(items) > 0
+                ),
+                None,
+            )
+            if row_index is None:
+                continue
+            values[row_index][0] = bad_value
+            corrupted = fitted.with_columns(pl.Series(column, values, dtype=dtype))
+        else:
+            continue
+        with pytest.raises(DatasetValidationError, match=column):
+            internal_dataset_module._validate_fitted_numeric_finiteness(corrupted)
+        checked.append(column)
+
+    expected = {
+        name
+        for name, dtype in FITTED_SCHEMA.items()
+        if dtype in (
+            pl.Float32,
+            pl.Float64,
+            pl.List(pl.Float32),
+            pl.List(pl.Float64),
+        )
+        and fitted.get_column(name).drop_nulls().len()
+    }
+    assert set(checked) == expected
+
+
 def test_initial_daily_mapping_matches_reference_with_boundary_mask(
     phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
 ) -> None:
@@ -713,6 +940,75 @@ def test_no_selected_options_still_records_smooth_configuration_identity(
             }
         )
     ]
+
+
+def test_natural_zero_selected_day_passes_dataset_boundary(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    no_arb = phase6_frames[1]
+    surface = DailySurfaceConfig(
+        options_filter=replace(
+            DailySurfaceConfig().options_filter,
+            min_log_volume=1.0e6,
+        )
+    )
+    fitted = fit_smooth_sanos(apply_options_filter(no_arb, config=surface), config=surface)
+    config = InternalDatasetConfig(
+        name="zero-selected-validation",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=surface,
+    )
+    statistics = validate_fitted_partition(
+        fitted,
+        config=config,
+        trading_date=date(2024, 1, 3),
+        typed_empty_reason=None,
+    )
+    assert statistics.eligible_rows == 0
+    assert statistics.smooth_retained_expiries == 0
+
+    filter_diagnostics = json.loads(
+        fitted.get_column("filter_diagnostics_json").item(0)
+    )
+    candidate = int(
+        np.flatnonzero(
+            fitted.get_column("filter_horizon_eligible").to_numpy().astype(bool)
+            & fitted.get_column("filter_nms_eligible").to_numpy().astype(bool)
+            & ~fitted.get_column("filter_volume_eligible").to_numpy().astype(bool)
+        )[0]
+    )
+    filter_diagnostics["counts"]["horizon"] -= 1
+    filter_diagnostics["counts"]["nms"] -= 1
+    corrupted_filter = (
+        fitted.with_row_index("__row")
+        .with_columns(
+            pl.when(pl.col("__row") == candidate)
+            .then(pl.lit(False))
+            .otherwise(pl.col("filter_horizon_eligible"))
+            .alias("filter_horizon_eligible"),
+            pl.when(pl.col("__row") == candidate)
+            .then(pl.lit(False))
+            .otherwise(pl.col("filter_nms_eligible"))
+            .alias("filter_nms_eligible"),
+            pl.lit(canonical_json(filter_diagnostics)).alias(
+                "filter_diagnostics_json"
+            ),
+        )
+        .drop("__row")
+    )
+    with pytest.raises(DatasetValidationError, match="canonical OptionsFilter"):
+        validate_fitted_partition(
+            corrupted_filter,
+            config=config,
+            trading_date=date(2024, 1, 3),
+            typed_empty_reason=None,
+        )
 
 
 def test_solver_failure_retains_structured_events_in_error(

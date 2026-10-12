@@ -12,17 +12,19 @@ dataset will be the canonical reference dataset.
 
 ## Current status
 
-Phases 0 through 6 are complete with code and quantitative review. The daily
+Phases 0 through 7 are complete with code and quantitative review. The daily
 no-arbitrage, filtering, compatibility-DLV and smooth-SANOS stages are available
-through the CLI. CD-020's
+through the CLI, together with output-first internal Dataset build and
+validation commands. CD-020's
 all-valid-day failure is preserved for parity; repairing it remains an optional
 future change requiring approval. All
 ordinary tests, including the guarded WRDS layer, are offline; no live WRDS
 access has occurred yet. The exact 2022–2025 legacy comparison endpoint and
-numerical baseline are catalogued. Dataset and experiment commands still fail with an
-actionable "not implemented" message until their reviewed phases land. See
+numerical baseline are catalogued. Public-Dataset and experiment commands still
+fail with an actionable "not implemented" message until their reviewed phases land. See
 [the legacy baseline](docs/reference-baseline.md) for the 891-date parity
-oracle and the distinction between its legacy artifact populations.
+oracle and the distinction between its legacy artifact populations. Public
+projection and experiment commands remain gated to later phases.
 
 ## Development installation
 
@@ -106,3 +108,28 @@ DLV state and the post-filter smooth 0.25 SANOS state as typed list columns.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.
+
+## Internal Dataset publication
+
+Build the complete internal research Dataset offline from fresh Raw artifacts:
+
+```bash
+sanos --root /path/to/quant-data --dry-run dataset build \
+  --config configs/widb-spx-reference.json
+sanos --root /path/to/quant-data dataset build \
+  --config configs/widb-spx-reference.json --max-workers 2
+sanos --root /path/to/quant-data dataset validate \
+  --config configs/widb-spx-reference.json
+```
+
+The default reference profile plans all 918 NYSE sessions from 2022-01-03
+through 2025-08-29, including half days; the pinned 2025-01-08 bad-data entry is
+an exact-schema typed-empty partition. Dataset publication copies each complete
+daily fitted frame losslessly and adds portable schema, partition, lineage,
+validation, legacy-comparison, and configuration evidence.
+
+The resulting Dataset loads and validates without Raw or Intermediate files.
+Pass `--deep-lineage` before cleanup when you also want to validate all recorded
+fitted and Raw ancestors. `--version '*'` can reuse a complete compatible
+Dataset but cannot build one. See the full
+[internal Dataset runbook](docs/internal-datasets.md).

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import platform
 import sys
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +16,7 @@ from typing import Any
 import click
 
 from sanos import __version__
-from sanos.artifacts import ArtifactError, ArtifactStore
+from sanos.artifacts import ArtifactError, ArtifactPointer, ArtifactStore, StorageClass
 from sanos.config import (
     LocationConfigurationError,
     LocationOverrides,
@@ -23,6 +24,13 @@ from sanos.config import (
     canonical_sha256,
     canonical_value,
     resolve_locations,
+)
+from sanos.datasets import (
+    DatasetBuildOptions,
+    InternalDatasetConfig,
+    build_internal_dataset,
+    plan_internal_dataset,
+    validate_internal_dataset,
 )
 from sanos.pipeline import DailyExecutionError
 from sanos.widb.build import IntermediateBuildRequest, build_intermediates
@@ -187,6 +195,16 @@ def _location_payload(resolution: LocationResolution) -> dict[str, Any]:
     }
 
 
+def _read_dataset_config(path: Path) -> InternalDatasetConfig:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read Dataset configuration {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Dataset configuration must contain a JSON object")
+    return InternalDatasetConfig.from_document(document)
+
+
 @click.group(cls=SanosGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="sanos")
 @click.option("-v", "--verbose", count=True, help="Increase diagnostic output.")
@@ -324,6 +342,8 @@ def status(context: CliContext) -> None:
         material_pipeline_available=True,
         raw_download_available=True,
         intermediate_build_available=True,
+        dataset_build_available=True,
+        dataset_validate_available=True,
         live_wrds_verified=False,
         network_accessed=False,
         dry_run=context.dry_run,
@@ -616,7 +636,7 @@ def intermediate_build(
             ) from exc
         if not isinstance(document, dict) or "daily" not in document:
             raise ValueError("Intermediate configuration must contain a 'daily' object")
-        unknown = set(document) - {"daily", "surface"}
+        unknown = set(document) - {"dataset", "daily", "surface"}
         if unknown:
             raise ValueError(f"Unknown intermediate configuration sections: {sorted(unknown)}")
         if not isinstance(document["daily"], dict):
@@ -708,17 +728,221 @@ def dataset() -> None:
 
 
 @dataset.command("build")
-def dataset_build() -> None:
-    """Build and publish a dataset."""
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict portable JSON containing dataset, daily, and surface sections.",
+)
+@click.option(
+    "--max-workers",
+    type=click.IntRange(1, 4),
+    default=1,
+    show_default=True,
+    help="Bound local per-day fitting workers; no WRDS connections are opened.",
+)
+@click.option(
+    "--require-existing-intermediates",
+    is_flag=True,
+    help="Fail on a missing fitted day instead of rebuilding it from existing Raw data.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete Dataset across producer versions.",
+)
+@click.pass_obj
+def dataset_build(
+    context: CliContext,
+    config_path: Path,
+    max_workers: int,
+    require_existing_intermediates: bool,
+    version_request: str,
+) -> None:
+    """Build and atomically publish a self-contained internal Dataset."""
 
-    _phase_not_implemented("dataset build", "Phase 7")
+    try:
+        locations = context.locations.require_complete()
+        config = _read_dataset_config(config_path)
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "dataset_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        with warnings.catch_warnings(record=True) as warning_records:
+            warnings.simplefilter("always")
+            result = build_internal_dataset(
+                locations,
+                config,
+                DatasetBuildOptions(
+                    max_workers=max_workers,
+                    require_existing_intermediates=require_existing_intermediates,
+                    version_override="*" if version_request == "*" else None,
+                ),
+                dry_run=context.dry_run,
+                progress=progress,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except DailyExecutionError as exc:
+        details = "; ".join(
+            f"{failure.key}: {failure.error_type}: {failure.message}"
+            for failure in exc.summary.failures
+        )
+        raise MaterialCliError(
+            f"{exc}{'; ' if details else ''}{details}",
+            log_format=context.log_format,
+        ) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "dataset_result",
+        artifact=result.artifact,
+        path=result.path,
+        identity=result.artifact.artifact_id,
+        plan_id=result.plan.plan_id,
+        planned_dates=len(result.plan.expected_dates),
+        built=result.built,
+        reused=result.reuse is not None,
+        reuse_record=None if result.reuse is None else result.reuse.as_log_record(),
+        dry_run=result.dry_run,
+        network_accessed=False,
+        journal=result.journal_path,
+        validation=None if result.validation is None else result.validation.as_dict(),
+    )
 
 
 @dataset.command("validate")
-def dataset_validate() -> None:
-    """Validate an existing dataset."""
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Resolve the Dataset identity from a strict portable configuration.",
+)
+@click.option("--name", help="Dataset name for exact-ID validation.")
+@click.option("--artifact-id", help="Exact 64-hex Dataset artifact identity.")
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only with --config to find an existing compatible Dataset.",
+)
+@click.option(
+    "--deep-lineage",
+    is_flag=True,
+    help="Also require the recorded fitted-day, Raw catalog, and Raw lineage.",
+)
+@click.option(
+    "--integrity-only",
+    is_flag=True,
+    help="Check immutable files and manifest without recomputing quantitative invariants.",
+)
+@click.pass_obj
+def dataset_validate(
+    context: CliContext,
+    config_path: Path | None,
+    name: str | None,
+    artifact_id: str | None,
+    version_request: str,
+    deep_lineage: bool,
+    integrity_only: bool,
+) -> None:
+    """Validate an existing Dataset without rebuilding or network access."""
 
-    _phase_not_implemented("dataset validate", "Phase 7")
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        warning_records: Sequence[warnings.WarningMessage] = ()
+        if config_path is not None:
+            if name is not None or artifact_id is not None:
+                raise ValueError("Use either --config or --name with --artifact-id, not both")
+            config = _read_dataset_config(config_path)
+            plan = plan_internal_dataset(config)
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
+                reuse = store.resolve(
+                    plan.dataset_spec,
+                    version="*" if version_request == "*" else None,
+                )
+            warning_records = tuple(caught_warnings)
+            if reuse is None:
+                raise ValueError(
+                    "Requested Dataset is absent; validation never builds or publishes it"
+                )
+            pointer = reuse.artifact.pointer
+            reuse_record: Any = reuse.as_log_record()
+        else:
+            if name is None or artifact_id is None:
+                raise ValueError("Provide --config or both --name and --artifact-id")
+            if version_request == "*":
+                raise ValueError("--version '*' requires --config; exact-ID validation is concrete")
+            config = None
+            pointer = ArtifactPointer(
+                StorageClass.DATASET,
+                f"widb/internal/name-{name}",
+                artifact_id,
+            )
+            reuse_record = None
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "dataset_validation_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        summary = validate_internal_dataset(
+            store,
+            pointer,
+            semantic=not integrity_only,
+            deep_lineage=deep_lineage,
+            progress=progress,
+        )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "dataset_validation_result",
+        status="passed",
+        artifact=pointer,
+        path=store.path_for(pointer),
+        identity=pointer.artifact_id,
+        semantic=not integrity_only,
+        deep_lineage=deep_lineage,
+        network_accessed=False,
+        filesystem_modified=False,
+        config=None if config is None else canonical_value(config),
+        reuse_record=reuse_record,
+        summary=None if summary is None else summary.as_dict(),
+    )
 
 
 @main.group()

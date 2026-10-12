@@ -139,7 +139,7 @@ FITTED_SCHEMA_VERSION = str(_fitted_only_schema.version)
 
 
 @version("1.0")
-def _empty(schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
+def _empty_surface_frame(schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
     return pl.DataFrame(schema=schema)
 
 
@@ -282,7 +282,7 @@ def _state_lists(
         _make_no_arb_fitter,
         _no_arb_only_schema,
         _surface_dlv_squares,
-        _empty,
+        _empty_surface_frame,
         _require_schema,
         _float_column,
         _nullable_float32,
@@ -305,7 +305,7 @@ def fit_initial_no_arbitrage(
     """Append the pre-filter linear surface state without discarding audit rows."""
 
     if frame.is_empty():
-        return _empty(NO_ARB_SCHEMA)
+        return _empty_surface_frame(NO_ARB_SCHEMA)
     _require_schema(frame, ENRICHED_SCHEMA, "enriched-day")
     row_count = frame.height
     all_rows = np.ones(row_count, dtype=bool)
@@ -555,7 +555,7 @@ def _cap_positions(
     dependencies=[
         _cap_positions,
         _filter_only_schema,
-        _empty,
+        _empty_surface_frame,
         _require_schema,
         _set_first_reason,
         OptionsFilterConfig,
@@ -572,7 +572,7 @@ def apply_options_filter(
     """Apply the exact legacy filter order while retaining rejection evidence."""
 
     if frame.is_empty():
-        return _empty(FILTERED_SCHEMA)
+        return _empty_surface_frame(FILTERED_SCHEMA)
     _require_schema(frame, NO_ARB_SCHEMA, "no-arb-day")
     rules = config.options_filter
     count = frame.height
@@ -753,7 +753,7 @@ def _finish_empty_smooth(
         _fitted_only_schema,
         _make_no_arb_fitter,
         _surface_dlv_squares,
-        _empty,
+        _empty_surface_frame,
         _require_schema,
         _float_column,
         _float32_column,
@@ -775,7 +775,7 @@ def fit_smooth_sanos(
     """Fit the production smooth surface to the exact filtered population."""
 
     if frame.is_empty():
-        return _empty(FITTED_SCHEMA)
+        return _empty_surface_frame(FITTED_SCHEMA)
     _require_schema(frame, FILTERED_SCHEMA, "filtered-day")
     selected = frame.get_column("options_filter_eligible").to_numpy().astype(bool)
     count = frame.height

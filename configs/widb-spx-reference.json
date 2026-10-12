@@ -1,4 +1,13 @@
 {
+  "dataset": {
+    "end_date": "2025-08-29",
+    "include_half_days": true,
+    "name": "widb-spx-2022-2025-reference",
+    "source": "optionmetrics",
+    "source_generation": "default-v1",
+    "start_date": "2022-01-03",
+    "ticker": "SPX"
+  },
   "daily": {
     "clock": {
       "overnight_variance_fraction": 0.2

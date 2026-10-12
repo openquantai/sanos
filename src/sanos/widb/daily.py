@@ -193,7 +193,7 @@ ENRICHED_SCHEMA = PAIRED_SCHEMA | ENRICHED_ONLY_SCHEMA
 
 
 @version("1.0")
-def _empty(schema: dict[str, pl.DataType]) -> pl.DataFrame:
+def _empty_daily_frame(schema: dict[str, pl.DataType]) -> pl.DataFrame:
     return pl.DataFrame(schema=schema)
 
 
@@ -295,7 +295,7 @@ def _validate_constant_fields(frame: pl.DataFrame) -> None:
 @version(
     "1.2",
     dependencies=[
-        _empty,
+        _empty_daily_frame,
         _one_positive_value,
         _require_raw_schema,
         _validate_constant_fields,
@@ -334,7 +334,7 @@ def pair_daily_frame(
     configuration_id = canonical_sha256(config)
     reason = bad_day_reason(ticker, trading_date)
     if reason is not None:
-        return _empty(PAIRED_SCHEMA)
+        return _empty_daily_frame(PAIRED_SCHEMA)
 
     security = _require_raw_schema(raw.security, RawTable.SECURITY)
     options = _require_raw_schema(raw.options, RawTable.OPTIONS)
@@ -617,7 +617,7 @@ def pair_daily_frame(
 @version(
     "1.2",
     dependencies=[
-        _empty,
+        _empty_daily_frame,
         _series,
         _validate_constant_fields,
         DailyWidbConfig,
@@ -642,7 +642,7 @@ def enrich_daily_frame(
     # CD-003 preserves the reference's observable typed-empty behavior: an empty
     # input is not schema-validated before returning a typed empty enriched frame.
     if frame.is_empty():
-        return _empty(ENRICHED_SCHEMA)
+        return _empty_daily_frame(ENRICHED_SCHEMA)
     if frame.schema != pl.Schema(PAIRED_SCHEMA):
         missing = sorted(set(PAIRED_SCHEMA) - set(frame.columns))
         unexpected = sorted(set(frame.columns) - set(PAIRED_SCHEMA))

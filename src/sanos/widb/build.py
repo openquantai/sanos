@@ -8,7 +8,7 @@ import re
 import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -111,6 +111,31 @@ class RawDayPointers:
         )
 
 
+@version("1.0", dependencies=[RawDayPointers, ArtifactSpec])
+@dataclass(frozen=True, slots=True)
+class DailyArtifactPlan:
+    """Exact Raw and daily-stage identities for one planned trading session."""
+
+    trading_date: date
+    raw: RawDayPointers
+    paired: ArtifactSpec
+    enriched: ArtifactSpec
+    no_arb: ArtifactSpec
+    filtered: ArtifactSpec
+    fitted: ArtifactSpec
+
+    def stage_spec(self, stage: IntermediateStage) -> ArtifactSpec:
+        """Return the immutable specification for a named daily stage."""
+
+        return {
+            "paired-day": self.paired,
+            "enriched-day": self.enriched,
+            "no-arb-day": self.no_arb,
+            "filtered-day": self.filtered,
+            "fitted-day": self.fitted,
+        }[stage]
+
+
 @version("1.0")
 @dataclass(frozen=True, slots=True)
 class IntermediateBuildRequest:
@@ -177,10 +202,17 @@ def plan_raw_day_pointers(
     source: str,
     source_generation: str,
     raw_producer_version: str,
+    previous_spot_date: date | None = None,
 ) -> RawDayPointers:
     """Plan the six location-independent Raw identities without reading files."""
 
-    previous = previous_business_day(trading_date)
+    previous = (
+        previous_business_day(trading_date)
+        if previous_spot_date is None
+        else previous_spot_date
+    )
+    if previous >= trading_date:
+        raise ValueError("previous_spot_date must precede trading_date")
 
     def pointer(table: RawTable, observation_date: date | None) -> ArtifactPointer:
         return raw_artifact_request(
@@ -438,6 +470,128 @@ def fitted_day_spec(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        DailyArtifactPlan,
+        plan_raw_day_pointers,
+        paired_day_spec,
+        enriched_day_spec,
+        no_arb_day_spec,
+        filtered_day_spec,
+        fitted_day_spec,
+    ],
+)
+def plan_daily_artifact(
+    *,
+    ticker: str,
+    trading_date: date,
+    source: str,
+    source_generation: str,
+    raw_producer_version: str,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig,
+    previous_spot_date: date | None = None,
+) -> DailyArtifactPlan:
+    """Plan the complete immutable identity chain for one trading session."""
+
+    raw = plan_raw_day_pointers(
+        ticker=ticker,
+        trading_date=trading_date,
+        source=source,
+        source_generation=source_generation,
+        raw_producer_version=raw_producer_version,
+        previous_spot_date=previous_spot_date,
+    )
+    paired = paired_day_spec(
+        ticker=ticker,
+        trading_date=trading_date,
+        config=daily_config,
+        raw=raw,
+    )
+    enriched = enriched_day_spec(
+        ticker=ticker,
+        trading_date=trading_date,
+        config=daily_config,
+        paired=paired.pointer,
+    )
+    no_arb = no_arb_day_spec(
+        ticker=ticker,
+        trading_date=trading_date,
+        config=surface_config,
+        enriched=enriched.pointer,
+    )
+    filtered = filtered_day_spec(
+        ticker=ticker,
+        trading_date=trading_date,
+        config=surface_config,
+        no_arb=no_arb.pointer,
+    )
+    fitted = fitted_day_spec(
+        ticker=ticker,
+        trading_date=trading_date,
+        config=surface_config,
+        filtered=filtered.pointer,
+    )
+    return DailyArtifactPlan(
+        trading_date=trading_date,
+        raw=raw,
+        paired=paired,
+        enriched=enriched,
+        no_arb=no_arb,
+        filtered=filtered,
+        fitted=fitted,
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        IntermediateBuildRequest,
+        DailyArtifactPlan,
+        business_dates,
+        plan_daily_artifact,
+        raw_content_producer_version,
+    ],
+)
+def plan_daily_artifacts(
+    request: IntermediateBuildRequest,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig = DailySurfaceConfig(),
+) -> tuple[DailyArtifactPlan, ...]:
+    """Plan every date and artifact identity without reading configured roots."""
+
+    dates = business_dates(
+        request.start_date,
+        request.end_date,
+        exclude_half_days=not request.include_half_days,
+    )
+    if not dates:
+        raise ValueError("The intermediate request contains no eligible NYSE sessions")
+    complete_schedule = business_dates(request.start_date - timedelta(days=14), request.end_date)
+    positions = {trading_date: index for index, trading_date in enumerate(complete_schedule)}
+    previous_dates: dict[date, date] = {}
+    for trading_date in dates:
+        position = positions.get(trading_date)
+        if position is None or position == 0:
+            raise RuntimeError(f"Cannot find the prior NYSE session for {trading_date}")
+        previous_dates[trading_date] = complete_schedule[position - 1]
+    raw_version = raw_content_producer_version()
+    return tuple(
+        plan_daily_artifact(
+            ticker=request.ticker,
+            trading_date=trading_date,
+            source=request.source,
+            source_generation=request.source_generation,
+            raw_producer_version=raw_version,
+            daily_config=daily_config,
+            surface_config=surface_config,
+            previous_spot_date=previous_dates[trading_date],
+        )
+        for trading_date in dates
+    )
+
+
 @version("1.0")
 def _write_parquet_durable(frame: pl.DataFrame, path: Path) -> None:
     frame.write_parquet(path, compression="zstd")
@@ -605,53 +759,25 @@ def _specs_from_item(
     config = _config_from_payload(payload)
     surface_config = _surface_config_from_payload(payload)
     ticker = _actual_ticker(item)
-    raw = plan_raw_day_pointers(
+    planned = plan_daily_artifact(
         ticker=ticker,
         trading_date=item.trading_date,
         source=str(payload["source"]),
         source_generation=str(payload["source_generation"]),
         raw_producer_version=str(payload["raw_producer_version"]),
-    )
-    paired = paired_day_spec(
-        ticker=ticker,
-        trading_date=item.trading_date,
-        config=config,
-        raw=raw,
-    )
-    enriched = enriched_day_spec(
-        ticker=ticker,
-        trading_date=item.trading_date,
-        config=config,
-        paired=paired.pointer,
-    )
-    no_arb = no_arb_day_spec(
-        ticker=ticker,
-        trading_date=item.trading_date,
-        config=surface_config,
-        enriched=enriched.pointer,
-    )
-    filtered = filtered_day_spec(
-        ticker=ticker,
-        trading_date=item.trading_date,
-        config=surface_config,
-        no_arb=no_arb.pointer,
-    )
-    fitted = fitted_day_spec(
-        ticker=ticker,
-        trading_date=item.trading_date,
-        config=surface_config,
-        filtered=filtered.pointer,
+        daily_config=config,
+        surface_config=surface_config,
     )
     return (
         store,
         config,
         surface_config,
-        raw,
-        paired,
-        enriched,
-        no_arb,
-        filtered,
-        fitted,
+        planned.raw,
+        planned.paired,
+        planned.enriched,
+        planned.no_arb,
+        planned.filtered,
+        planned.fitted,
     )
 
 
@@ -1008,7 +1134,7 @@ def build_daily_target(item: DailyWorkItem) -> ArtifactPointer:
         IntermediateBuildRequest,
         DailySurfaceConfig,
         DailyWidbConfig,
-        business_dates,
+        plan_daily_artifacts,
         filtered_day_producer_version,
         fitted_day_producer_version,
         no_arb_day_producer_version,
@@ -1026,13 +1152,8 @@ def plan_intermediate_build(
 ) -> DailyPlan:
     """Create the deterministic per-session plan without touching artifact roots."""
 
-    dates = business_dates(
-        request.start_date,
-        request.end_date,
-        exclude_half_days=not request.include_half_days,
-    )
-    if not dates:
-        raise ValueError("The intermediate request contains no eligible NYSE sessions")
+    artifacts = plan_daily_artifacts(request, config, surface_config)
+    dates = tuple(item.trading_date for item in artifacts)
     producer_by_stage = {
         "paired-day": paired_day_producer_version(),
         "enriched-day": enriched_day_producer_version(),
@@ -1147,6 +1268,7 @@ def build_intermediates(
 __all__ = [
     "IntermediateBuildRequest",
     "IntermediateBuildResult",
+    "DailyArtifactPlan",
     "RawDayPointers",
     "build_daily_target",
     "build_intermediates",
@@ -1161,6 +1283,8 @@ __all__ = [
     "paired_day_producer_version",
     "paired_day_spec",
     "plan_intermediate_build",
+    "plan_daily_artifact",
+    "plan_daily_artifacts",
     "plan_raw_day_pointers",
     "probe_daily_target",
     "publish_daily_frame",

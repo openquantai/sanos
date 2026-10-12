@@ -4,7 +4,9 @@ Checked-in dataset and experiment configurations belong below this directory.
 They must not contain machine paths or credentials. At build time they are
 normalized to canonical JSON and included in artifact identity.
 
-`widb-spx-reference.json` contains two independent sections. `daily` owns the
+`widb-spx-reference.json` contains three independent sections. `dataset` owns
+the immutable name, ticker, coverage, calendar policy and Raw generation.
+`daily` owns the
 paired/enriched WIDB semantics, including the 0.2 overnight variance fraction.
 `surface` owns the Phase 6 initial linear no-arbitrage fit, the recovered
 100,000-option/70-business-day filter profile, and the production smoothness

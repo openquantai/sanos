@@ -64,6 +64,8 @@ def test_status_json_reports_daily_intermediate_capability(tmp_path: Path) -> No
     assert payload["material_pipeline_available"] is True
     assert payload["raw_download_available"] is True
     assert payload["intermediate_build_available"] is True
+    assert payload["dataset_build_available"] is True
+    assert payload["dataset_validate_available"] is True
     assert payload["live_wrds_verified"] is False
 
 
@@ -209,6 +211,63 @@ def test_fitted_intermediate_dry_run_exposes_surface_configuration(tmp_path: Pat
     assert payload["network_accessed"] is False
     assert payload["dry_run"] is True
     assert not root.exists()
+
+
+def test_dataset_build_dry_run_is_structured_offline_and_non_mutating(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    config = Path(__file__).parents[1] / "configs" / "widb-spx-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "dataset",
+            "build",
+            "--config",
+            str(config),
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["event"] == "dataset_result"
+    assert payload["planned_dates"] == 918
+    assert payload["built"] is False
+    assert payload["reused"] is False
+    assert payload["dry_run"] is True
+    assert payload["network_accessed"] is False
+    assert len(payload["identity"]) == 64
+    assert not root.exists()
+
+
+def test_dataset_validate_never_builds_a_missing_dataset(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "configs" / "widb-spx-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "--log-format",
+            "json",
+            "dataset",
+            "validate",
+            "--config",
+            str(config),
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 4
+    payload = json.loads(result.output)
+    assert payload["event"] == "error"
+    assert "never builds or publishes" in payload["message"]
+    assert not (tmp_path / "data").exists()
 
 
 def test_intermediate_raw_miss_is_actionable_and_never_connects(tmp_path: Path) -> None:
