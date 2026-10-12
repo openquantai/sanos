@@ -1,0 +1,83 @@
+{
+  "experiment": {
+    "name": "spx-daily-front-reference-v1",
+    "profile": "dysanos-daily-front-market-v1",
+    "source_dataset": {
+      "storage_class": "dataset",
+      "namespace": "widb/internal/name-widb-spx-2022-2025-reference",
+      "artifact_id": "2ea20498735adf1e625b84f99c812bae78c90e9aeb81b36c9e0a330a21bd4585"
+    },
+    "consumer_contract": "flex-market-day-v1"
+  },
+  "market": {
+    "smoothness": 0.25,
+    "max_num_options": 100000,
+    "excluded_business_dtes": [0.2],
+    "overnight_variance_fraction": 0.2
+  },
+  "geometry": {
+    "model_business_dtes": [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70],
+    "nms_range": [-3.0, 2.0],
+    "num_inner_strikes": 200,
+    "min_dlvsq": 0.0001,
+    "max_dlvsq": 9.0,
+    "min_forward_vol": 0.01,
+    "max_forward_vol": 1.0,
+    "min_eta": 0.01,
+    "max_eta": 0.5,
+    "lower_boundary_scale": 0.5,
+    "upper_boundary_scale": 1.5,
+    "minimum_log_spacing_fraction": 0.05,
+    "dlv_cap_barrier_log_width": 0.1,
+    "dlv_cap_barrier_log_std": 0.35
+  },
+  "objective": {
+    "fit_weight": 0.05,
+    "date_weighting": "mean_quotes_then_mean_dates"
+  },
+  "split": {
+    "mode": "all_history_no_holdout",
+    "diagnostic_boundary": "2025-01-01"
+  },
+  "storage": {
+    "float_dtype": "float64",
+    "padding": "global_max_with_masks_v1",
+    "compression": "gzip",
+    "compression_level": 4,
+    "shuffle": true,
+    "fletcher32": true
+  },
+  "model": {
+    "state_size": 200,
+    "decoded_state_size": 3636,
+    "runtime_precision_bits": 32,
+    "minimum_mean_reversion_per_week": 0.001,
+    "innovation_std_floor": 0.0001,
+    "decoder_activation": "Identity",
+    "decoder_depth": 0,
+    "decoder_width": 16,
+    "decoder_use_bias": true
+  },
+  "training": {
+    "num_epochs": 300,
+    "day_batch_size": 128,
+    "state_learning_rate": 0.0001,
+    "decoder_learning_rate": 0.00003,
+    "dynamics_learning_rate": 0.0003,
+    "dynamics_weight": 0.1,
+    "gauge_weight": 0.1,
+    "cap_penalty_weight": 1.0,
+    "dynamics_steps_per_epoch": 1,
+    "warmup_epochs": 20,
+    "minimum_learning_rate_fraction": 0.1,
+    "dynamics_ramp_epochs": 50,
+    "gradient_clip": 10.0,
+    "seed": 9281,
+    "checkpoint_every": 5,
+    "report_every": 5,
+    "convergence_window": 30,
+    "convergence_relative_tolerance": 0.002,
+    "maximum_quote_containment_ratio_drop": 0.02,
+    "compile_sanos_solver": true
+  }
+}

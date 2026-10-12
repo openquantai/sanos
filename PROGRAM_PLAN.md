@@ -1,7 +1,8 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0 through 7 are complete with dual
-review. No live WRDS access has occurred.
+Status: implementation in progress; Phases 0 through 7 and Phase 9 are complete
+with dual review. Phase 8 awaits user approval of CD-004 and CD-009. No live
+WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -484,6 +485,10 @@ loads with WRDS disabled and no internal artifacts; every advertised normalized
 experiment capability executes from it.
 
 ### Phase 9 — Experiment materialization
+
+Implementation status: complete with code and quantitative review. This
+Experiment is disposable. The freshly rebuilt and promoted SANOS Dataset
+remains the canonical reference object.
 
 - Convert a selected immutable dataset into model-specific HDF5 with explicit
   padding, masks, selections, and train/validation splits.

@@ -1,6 +1,13 @@
 # Portable configurations
 
 Checked-in dataset and experiment configurations belong below this directory.
+
+- `widb-spx-reference.json` defines the fresh internal 2022--2025 SANOS Dataset.
+- `dysanos-daily-front-reference.json` pins that Dataset's deterministic pointer
+  and the recovered all-history Direct-200 input materialization. Update the
+  pinned pointer only when a reviewed, versioned internal Dataset identity
+  changes; never substitute a mutable path or alias.
+
 They must not contain machine paths or credentials. At build time they are
 normalized to canonical JSON and included in artifact identity.
 

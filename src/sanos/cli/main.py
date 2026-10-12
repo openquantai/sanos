@@ -32,6 +32,13 @@ from sanos.datasets import (
     plan_internal_dataset,
     validate_internal_dataset,
 )
+from sanos.experiments import (
+    ExperimentBuildOptions,
+    ExperimentConfig,
+    build_experiment,
+    plan_experiment,
+    validate_experiment,
+)
 from sanos.pipeline import DailyExecutionError
 from sanos.widb.build import IntermediateBuildRequest, build_intermediates
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
@@ -205,6 +212,16 @@ def _read_dataset_config(path: Path) -> InternalDatasetConfig:
     return InternalDatasetConfig.from_document(document)
 
 
+def _read_experiment_config(path: Path) -> ExperimentConfig:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read Experiment configuration {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("Experiment configuration must contain a JSON object")
+    return ExperimentConfig.from_document(document)
+
+
 @click.group(cls=SanosGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="sanos")
 @click.option("-v", "--verbose", count=True, help="Increase diagnostic output.")
@@ -337,13 +354,15 @@ def status(context: CliContext) -> None:
     _emit(
         context,
         "status",
-        phase="daily-widb-intermediate",
+        phase="internal-experiment-materialization",
         pipeline_available=True,
         material_pipeline_available=True,
         raw_download_available=True,
         intermediate_build_available=True,
         dataset_build_available=True,
         dataset_validate_available=True,
+        experiment_build_available=True,
+        experiment_validate_available=True,
         live_wrds_verified=False,
         network_accessed=False,
         dry_run=context.dry_run,
@@ -951,7 +970,220 @@ def experiment() -> None:
 
 
 @experiment.command("build")
-def experiment_build() -> None:
-    """Build an experiment materialization."""
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict daily-front Experiment JSON configuration.",
+)
+@click.option(
+    "--max-workers",
+    type=click.IntRange(1, 4),
+    default=1,
+    show_default=True,
+    help="Bound local source-partition projection workers; no WRDS access occurs.",
+)
+@click.option(
+    "--keep-work",
+    is_flag=True,
+    help="Keep exact plan-owned restart shards after successful publication.",
+)
+@click.option(
+    "--no-resume",
+    is_flag=True,
+    help="Refuse an existing restart workspace instead of reusing its valid shards.",
+)
+@click.option(
+    "--restart-work",
+    is_flag=True,
+    help="Explicitly remove only this plan's restart workspace before building.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete Experiment.",
+)
+@click.pass_obj
+def experiment_build(
+    context: CliContext,
+    config_path: Path,
+    max_workers: int,
+    keep_work: bool,
+    no_resume: bool,
+    restart_work: bool,
+    version_request: str,
+) -> None:
+    """Build an internal daily-front HDF5 Experiment from a Dataset."""
 
-    _phase_not_implemented("experiment build", "Phase 9")
+    try:
+        locations = context.locations.require_complete()
+        config = _read_experiment_config(config_path)
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "experiment_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        with warnings.catch_warnings(record=True) as warning_records:
+            warnings.simplefilter("always")
+            result = build_experiment(
+                locations,
+                config,
+                ExperimentBuildOptions(
+                    max_workers=max_workers,
+                    keep_work=keep_work,
+                    resume=not no_resume,
+                    restart_work=restart_work,
+                    version_override="*" if version_request == "*" else None,
+                ),
+                dry_run=context.dry_run,
+                progress=progress,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "experiment_result",
+        artifact=result.artifact,
+        path=result.path,
+        identity=result.artifact.artifact_id,
+        plan_id=result.plan.plan_id,
+        built=result.built,
+        reused=result.reuse is not None,
+        reuse_record=None if result.reuse is None else result.reuse.as_log_record(),
+        dry_run=result.dry_run,
+        source_accessed=result.source_accessed,
+        network_accessed=False,
+        workspace=result.workspace,
+        journal=result.journal_path,
+        validation=None if result.validation is None else result.validation.as_dict(),
+    )
+
+
+@experiment.command("validate")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Resolve the Experiment identity from a strict configuration.",
+)
+@click.option("--name", help="Experiment name for exact-ID validation.")
+@click.option("--artifact-id", help="Exact 64-hex Experiment artifact identity.")
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only with --config to find a compatible Experiment.",
+)
+@click.option("--deep-lineage", is_flag=True, help="Also require the source Dataset.")
+@click.option(
+    "--integrity-only",
+    is_flag=True,
+    help="Check immutable files without reopening and validating logical HDF5 content.",
+)
+@click.pass_obj
+def experiment_validate(
+    context: CliContext,
+    config_path: Path | None,
+    name: str | None,
+    artifact_id: str | None,
+    version_request: str,
+    deep_lineage: bool,
+    integrity_only: bool,
+) -> None:
+    """Validate an existing Experiment without rebuilding or network access."""
+
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        warning_records: Sequence[warnings.WarningMessage] = ()
+        if config_path is not None:
+            if name is not None or artifact_id is not None:
+                raise ValueError("Use either --config or --name with --artifact-id, not both")
+            config = _read_experiment_config(config_path)
+            plan = plan_experiment(config)
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
+                reuse = store.resolve(
+                    plan.spec,
+                    version="*" if version_request == "*" else None,
+                )
+            warning_records = tuple(caught_warnings)
+            if reuse is None:
+                raise ValueError(
+                    "Requested Experiment is absent; validation never builds or publishes it"
+                )
+            pointer = reuse.artifact.pointer
+            reuse_record: Any = reuse.as_log_record()
+        else:
+            if name is None or artifact_id is None:
+                raise ValueError("Provide --config or both --name and --artifact-id")
+            if version_request == "*":
+                raise ValueError("--version '*' requires --config; exact-ID validation is concrete")
+            config = None
+            pointer = ArtifactPointer(
+                StorageClass.EXPERIMENT,
+                f"dysanos/daily-front-market/name-{name}",
+                artifact_id,
+            )
+            reuse_record = None
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "experiment_validation_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        summary = validate_experiment(
+            store,
+            pointer,
+            semantic=not integrity_only,
+            deep_lineage=deep_lineage,
+            progress=progress,
+        )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "experiment_validation_result",
+        status="passed",
+        artifact=pointer,
+        path=store.path_for(pointer),
+        identity=pointer.artifact_id,
+        semantic=not integrity_only,
+        deep_lineage=deep_lineage,
+        network_accessed=False,
+        filesystem_modified=False,
+        config=None if config is None else config.to_document(),
+        reuse_record=reuse_record,
+        summary=None if summary is None else summary.as_dict(),
+    )

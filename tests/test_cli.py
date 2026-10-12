@@ -59,13 +59,15 @@ def test_status_json_reports_daily_intermediate_capability(tmp_path: Path) -> No
     payload = json.loads(result.output)
     assert payload["event"] == "status"
     assert payload["network_accessed"] is False
-    assert payload["phase"] == "daily-widb-intermediate"
+    assert payload["phase"] == "internal-experiment-materialization"
     assert payload["pipeline_available"] is True
     assert payload["material_pipeline_available"] is True
     assert payload["raw_download_available"] is True
     assert payload["intermediate_build_available"] is True
     assert payload["dataset_build_available"] is True
     assert payload["dataset_validate_available"] is True
+    assert payload["experiment_build_available"] is True
+    assert payload["experiment_validate_available"] is True
     assert payload["live_wrds_verified"] is False
 
 
@@ -256,6 +258,69 @@ def test_dataset_validate_never_builds_a_missing_dataset(tmp_path: Path) -> None
             "--log-format",
             "json",
             "dataset",
+            "validate",
+            "--config",
+            str(config),
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 4
+    payload = json.loads(result.output)
+    assert payload["event"] == "error"
+    assert "never builds or publishes" in payload["message"]
+    assert not (tmp_path / "data").exists()
+
+
+def test_experiment_build_dry_run_is_structured_offline_and_non_mutating(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    config = Path(__file__).parents[1] / "configs" / "dysanos-daily-front-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "experiment",
+            "build",
+            "--config",
+            str(config),
+            "--max-workers",
+            "2",
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payloads = [json.loads(line) for line in result.output.splitlines()]
+    assert [payload["event"] for payload in payloads] == [
+        "experiment_plan",
+        "experiment_result",
+    ]
+    result_payload = payloads[-1]
+    assert result_payload["built"] is False
+    assert result_payload["reused"] is False
+    assert result_payload["dry_run"] is True
+    assert result_payload["source_accessed"] is False
+    assert result_payload["network_accessed"] is False
+    assert len(result_payload["identity"]) == 64
+    assert not root.exists()
+
+
+def test_experiment_validate_never_builds_a_missing_experiment(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "configs" / "dysanos-daily-front-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "--log-format",
+            "json",
+            "experiment",
             "validate",
             "--config",
             str(config),
