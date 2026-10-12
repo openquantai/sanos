@@ -493,8 +493,14 @@ def _ensure_directory_no_symlinks(path: Path) -> Path:
         try:
             mode = current.lstat().st_mode
         except FileNotFoundError:
-            current.mkdir()
-            _fsync_directory(parent)
+            try:
+                current.mkdir()
+            except FileExistsError:
+                # A concurrent publisher may have created the same namespace
+                # parent after lstat(). Re-check its type below before use.
+                pass
+            else:
+                _fsync_directory(parent)
             mode = current.lstat().st_mode
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise ArtifactIntegrityError(f"Storage directory is unsafe: {current}")

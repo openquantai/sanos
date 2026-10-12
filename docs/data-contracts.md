@@ -34,16 +34,22 @@ Raw data is durable, minimally transformed vendor data. The natural root is
 | Logical source | Candidate WRDS table | Natural partition |
 |---|---|---|
 | security identity | `securd` or `securd1` | snapshot/query identity |
-| option books | `opprcdYYYY` or `opprcd` | table/year/secid/date |
-| underlying close | `secprd` or `secprdYYYY` | table/year/secid/date |
-| vendor forward | `fwdprdYYYY` or `fwdprd` | table/year/secid/date |
+| option books | `opprcdYYYY` or `opprcd` | table/year/ticker/date; secid in payload |
+| underlying close | `secprd` or `secprdYYYY` | table/year/ticker/date; secid in payload |
+| vendor forward | `fwdprdYYYY` or `fwdprd` | table/year/ticker/date; secid in payload |
 | zero curve | `zerocd` | table/date |
 
-Raw option rows preserve source fields such as symbol, option ID, side,
-exercise style, strike, expiry, bid/ask, volume, open interest, vendor implied
-volatility/Greeks, settlement flags, expiry indicator and contract size. The
-raw writer may canonicalize column names/types and add provenance columns, but
-does not apply SANOS population filters.
+Raw option rows preserve source fields such as symbol, option ID, side, strike,
+expiry, bid/ask, volume, open interest, vendor implied volatility/Greeks,
+settlement flags, expiry indicator and contract size. OptionMetrics stores
+`strike_price` in integer thousandths; the raw layer retains that value and the
+daily compatibility stage later divides by 1,000. The reference query's
+`exercise_style='E'` is a synthetic constant, not a selected vendor field, so it
+is introduced and documented in the later compatibility stage rather than
+misrepresented as raw. The raw writer may canonicalize column names/types and
+add provenance columns, but does not apply SANOS population filters. A dated
+zero-row vendor response is itself a durable raw observation; later daily
+stages decide whether it is an expected exclusion or a dataset error.
 
 Each table root has `README.md` describing source/query/fields and a manifest
 with query identity, selected columns, partitions, counts and checksums. It does

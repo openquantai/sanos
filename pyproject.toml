@@ -100,7 +100,7 @@ warn_unused_ignores = true
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["h5py.*", "quantdata.*"]
+module = ["h5py.*", "pandas_market_calendars.*", "quantdata.*"]
 ignore_missing_imports = true
 
 # These modules are direct compatibility ports of the dynamically typed

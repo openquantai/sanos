@@ -8,18 +8,29 @@ import platform
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import click
 
 from sanos import __version__
+from sanos.artifacts import ArtifactError, ArtifactStore
 from sanos.config import (
     LocationConfigurationError,
     LocationOverrides,
     LocationResolution,
     canonical_value,
     resolve_locations,
+)
+from sanos.wrds import (
+    ALL_RAW_TABLES,
+    RawDownloadConfig,
+    RawDownloadError,
+    RawTable,
+    WrdsError,
+    WrdsLeaseUnavailableError,
+    download_raw,
 )
 
 
@@ -40,6 +51,19 @@ class PhaseNotImplementedError(click.ClickException):
     """Known command whose implementation belongs to a later program phase."""
 
     exit_code = 7
+
+    def __init__(self, message: str, *, log_format: str | None = None) -> None:
+        super().__init__(message)
+        self.log_format = log_format
+
+    def show(self, file: Any = None) -> None:
+        _show_cli_error(self, log_format=self.log_format, file=file)
+
+
+class MaterialCliError(click.ClickException):
+    """A material command failed safely with an actionable message."""
+
+    exit_code = 4
 
     def __init__(self, message: str, *, log_format: str | None = None) -> None:
         super().__init__(message)
@@ -252,10 +276,12 @@ def doctor(context: CliContext, strict_locations: bool) -> None:
             "filelock",
             "highspy",
             "numpy",
+            "pandas_market_calendars",
             "polars",
             "pyarrow",
         )
     }
+    optional_modules = {"wrds": importlib.util.find_spec("wrds") is not None}
     locations_ok = not context.locations.missing
     ok = all(modules.values()) and sys.version_info >= (3, 12)
     if strict_locations:
@@ -272,6 +298,7 @@ def doctor(context: CliContext, strict_locations: bool) -> None:
         dry_run=context.dry_run,
         verbosity=context.verbose,
         modules=modules,
+        optional_modules=optional_modules,
         locations=_location_payload(context.locations),
         missing_locations=context.locations.missing,
         warnings=context.locations.warnings,
@@ -288,9 +315,11 @@ def status(context: CliContext) -> None:
     _emit(
         context,
         "status",
-        phase="configuration-artifacts",
+        phase="guarded-wrds-raw",
         pipeline_available=True,
         material_pipeline_available=False,
+        raw_download_available=True,
+        live_wrds_verified=False,
         network_accessed=False,
         dry_run=context.dry_run,
         verbosity=context.verbose,
@@ -335,10 +364,161 @@ def raw() -> None:
 
 
 @raw.command("download")
-def raw_download() -> None:
-    """Download raw data (enabled after the guarded WRDS phase)."""
+@click.option("--source", type=click.Choice(("optionmetrics",)), default="optionmetrics")
+@click.option("--ticker", required=True, help="OptionMetrics ticker, for example SPX.")
+@click.option(
+    "--start-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="First requested NYSE session (YYYY-MM-DD).",
+)
+@click.option(
+    "--end-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Last requested NYSE session (YYYY-MM-DD).",
+)
+@click.option(
+    "--table",
+    "tables",
+    multiple=True,
+    type=click.Choice(tuple(table.value for table in ALL_RAW_TABLES)),
+    default=tuple(table.value for table in ALL_RAW_TABLES),
+    show_default=True,
+    help="Logical raw table; repeat to select a subset. Security identity is always included.",
+)
+@click.option(
+    "--source-generation",
+    default="default-v1",
+    show_default=True,
+    help="Immutable vendor extraction generation included in artifact identity.",
+)
+@click.option(
+    "--refresh",
+    is_flag=True,
+    help="Download a new explicitly named source generation; never replace an artifact.",
+)
+@click.option(
+    "--cache-only",
+    is_flag=True,
+    help="Validate requested raw artifacts and fail on a miss without opening WRDS.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete artifact across producer versions.",
+)
+@click.option(
+    "--max-wrds-connections",
+    type=click.IntRange(1, 4),
+    default=2,
+    show_default=True,
+    help="Bound concurrent account connections; the host-wide maximum is four.",
+)
+@click.option(
+    "--retry-attempts",
+    type=click.IntRange(1, 5),
+    default=3,
+    show_default=True,
+    help="Attempts for recognized transient queries; authentication is never retried.",
+)
+@click.option(
+    "--confirm-2fa-ready",
+    is_flag=True,
+    help="Required for non-interactive live access; confirms immediate WRDS 2FA readiness.",
+)
+@click.pass_obj
+def raw_download(
+    context: CliContext,
+    source: str,
+    ticker: str,
+    start_date: datetime,
+    end_date: datetime,
+    tables: tuple[str, ...],
+    source_generation: str,
+    refresh: bool,
+    cache_only: bool,
+    version_request: str,
+    max_wrds_connections: int,
+    retry_attempts: int,
+    confirm_2fa_ready: bool,
+) -> None:
+    """Plan, validate, or download durable raw OptionMetrics partitions."""
 
-    _phase_not_implemented("raw download", "Phase 4")
+    try:
+        locations = context.locations.require_complete()
+        config = RawDownloadConfig(
+            source=source,
+            ticker=ticker,
+            start_date=start_date.date(),
+            end_date=end_date.date(),
+            tables=tuple(RawTable(value) for value in tables),
+            source_generation=source_generation,
+            max_connections=max_wrds_connections,
+            retry_attempts=retry_attempts,
+        )
+
+        def authorize_network() -> None:
+            if confirm_2fa_ready:
+                _emit(context, "wrds_2fa_confirmed", interactive=False)
+                return
+            if not sys.stdin.isatty():
+                raise MaterialCliError(
+                    "Live WRDS access from a non-interactive caller requires "
+                    "--confirm-2fa-ready",
+                    log_format=context.log_format,
+                )
+            if not click.confirm(
+                "A raw cache miss requires WRDS. Are you ready to complete 2FA now?",
+                default=False,
+            ):
+                raise MaterialCliError(
+                    "WRDS access cancelled before connecting",
+                    log_format=context.log_format,
+                )
+            _emit(context, "wrds_2fa_confirmed", interactive=True)
+
+        def progress(payload: Any) -> None:
+            event = str(payload["event"])
+            fields = {key: value for key, value in payload.items() if key != "event"}
+            _emit(context, event, **fields)
+
+        result = download_raw(
+            ArtifactStore(locations),
+            config,
+            dry_run=context.dry_run,
+            cache_only=cache_only,
+            refresh=refresh,
+            version_override="*" if version_request == "*" else None,
+            authorize_network=authorize_network,
+            progress=progress,
+        )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (
+        ArtifactError,
+        RawDownloadError,
+        WrdsError,
+        WrdsLeaseUnavailableError,
+        ValueError,
+    ) as exc:
+        if isinstance(exc, click.ClickException):
+            raise
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "raw_result",
+        planned=result.planned,
+        reused=result.reused,
+        downloaded=result.downloaded,
+        missing=result.missing,
+        network_accessed=result.network_accessed,
+        dry_run=result.dry_run,
+        artifact_paths=tuple(artifact.path for artifact in result.artifacts),
+    )
 
 
 @main.group()

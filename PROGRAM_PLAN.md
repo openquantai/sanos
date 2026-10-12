@@ -1,7 +1,8 @@
 # SANOS standalone program plan
 
 Status: implementation in progress; Phases 0 through 3 are complete with dual
-review, and Phase 4 is next. No WRDS access has occurred.
+review. Phase 4 is implemented and under dual review. No live WRDS access has
+occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -329,14 +330,19 @@ Acceptance tests include:
 
 ### Phase 4 — Guarded WRDS raw layer
 
+Status: complete; offline verification and independent code and quantitative
+reviews passed on 2026-10-12. No live WRDS query was part of this phase's
+review. See `reviews/phase-4/`.
+
 - Implement the 2FA readiness gate, one-connection probe, global bounded lease,
   retry classification, progress events, and resumable atomic writes.
 - Keep raw extracts minimally transformed. Move filtering currently embedded in
   `collect_raw_day` into later daily stages while preserving the resulting
   processed outputs.
 - Generate source/field Markdown and extraction manifests beside each raw table.
-- Implement explicit selection by source, ticker/secid, and date, plus
-  cache-only validation and refresh.
+- Implement explicit selection by source, ticker, and date, plus cache-only
+  validation and refresh. Keep direct secid override blocked under CD-010 until
+  the legacy ignored-argument defect has an approved replacement contract.
 - Compute raw dependency closure before download. For a build beginning on
   2022-01-03, freshly download the previous business-day underlying close and
   every earlier observation required by the approved forward-adjusted-return

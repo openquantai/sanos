@@ -40,12 +40,14 @@ def test_doctor_json_is_offline_structured_and_non_mutating(tmp_path: Path) -> N
     assert payload["dry_run"] is False
     assert payload["modules"]["cdxcore"] is True
     assert payload["modules"]["filelock"] is True
+    assert payload["modules"]["pandas_market_calendars"] is True
     assert payload["modules"]["polars"] is True
+    assert isinstance(payload["optional_modules"]["wrds"], bool)
     assert payload["locations"]["raw"]["source"] == "cli:root"
     assert not root.exists()
 
 
-def test_status_json_reports_phase_two_foundation(tmp_path: Path) -> None:
+def test_status_json_reports_guarded_raw_capability(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         main,
         ["--root", str(tmp_path / "data"), "--log-format", "json", "status"],
@@ -55,9 +57,11 @@ def test_status_json_reports_phase_two_foundation(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["event"] == "status"
     assert payload["network_accessed"] is False
-    assert payload["phase"] == "configuration-artifacts"
+    assert payload["phase"] == "guarded-wrds-raw"
     assert payload["pipeline_available"] is True
     assert payload["material_pipeline_available"] is False
+    assert payload["raw_download_available"] is True
+    assert payload["live_wrds_verified"] is False
 
 
 def test_config_show_reports_precedence_without_creating_paths(tmp_path: Path) -> None:
@@ -128,11 +132,112 @@ def test_structured_errors_and_global_dry_run_are_machine_readable(tmp_path: Pat
 
 
 def test_material_commands_fail_actionably_until_implemented() -> None:
-    result = CliRunner().invoke(main, ["raw", "download"])
+    result = CliRunner().invoke(main, ["intermediate", "build"])
 
     assert result.exit_code == 7
-    assert "planned for Phase 4" in result.output
+    assert "planned for Phases 5-6" in result.output
     assert "PROGRAM_PLAN.md" in result.output
+
+
+def test_raw_download_dry_run_is_structured_and_never_connects(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "raw",
+            "download",
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2022-01-03",
+            "--end-date",
+            "2022-01-03",
+        ],
+        env={"WRDS_USERNAME": "must-not-be-read", "WRDS_OFF": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payloads = [json.loads(line) for line in result.output.splitlines()]
+    assert [payload["event"] for payload in payloads] == ["raw_plan", "raw_result"]
+    assert payloads[0]["missing"] == 8
+    assert payloads[0]["boundary_dependencies"] == [
+        {
+            "observation_date": "2021-12-31",
+            "roles": ["boundary"],
+            "table": "forwards",
+            "ticker": "SPX",
+        },
+        {
+            "observation_date": "2021-12-31",
+            "roles": ["boundary"],
+            "table": "spot",
+            "ticker": "SPX",
+        },
+        {
+            "observation_date": "2021-12-31",
+            "roles": ["boundary"],
+            "table": "zero_curve",
+            "ticker": "SPX",
+        },
+    ]
+    assert payloads[-1]["network_accessed"] is False
+    assert not root.exists()
+
+
+def test_noninteractive_raw_miss_requires_explicit_2fa_confirmation(
+    tmp_path: Path,
+) -> None:
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "--log-format",
+            "json",
+            "raw",
+            "download",
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2024-01-03",
+            "--end-date",
+            "2024-01-03",
+        ],
+        env={"WRDS_USERNAME": "must-not-connect"},
+    )
+
+    assert result.exit_code == 4
+    payloads = [json.loads(line) for line in result.output.splitlines()]
+    assert payloads[0]["event"] == "raw_plan"
+    assert payloads[-1]["event"] == "error"
+    assert "--confirm-2fa-ready" in payloads[-1]["message"]
+
+
+def test_raw_connection_limit_above_four_is_rejected_by_click(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "raw",
+            "download",
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2024-01-03",
+            "--end-date",
+            "2024-01-03",
+            "--max-wrds-connections",
+            "5",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "range 1<=x<=4" in result.output
 
 
 def test_click_usage_errors_are_structured_when_json_is_requested() -> None:

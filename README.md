@@ -11,11 +11,12 @@ parity reference; the new dataset will be built from a fresh WRDS extraction.
 
 ## Current status
 
-Phases 0 through 3 are complete with code and quantitative review. Phase 4's
-guarded WRDS raw layer is next. The exact 2022–2025 reference endpoint and
-numerical baseline are catalogued, but material data-pipeline commands
-intentionally fail with an actionable "not implemented" message until their
-reviewed phases land. No command connects to WRDS yet. See
+Phases 0 through 4 are complete with code and quantitative review. Phase 4's
+guarded WRDS raw layer uses offline WRDS fakes in its ordinary test suite; no
+live WRDS access has occurred yet. The exact
+2022–2025 reference endpoint and numerical baseline are catalogued. Later
+intermediate, dataset, and experiment commands still fail with an actionable
+"not implemented" message until their reviewed phases land. See
 [the reference baseline](docs/reference-baseline.md) for the 891-date parity
 oracle and the distinction between its legacy artifact populations.
 
@@ -30,9 +31,9 @@ python -m sanos doctor
 pytest
 ```
 
-The normal user and live-WRDS workflow will be documented before the associated
-commands are enabled. Generated raw data, intermediates, datasets, experiments,
-logs, and temporary files must remain outside this Git working tree.
+The raw workflow is documented in the [WRDS runbook](docs/wrds-runbook.md).
+Generated raw data, intermediates, datasets, experiments, logs, and temporary
+files must remain outside this Git working tree.
 
 ## Repository map
 
@@ -56,6 +57,23 @@ default. The four classes are raw, intermediate, dataset, and experiment. Run
 for the contracts implemented in Phase 2, and
 [model numerics](docs/model-numerics.md) for the reviewed Phase 3 equations,
 units, solver behavior, and compatibility gates.
+
+## Offline raw planning
+
+This command resolves trading sessions, the previous-session boundary inputs,
+and existing immutable artifacts. It never reads credentials, connects to WRDS,
+or creates the configured roots:
+
+```bash
+sanos --root /path/to/quant-data --dry-run raw download \
+  --source optionmetrics --ticker SPX \
+  --start-date 2022-01-03 --end-date 2025-08-29
+```
+
+Do not pass `--confirm-2fa-ready` until you are actually ready for an immediate
+live WRDS authentication. See the runbook for cache-only validation, live
+downloads, immutable refresh generations, structured logs, and connection
+safety.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

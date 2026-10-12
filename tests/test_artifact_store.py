@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,23 @@ def test_artifact_foundation_is_versioned() -> None:
     assert "_read_json_object" in store_version
     assert "_safe_relative_path" in store_version
     assert "_sha256_file" in store_version
+
+
+def test_concurrent_publishers_can_create_shared_namespace_parents(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    specs = tuple(
+        _spec(
+            storage_class=StorageClass.RAW,
+            namespace=f"wrds/options/ticker-SPX/year-2024/date-2024-01-{day:02d}",
+        )
+        for day in range(1, 17)
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = tuple(pool.map(lambda spec: _publish(store, spec), specs))
+
+    assert all(path.is_dir() for path in paths)
+    assert len(set(paths)) == len(specs)
 
 
 def test_dataset_distribution_is_mandatory_immutable_and_public_is_approved(
