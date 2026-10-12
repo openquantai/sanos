@@ -46,12 +46,14 @@ experiment = [
 ]
 test = [
   "h5py>=3.10,<4",
+  "jax>=0.4,<1",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
 ]
 dev = [
   "build>=1.2,<2",
   "h5py>=3.10,<4",
+  "jax>=0.4,<1",
   "mypy>=1.11,<2",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
@@ -81,6 +83,13 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/sanos/model/arbfree.py" = ["E501"]
+"src/sanos/model/backbone.py" = ["E501"]
+"src/sanos/model/fitter.py" = ["E501"]
+"src/sanos/model/jax_fit.py" = ["E501"]
+"src/sanos/model/tools.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.12"
 files = ["src", "tests", "scripts"]
@@ -93,3 +102,17 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = ["h5py.*", "quantdata.*"]
 ignore_missing_imports = true
+
+# These modules are direct compatibility ports of the dynamically typed
+# reference numerical implementation.  Runtime and quantitative contracts are
+# enforced by the Phase 3 parity/invariant suite; new orchestration, model
+# gates, configuration, and data-pipeline code remains under strict mypy.
+[[tool.mypy.overrides]]
+module = [
+  "sanos.model.arbfree",
+  "sanos.model.backbone",
+  "sanos.model.fitter",
+  "sanos.model.tools",
+  "sanos.model.tridiag",
+]
+ignore_errors = true

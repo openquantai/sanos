@@ -11,11 +11,11 @@ parity reference; the new dataset will be built from a fresh WRDS extraction.
 
 ## Current status
 
-Phases 0, 1, and 2 are complete with code and quantitative review. Phase 3's
-SANOS and no-arbitrage numerical migration is next. The exact 2022–2025
-reference endpoint and numerical baseline are catalogued, but material data-pipeline
-commands intentionally fail with an actionable "not implemented" message until
-their reviewed phases land. No command connects to WRDS yet. See
+Phases 0 through 3 are complete with code and quantitative review. Phase 4's
+guarded WRDS raw layer is next. The exact 2022–2025 reference endpoint and
+numerical baseline are catalogued, but material data-pipeline commands
+intentionally fail with an actionable "not implemented" message until their
+reviewed phases land. No command connects to WRDS yet. See
 [the reference baseline](docs/reference-baseline.md) for the 891-date parity
 oracle and the distinction between its legacy artifact populations.
 
@@ -53,7 +53,9 @@ user config under `~/.config/quant_data/`, then a documented `QUANT_DATA_ROOT`
 default. The four classes are raw, intermediate, dataset, and experiment. Run
 `sanos config show` to inspect the result without creating directories. See
 [configuration](docs/configuration.md) and [artifact storage](docs/artifacts.md)
-for the contracts implemented in Phase 2.
+for the contracts implemented in Phase 2, and
+[model numerics](docs/model-numerics.md) for the reviewed Phase 3 equations,
+units, solver behavior, and compatibility gates.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

@@ -1,7 +1,7 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0, 1, and 2 are complete with dual
-review, and Phase 3 is next. No WRDS access has occurred.
+Status: implementation in progress; Phases 0 through 3 are complete with dual
+review, and Phase 4 is next. No WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -301,6 +301,9 @@ Acceptance: artifact lifecycle and CLI contract tests pass, including legacy
 environment fallback and conflicting-variable warnings.
 
 ### Phase 3 — SANOS and no-arbitrage numerical core
+
+Status: complete; code and quantitative/data reviews passed on 2026-10-12. See
+`reviews/phase-3/`.
 
 - Copy and adapt the relevant implementations of tridiagonal operations,
   arbitrage-free pricing/filtering, discrete density and DLV transforms,

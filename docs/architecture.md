@@ -41,3 +41,8 @@ result channel.
 
 See [configuration.md](configuration.md) and [artifacts.md](artifacts.md) for
 the operational contracts.
+
+The pure numerical layer is independent of these boundaries. See
+[model-numerics.md](model-numerics.md) for normalized units, state geometry,
+DLV transitions, smoothing, LP behavior, failure modes, and frozen
+compatibility gates.

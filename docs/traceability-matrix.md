@@ -85,7 +85,7 @@ hash.
 | `quantdata/sanos/tridiag.py` | copy/adapt | SANOS tridiagonal solve with NumPy/JAX parity tests |
 | `quantdata/sanos/sanos_tools.py` | copy/adapt | `SanosPricer`, `SanosLPSolver`, DLV/density transforms, density repair, market-fit diagnostics |
 | `quantdata/sanos/sanos.py` | copy/adapt | `SanosFitter` and production objectives/defaults |
-| `quantdata/sanos/sanos_jax.py` | copy/adapt | optional JAX fitter path and gradient parity |
+| `quantdata/sanos/sanos_jax.py` | copy/audit; optimizer blocked by CD-015 | retain JAX transition/value/gradient parity; do not expose the defective full optimizer as working |
 | `quantdata/sanos/arbfree.py` | copy/adapt | `ArbFreePricer`, `MkArbFree`, strike expansion and surface constraints |
 | `quantdata/sanos/widb_sanos_day.py` | reference only | stale non-production path; do not migrate behavior |
 | `quantdata/widb/__init__.py` | replace | explicit standalone exports, no `SubDir` ownership |
@@ -138,7 +138,8 @@ hash.
 | `SanosLPSolver` | copy/adapt; feasible/infeasible behavior, quote containment and solver selection |
 | `repair_density_nonnegative`, `warn_and_fix_density` | copy/adapt; fixture and invariant tests |
 | `make_variances` | copy/adapt; preserve interpolation/ATM input semantics |
-| `SanosFitter`, JAX `fit_dlvsqs` | copy/adapt; NumPy/JAX value and gradient parity |
+| `SanosFitter` | copy/adapt; deterministic LP repricing plus isolated pinned-reference state/price parity at smoothness `0` and production `0.25` |
+| JAX `fit_dlvsqs` | audited and explicitly blocked by CD-015; shared transition value/gradient parity remains tested |
 | `MARKET_SCHEMA_VERSION=4` | decode as legacy reference; new daily schema receives its own version |
 | `smooth_interpolated_market(smoothness=0.25)` | preserve production fit and all direct book/diagnostic fields in one daily frame |
 | `FlexMarketConfig(max_num_options=100000, smoothness=0.25)` | preserve for the daily-front reference; exclusions are explicit per dataset/experiment |
@@ -155,8 +156,8 @@ human-readable `__str__` value.
 | Imported test | Action | Coverage retained or added |
 |---|---|---|
 | `tests/test_biz_calendar.py` | copy/adapt in Phase 5 | sessions, half days, scalar/vector business-day arithmetic and AM fraction sensitivity |
-| `tests/test_arbfree.py` | copy/adapt in Phase 3 | strike extension, LP fits, calendar and convexity rules |
-| `tests/test_arbfree_density_projection.py` | copy/adapt in Phase 3 | nonnegative mass/moment projection and price invariants |
+| `tests/test_arbfree.py` | adapted in Phase 3 without unavailable proprietary fixture | synthetic strike extension, LP fits, quote containment, calendar and convexity rules, serialization |
+| `tests/test_arbfree_density_projection.py` | adapted in Phase 3 | nonnegative mass/moment projection, independent CVXPY optimum, and price invariants |
 | `tests/test_sanos_utils.py` | reference only | tests only the omitted historical `sanos.old.utils.extract_atm_fwd_vols`; write new current `SanosPricer` price/density/DLV/repair tests |
 | `tests/test_dysanos_download.py` | replace/adapt in Phases 2/4 | CLI planning, cache-only behavior, no-network guarantees, progress and errors |
 | `tests/test_dysanos_market.py` | copy/adapt in Phases 3/5 | daily smooth payload/frame, direct books, schema and fit diagnostics |

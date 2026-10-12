@@ -207,10 +207,29 @@ both accepted it. Only `approved` may alter reference behavior.
   volatilities change for every time before the first fitted expiry; downstream
   objectives or experiment horizons that query those times may also change.
 
+## CD-015 — Optional JAX fitter does not return its optimized state
+
+- **Status:** open; confirmed reference defects; the authoritative LP path is
+  unaffected.
+- **Evidence:** the pinned `quantdata.sanos.sanos_jax.fit_dlvsqs` initializes
+  `jself.weights = None` and then calls `jself.weights.append(...)` when weights
+  are supplied. More importantly, after computing `result_raw` with L-BFGS-B,
+  it calls `jself.value_and_data(dlvsraw)` rather than
+  `jself.value_and_data(result_raw)`, so a nominally successful optimization
+  returns the initial state. The authoritative 891-day smooth-market producer
+  uses the CVXPY/HiGHS LP fitter, not this optional function.
+- **Compatibility choice:** retain JAX transition/value/gradient parity tests
+  while leaving the full optimizer entry point unavailable, or repair both
+  defects under a new function version and test the result against the LP path
+  on deterministic markets.
+- **Expected impact if fixed:** callers of the optional JAX optimizer receive
+  optimized densities and prices instead of failure or the initial state; the
+  authoritative LP-produced dataset is unchanged.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-004,
-CD-006, CD-009, CD-010, CD-012 and CD-013. CD-014 needs a choice only if the
+CD-006, CD-009, CD-010, CD-012, CD-013 and CD-015. CD-014 needs a choice only if the
 legacy pre-first-expiry jump is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked.

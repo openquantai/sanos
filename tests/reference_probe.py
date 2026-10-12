@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import numpy as np
+from cdxcore.verbose import Context
+from quantdata.sanos.sanos import SanosFitter
 from quantdata.sanos.sanos_tools import SanosPricer, repair_density_nonnegative
 
 
@@ -45,6 +48,41 @@ def main() -> None:
         p=np.array([-0.08, 0.52, 0.41, 0.16], dtype=np.float64),
         x=np.array([0.45, 0.8, 1.1, 1.65], dtype=np.float64),
     )
+    market_strikes = [
+        np.array([0.75, 1.0, 1.25], dtype=np.float64),
+        np.array([0.7, 1.0, 1.3], dtype=np.float64),
+    ]
+    query_strikes = np.array([0.6, 0.8, 1.0, 1.2, 1.4], dtype=np.float64)
+    fit_parity = {}
+    for smoothness in (0.0, 0.25):
+        source = SanosPricer(
+            smoothness=smoothness,
+            expiries=expiries,
+            variances=expiries * 0.04,
+            xstrikes=strikes,
+            xdensities=densities,
+        )
+        mids = [
+            np.asarray(source(float(expiry), strike), dtype=np.float64)
+            for expiry, strike in zip(expiries, market_strikes, strict=True)
+        ]
+        fitted = SanosFitter(smoothness=smoothness, timeout_seconds=20.0)(
+            expiries,
+            market_strikes,
+            mids,
+            strikes,
+            vols=0.2,
+            verbose=cast(Any, Context).quiet,
+        )
+        fit_parity[str(smoothness)] = {
+            "market_mids": [values.tolist() for values in mids],
+            "xdensities": [values.tolist() for values in fitted.xdensities],
+            "dlvsqs": [values.tolist() for values in fitted.dlvsqs()],
+            "query_prices": np.asarray(
+                fitted(expiries[:, None], query_strikes[None, :]), dtype=np.float64
+            ).tolist(),
+            "variances": fitted.variances.tolist(),
+        }
     print(
         json.dumps(
             {
@@ -52,6 +90,7 @@ def main() -> None:
                 "dlvsqs": [values.tolist() for values in pricer.dlvsqs()],
                 "prices": prices.tolist(),
                 "repair": repaired.tolist(),
+                "fit_parity": fit_parity,
             },
             sort_keys=True,
         )
