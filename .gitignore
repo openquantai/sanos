@@ -44,6 +44,34 @@
 *.rubbercache
 rubber.cache
 
+## Python and SANOS project files:
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Workspace integration and machine-local configuration:
+/.agents/
+/.codex/
+/.git-real/
+/.sanos.toml
+
+# Generated data must remain outside the repository. These guards prevent
+# accidental additions if a user chooses an unsafe local path.
+/data/
+/raw/
+/intermediate/
+/datasets/
+/experiments/
+
 ## Build tool directories for auxiliary files
 # latexrun
 latex.out/
