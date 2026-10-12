@@ -11,11 +11,11 @@ parity reference; the new dataset will be built from a fresh WRDS extraction.
 
 ## Current status
 
-Phase 0 is complete and Phase 1 is at its review gate. The Python package and
-command hierarchy exist, the exact 2022–2025 reference endpoint and numerical
-baseline are catalogued, but data-pipeline commands intentionally fail with an
-actionable "not implemented" message until their reviewed phases land. No
-command connects to WRDS yet. See
+Phases 0, 1, and 2 are complete with code and quantitative review. Phase 3's
+SANOS and no-arbitrage numerical migration is next. The exact 2022–2025
+reference endpoint and numerical baseline are catalogued, but material data-pipeline
+commands intentionally fail with an actionable "not implemented" message until
+their reviewed phases land. No command connects to WRDS yet. See
 [the reference baseline](docs/reference-baseline.md) for the 891-date parity
 oracle and the distinction between its legacy artifact populations.
 
@@ -47,10 +47,13 @@ logs, and temporary files must remain outside this Git working tree.
 
 ## Data locations
 
-The final CLI will resolve the four storage roots in this order: explicit CLI
-option, `QUANT_DATA_*` environment variable, ignored repository-local config,
+The CLI resolves the four storage roots in this order: explicit CLI option,
+specific `QUANT_DATA_*` environment variable, ignored repository-local config,
 user config under `~/.config/quant_data/`, then a documented `QUANT_DATA_ROOT`
-default. The four classes are raw, intermediate, dataset, and experiment.
+default. The four classes are raw, intermediate, dataset, and experiment. Run
+`sanos config show` to inspect the result without creating directories. See
+[configuration](docs/configuration.md) and [artifact storage](docs/artifacts.md)
+for the contracts implemented in Phase 2.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

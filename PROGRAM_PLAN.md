@@ -1,7 +1,7 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phase 0 is complete and Phase 1 is at its
-review gate. No WRDS access has occurred.
+Status: implementation in progress; Phases 0, 1, and 2 are complete with dual
+review, and Phase 3 is next. No WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -283,6 +283,9 @@ can be run against `quant_data` read-only; no source repository or cache was
 modified.
 
 ### Phase 2 — Configuration, artifacts, CLI shell, and local runner
+
+Status: complete; code and quantitative/data-contract reviews passed on
+2026-10-12. See `reviews/phase-2/`.
 
 - Implement typed, versioned configuration and the location precedence above.
 - Implement canonical serialization, content identities, checksummed manifests,
