@@ -35,7 +35,7 @@ from sanos.pipeline import (
 )
 from sanos.widb.bad import bad_data_policy, bad_day_reason
 from sanos.widb.calendar import business_dates, previous_business_day
-from sanos.widb.config import DailyWidbConfig
+from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.widb.daily import (
     ENRICHED_SCHEMA,
     ENRICHED_SCHEMA_VERSION,
@@ -47,6 +47,17 @@ from sanos.widb.daily import (
     enrich_daily_frame,
     pair_daily_frame,
 )
+from sanos.widb.surface import (
+    FILTERED_SCHEMA,
+    FILTERED_SCHEMA_VERSION,
+    FITTED_SCHEMA,
+    FITTED_SCHEMA_VERSION,
+    NO_ARB_SCHEMA,
+    NO_ARB_SCHEMA_VERSION,
+    apply_options_filter,
+    fit_initial_no_arbitrage,
+    fit_smooth_sanos,
+)
 from sanos.wrds import (
     RawPartition,
     RawTable,
@@ -54,7 +65,20 @@ from sanos.wrds import (
     raw_content_producer_version,
 )
 
-IntermediateStage = Literal["paired-day", "enriched-day"]
+IntermediateStage = Literal[
+    "paired-day",
+    "enriched-day",
+    "no-arb-day",
+    "filtered-day",
+    "fitted-day",
+]
+INTERMEDIATE_STAGES: tuple[IntermediateStage, ...] = (
+    "paired-day",
+    "enriched-day",
+    "no-arb-day",
+    "filtered-day",
+    "fitted-day",
+)
 _SAFE_DAILY_LABEL = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -108,8 +132,8 @@ class IntermediateBuildRequest:
         object.__setattr__(self, "ticker", validated_ticker)
         if self.end_date < self.start_date:
             raise ValueError("Intermediate end_date cannot precede start_date")
-        if self.through not in {"paired-day", "enriched-day"}:
-            raise ValueError("through must be 'paired-day' or 'enriched-day'")
+        if self.through not in INTERMEDIATE_STAGES:
+            raise ValueError(f"through must be one of {INTERMEDIATE_STAGES}")
         if not isinstance(self.include_half_days, bool):
             raise TypeError("include_half_days must be a boolean")
         if self.source != "optionmetrics":
@@ -120,6 +144,9 @@ class IntermediateBuildRequest:
             raise TypeError("max_workers must be an integer")
         if self.max_workers < 1:
             raise ValueError("max_workers must be positive")
+        if self.through in {"no-arb-day", "filtered-day", "fitted-day"}:
+            if self.max_workers > 4:
+                raise ValueError("Surface fitting supports at most four local workers")
         if self.version_override not in {None, "*"}:
             raise ValueError("version_override must be None or '*'")
 
@@ -209,6 +236,32 @@ def _artifact_configuration(
     }
 
 
+@version("1.0")
+def _surface_artifact_configuration(
+    stage: IntermediateStage,
+    ticker: str,
+    trading_date: date,
+    config: DailySurfaceConfig,
+) -> dict[str, Any]:
+    if stage == "no-arb-day":
+        settings: dict[str, Any] = {"no_arbitrage": config.no_arbitrage}
+    elif stage == "filtered-day":
+        settings = {"options_filter": config.options_filter}
+    elif stage == "fitted-day":
+        settings = {
+            "no_arbitrage": config.no_arbitrage,
+            "smooth_sanos": config.smooth_sanos,
+        }
+    else:
+        raise ValueError(f"Surface configuration is not defined for stage {stage!r}")
+    return {
+        "stage": stage,
+        "ticker": ticker,
+        "trading_date": trading_date,
+        "surface": settings,
+    }
+
+
 @version("1.0", dependencies=[pair_daily_frame])
 def paired_day_producer_version() -> str:
     """Return the paired-stage content version closure."""
@@ -221,6 +274,27 @@ def enriched_day_producer_version() -> str:
     """Return the enriched-stage content version closure."""
 
     return str(enriched_day_producer_version.version)
+
+
+@version("1.0", dependencies=[fit_initial_no_arbitrage])
+def no_arb_day_producer_version() -> str:
+    """Return the initial no-arbitrage content version closure."""
+
+    return str(no_arb_day_producer_version.version)
+
+
+@version("1.0", dependencies=[apply_options_filter])
+def filtered_day_producer_version() -> str:
+    """Return the option-filter content version closure."""
+
+    return str(filtered_day_producer_version.version)
+
+
+@version("1.0", dependencies=[fit_smooth_sanos])
+def fitted_day_producer_version() -> str:
+    """Return the smooth-SANOS content version closure."""
+
+    return str(fitted_day_producer_version.version)
 
 
 @version(
@@ -277,6 +351,90 @@ def enriched_day_spec(
         schema_version=ENRICHED_SCHEMA_VERSION,
         producer_version=enriched_day_producer_version(),
         upstream=(paired,),
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        _daily_namespace,
+        _surface_artifact_configuration,
+        no_arb_day_producer_version,
+    ],
+)
+def no_arb_day_spec(
+    *,
+    ticker: str,
+    trading_date: date,
+    config: DailySurfaceConfig,
+    enriched: ArtifactPointer,
+) -> ArtifactSpec:
+    return ArtifactSpec.create(
+        storage_class=StorageClass.INTERMEDIATE,
+        namespace=_daily_namespace("no-arb-day", ticker, trading_date),
+        configuration=_surface_artifact_configuration(
+            "no-arb-day", ticker, trading_date, config
+        ),
+        schema_version=NO_ARB_SCHEMA_VERSION,
+        producer_version=no_arb_day_producer_version(),
+        upstream=(enriched,),
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        _daily_namespace,
+        _surface_artifact_configuration,
+        filtered_day_producer_version,
+    ],
+)
+def filtered_day_spec(
+    *,
+    ticker: str,
+    trading_date: date,
+    config: DailySurfaceConfig,
+    no_arb: ArtifactPointer,
+) -> ArtifactSpec:
+    return ArtifactSpec.create(
+        storage_class=StorageClass.INTERMEDIATE,
+        namespace=_daily_namespace("filtered-day", ticker, trading_date),
+        configuration=_surface_artifact_configuration(
+            "filtered-day", ticker, trading_date, config
+        ),
+        schema_version=FILTERED_SCHEMA_VERSION,
+        producer_version=filtered_day_producer_version(),
+        upstream=(no_arb,),
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        _daily_namespace,
+        _surface_artifact_configuration,
+        fitted_day_producer_version,
+    ],
+)
+def fitted_day_spec(
+    *,
+    ticker: str,
+    trading_date: date,
+    config: DailySurfaceConfig,
+    filtered: ArtifactPointer,
+) -> ArtifactSpec:
+    return ArtifactSpec.create(
+        storage_class=StorageClass.INTERMEDIATE,
+        namespace=_daily_namespace("fitted-day", ticker, trading_date),
+        configuration=_surface_artifact_configuration(
+            "fitted-day", ticker, trading_date, config
+        ),
+        schema_version=FITTED_SCHEMA_VERSION,
+        producer_version=fitted_day_producer_version(),
+        upstream=(filtered,),
     )
 
 
@@ -410,6 +568,13 @@ def _config_from_payload(payload: Mapping[str, Any]) -> DailyWidbConfig:
     return DailyWidbConfig.from_mapping(value)
 
 
+def _surface_config_from_payload(payload: Mapping[str, Any]) -> DailySurfaceConfig:
+    value = payload.get("surface_config", {})
+    if not isinstance(value, Mapping):
+        raise ValueError("surface_config must be a mapping")
+    return DailySurfaceConfig.from_mapping(value)
+
+
 def _actual_ticker(item: DailyWorkItem) -> str:
     payload = item.payload
     if not isinstance(payload, Mapping):
@@ -422,12 +587,23 @@ def _actual_ticker(item: DailyWorkItem) -> str:
 
 def _specs_from_item(
     item: DailyWorkItem,
-) -> tuple[ArtifactStore, DailyWidbConfig, RawDayPointers, ArtifactSpec, ArtifactSpec]:
+) -> tuple[
+    ArtifactStore,
+    DailyWidbConfig,
+    DailySurfaceConfig,
+    RawDayPointers,
+    ArtifactSpec,
+    ArtifactSpec,
+    ArtifactSpec,
+    ArtifactSpec,
+    ArtifactSpec,
+]:
     payload = item.payload
     if not isinstance(payload, Mapping):
         raise ValueError("Daily worker payload must be a mapping")
     store = ArtifactStore(_locations_from_payload(payload))
     config = _config_from_payload(payload)
+    surface_config = _surface_config_from_payload(payload)
     ticker = _actual_ticker(item)
     raw = plan_raw_day_pointers(
         ticker=ticker,
@@ -448,19 +624,61 @@ def _specs_from_item(
         config=config,
         paired=paired.pointer,
     )
-    return store, config, raw, paired, enriched
+    no_arb = no_arb_day_spec(
+        ticker=ticker,
+        trading_date=item.trading_date,
+        config=surface_config,
+        enriched=enriched.pointer,
+    )
+    filtered = filtered_day_spec(
+        ticker=ticker,
+        trading_date=item.trading_date,
+        config=surface_config,
+        no_arb=no_arb.pointer,
+    )
+    fitted = fitted_day_spec(
+        ticker=ticker,
+        trading_date=item.trading_date,
+        config=surface_config,
+        filtered=filtered.pointer,
+    )
+    return (
+        store,
+        config,
+        surface_config,
+        raw,
+        paired,
+        enriched,
+        no_arb,
+        filtered,
+        fitted,
+    )
 
 
-def _target_spec(item: DailyWorkItem, paired: ArtifactSpec, enriched: ArtifactSpec) -> ArtifactSpec:
-    return paired if item.stage == "paired-day" else enriched
+def _target_spec(
+    item: DailyWorkItem,
+    paired: ArtifactSpec,
+    enriched: ArtifactSpec,
+    no_arb: ArtifactSpec,
+    filtered: ArtifactSpec,
+    fitted: ArtifactSpec,
+) -> ArtifactSpec:
+    by_stage = {
+        "paired-day": paired,
+        "enriched-day": enriched,
+        "no-arb-day": no_arb,
+        "filtered-day": filtered,
+        "fitted-day": fitted,
+    }
+    return by_stage[item.stage]
 
 
 def probe_daily_target(item: DailyWorkItem) -> ArtifactPointer | None:
     """Shallowly resolve the requested terminal artifact without reading upstreams."""
 
-    store, _, _, paired, enriched = _specs_from_item(item)
+    store, _, _, _, paired, enriched, no_arb, filtered, fitted = _specs_from_item(item)
     payload = item.payload
-    target = _target_spec(item, paired, enriched)
+    target = _target_spec(item, paired, enriched, no_arb, filtered, fitted)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         reuse = store.resolve(target, version=payload.get("version_override"))
@@ -524,12 +742,198 @@ def _build_paired(
     )
 
 
+def _build_enriched(
+    store: ArtifactStore,
+    daily_config: DailyWidbConfig,
+    raw: RawDayPointers,
+    paired_specification: ArtifactSpec,
+    enriched_specification: ArtifactSpec,
+    *,
+    ticker: str,
+    trading_date: date,
+) -> ValidatedArtifact:
+    reuse = store.resolve(enriched_specification)
+    if reuse is not None:
+        return reuse.artifact
+    paired = _build_paired(
+        store,
+        daily_config,
+        raw,
+        paired_specification,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    paired_frame = read_daily_frame(
+        store,
+        paired,
+        schema=PAIRED_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    return publish_daily_frame(
+        store,
+        enriched_specification,
+        enrich_daily_frame(paired_frame, config=daily_config),
+        schema=ENRICHED_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+
+
+def _build_no_arb(
+    store: ArtifactStore,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig,
+    raw: RawDayPointers,
+    paired_specification: ArtifactSpec,
+    enriched_specification: ArtifactSpec,
+    no_arb_specification: ArtifactSpec,
+    *,
+    ticker: str,
+    trading_date: date,
+) -> ValidatedArtifact:
+    reuse = store.resolve(no_arb_specification)
+    if reuse is not None:
+        return reuse.artifact
+    enriched = _build_enriched(
+        store,
+        daily_config,
+        raw,
+        paired_specification,
+        enriched_specification,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    frame = read_daily_frame(
+        store,
+        enriched,
+        schema=ENRICHED_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    return publish_daily_frame(
+        store,
+        no_arb_specification,
+        fit_initial_no_arbitrage(frame, config=surface_config),
+        schema=NO_ARB_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+
+
+def _build_filtered(
+    store: ArtifactStore,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig,
+    raw: RawDayPointers,
+    paired_specification: ArtifactSpec,
+    enriched_specification: ArtifactSpec,
+    no_arb_specification: ArtifactSpec,
+    filtered_specification: ArtifactSpec,
+    *,
+    ticker: str,
+    trading_date: date,
+) -> ValidatedArtifact:
+    reuse = store.resolve(filtered_specification)
+    if reuse is not None:
+        return reuse.artifact
+    no_arb = _build_no_arb(
+        store,
+        daily_config,
+        surface_config,
+        raw,
+        paired_specification,
+        enriched_specification,
+        no_arb_specification,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    frame = read_daily_frame(
+        store,
+        no_arb,
+        schema=NO_ARB_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    return publish_daily_frame(
+        store,
+        filtered_specification,
+        apply_options_filter(frame, config=surface_config),
+        schema=FILTERED_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+
+
+def _build_fitted(
+    store: ArtifactStore,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig,
+    raw: RawDayPointers,
+    paired_specification: ArtifactSpec,
+    enriched_specification: ArtifactSpec,
+    no_arb_specification: ArtifactSpec,
+    filtered_specification: ArtifactSpec,
+    fitted_specification: ArtifactSpec,
+    *,
+    ticker: str,
+    trading_date: date,
+) -> ValidatedArtifact:
+    reuse = store.resolve(fitted_specification)
+    if reuse is not None:
+        return reuse.artifact
+    filtered = _build_filtered(
+        store,
+        daily_config,
+        surface_config,
+        raw,
+        paired_specification,
+        enriched_specification,
+        no_arb_specification,
+        filtered_specification,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    frame = read_daily_frame(
+        store,
+        filtered,
+        schema=FILTERED_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    return publish_daily_frame(
+        store,
+        fitted_specification,
+        fit_smooth_sanos(frame, config=surface_config),
+        schema=FITTED_SCHEMA,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+
+
 def build_daily_target(item: DailyWorkItem) -> ArtifactPointer:
     """Spawn-safe worker that recursively builds one terminal daily stage."""
 
-    store, config, raw, paired_specification, enriched_specification = _specs_from_item(item)
+    (
+        store,
+        daily_config,
+        surface_config,
+        raw,
+        paired_specification,
+        enriched_specification,
+        no_arb_specification,
+        filtered_specification,
+        fitted_specification,
+    ) = _specs_from_item(item)
     ticker = _actual_ticker(item)
-    target = _target_spec(item, paired_specification, enriched_specification)
+    target = _target_spec(
+        item,
+        paired_specification,
+        enriched_specification,
+        no_arb_specification,
+        filtered_specification,
+        fitted_specification,
+    )
     payload = item.payload
     if payload.get("version_override") == "*":
         with warnings.catch_warnings():
@@ -539,41 +943,75 @@ def build_daily_target(item: DailyWorkItem) -> ArtifactPointer:
     reuse = store.resolve(target)
     if reuse is not None:
         return reuse.artifact.pointer
-    paired = _build_paired(
+    if item.stage == "paired-day":
+        return _build_paired(
+            store,
+            daily_config,
+            raw,
+            paired_specification,
+            ticker=ticker,
+            trading_date=item.trading_date,
+        ).pointer
+    if item.stage == "enriched-day":
+        return _build_enriched(
+            store,
+            daily_config,
+            raw,
+            paired_specification,
+            enriched_specification,
+            ticker=ticker,
+            trading_date=item.trading_date,
+        ).pointer
+    if item.stage == "no-arb-day":
+        return _build_no_arb(
+            store,
+            daily_config,
+            surface_config,
+            raw,
+            paired_specification,
+            enriched_specification,
+            no_arb_specification,
+            ticker=ticker,
+            trading_date=item.trading_date,
+        ).pointer
+    if item.stage == "filtered-day":
+        return _build_filtered(
+            store,
+            daily_config,
+            surface_config,
+            raw,
+            paired_specification,
+            enriched_specification,
+            no_arb_specification,
+            filtered_specification,
+            ticker=ticker,
+            trading_date=item.trading_date,
+        ).pointer
+    return _build_fitted(
         store,
-        config,
+        daily_config,
+        surface_config,
         raw,
         paired_specification,
-        ticker=ticker,
-        trading_date=item.trading_date,
-    )
-    if item.stage == "paired-day":
-        return paired.pointer
-    paired_frame = read_daily_frame(
-        store,
-        paired,
-        schema=PAIRED_SCHEMA,
-        ticker=ticker,
-        trading_date=item.trading_date,
-    )
-    enriched_frame = enrich_daily_frame(paired_frame, config=config)
-    artifact = publish_daily_frame(
-        store,
         enriched_specification,
-        enriched_frame,
-        schema=ENRICHED_SCHEMA,
+        no_arb_specification,
+        filtered_specification,
+        fitted_specification,
         ticker=ticker,
         trading_date=item.trading_date,
-    )
-    return artifact.pointer
+    ).pointer
 
 
 @version(
     "1.0",
     dependencies=[
         IntermediateBuildRequest,
+        DailySurfaceConfig,
         DailyWidbConfig,
         business_dates,
+        filtered_day_producer_version,
+        fitted_day_producer_version,
+        no_arb_day_producer_version,
         paired_day_producer_version,
         enriched_day_producer_version,
         raw_content_producer_version,
@@ -584,6 +1022,7 @@ def plan_intermediate_build(
     locations: StorageLocations,
     request: IntermediateBuildRequest,
     config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig = DailySurfaceConfig(),
 ) -> DailyPlan:
     """Create the deterministic per-session plan without touching artifact roots."""
 
@@ -594,11 +1033,20 @@ def plan_intermediate_build(
     )
     if not dates:
         raise ValueError("The intermediate request contains no eligible NYSE sessions")
-    producer = (
-        paired_day_producer_version()
-        if request.through == "paired-day"
-        else enriched_day_producer_version()
-    )
+    producer_by_stage = {
+        "paired-day": paired_day_producer_version(),
+        "enriched-day": enriched_day_producer_version(),
+        "no-arb-day": no_arb_day_producer_version(),
+        "filtered-day": filtered_day_producer_version(),
+        "fitted-day": fitted_day_producer_version(),
+    }
+    schema_by_stage = {
+        "paired-day": PAIRED_SCHEMA_VERSION,
+        "enriched-day": ENRICHED_SCHEMA_VERSION,
+        "no-arb-day": NO_ARB_SCHEMA_VERSION,
+        "filtered-day": FILTERED_SCHEMA_VERSION,
+        "fitted-day": FITTED_SCHEMA_VERSION,
+    }
     payload = {
         "locations": locations.as_dict(),
         "daily_config": canonical_value(config),
@@ -608,15 +1056,15 @@ def plan_intermediate_build(
         "raw_producer_version": raw_content_producer_version(),
         "version_override": request.version_override,
     }
+    if request.through in {"no-arb-day", "filtered-day", "fitted-day"}:
+        payload["surface_config"] = canonical_value(surface_config)
     return plan_daily_dates(
         ticker=_safe_daily_ticker_label(request.ticker),
         dates=dates,
         stage=request.through,
         payload=payload,
-        schema_version=(
-            PAIRED_SCHEMA_VERSION if request.through == "paired-day" else ENRICHED_SCHEMA_VERSION
-        ),
-        producer_version=producer,
+        schema_version=schema_by_stage[request.through],
+        producer_version=producer_by_stage[request.through],
         max_workers=request.max_workers,
         progress_interval_seconds=request.progress_interval_seconds,
     )
@@ -626,22 +1074,23 @@ def build_intermediates(
     locations: StorageLocations,
     request: IntermediateBuildRequest,
     config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig = DailySurfaceConfig(),
     *,
     dry_run: bool = False,
     progress: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> IntermediateBuildResult:
     """Inspect or execute a restartable output-first daily build."""
 
-    plan = plan_intermediate_build(locations, request, config)
+    plan = plan_intermediate_build(locations, request, config, surface_config)
     expected: list[ArtifactPointer] = []
     existing: list[ArtifactPointer] = []
     reuses: list[ReuseResult] = []
     resolved_by_key: dict[str, ArtifactPointer] = {}
     raw_dependencies: list[RawDayPointers] = []
     for item in plan.items:
-        _, _, raw, paired, enriched = _specs_from_item(item)
+        _, _, _, raw, paired, enriched, no_arb, filtered, fitted = _specs_from_item(item)
         raw_dependencies.append(raw)
-        target = _target_spec(item, paired, enriched)
+        target = _target_spec(item, paired, enriched, no_arb, filtered, fitted)
         expected.append(target.pointer)
         payload = item.payload
         with warnings.catch_warnings():
@@ -703,6 +1152,12 @@ __all__ = [
     "build_intermediates",
     "enriched_day_producer_version",
     "enriched_day_spec",
+    "filtered_day_producer_version",
+    "filtered_day_spec",
+    "fitted_day_producer_version",
+    "fitted_day_spec",
+    "no_arb_day_producer_version",
+    "no_arb_day_spec",
     "paired_day_producer_version",
     "paired_day_spec",
     "plan_intermediate_build",

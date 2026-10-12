@@ -4,12 +4,13 @@
 
 - This repository owns the standalone SANOS Python implementation, its data
   pipeline, analytics, tests, documentation, and LaTeX paper sources.
-- Treat `~/python/quant_data` as a read-only reference implementation. Copy and
+- Treat `~/python/quant_data` as a read-only migration implementation. Copy and
   adapt required code into this repository, preferring proven implementation
   over a clean-room rewrite; do not modify `quant_data` as part of SANOS work
   unless the user explicitly requests a separate compatibility change there.
-- Preserve numerical and data parity with the reference implementation through
-  explicit parity tests before removing or redesigning behavior.
+- Measure numerical and data parity with the migration implementation through
+  explicit parity tests before removing or redesigning behavior. Approved
+  corrections are then owned directly by SANOS and need no legacy runtime mode.
 - Preserve current semantics by default. Record suspected defects or desirable
   semantic changes, their evidence, and their expected output impact, and obtain
   user approval before implementing them. Do not silently preserve or fix a
@@ -17,10 +18,13 @@
 - Rebuild the target 2022--2025 dataset from newly downloaded WRDS extracts.
   Existing raw, processing, training, or experiment artifacts from
   `quant_data` must not be inputs to the new published dataset. The existing
-  891-date fitted 2022--2025 dataset is the authoritative parity reference:
-  catalogue it read-only and treat unexplained differences in dates,
+  891-date fitted 2022--2025 dataset is the read-only migration oracle:
+  catalogue it and treat unexplained differences in dates,
   populations, masks, SANOS/DLV values, or experiment tensors as blocking
-  discrepancies requiring review and user approval.
+  discrepancies requiring review and user approval. Once the fresh SANOS
+  dataset passes publication validation and both reviews, its immutable
+  identity and manifest become the authoritative reference dataset. The legacy
+  oracle does not remain a co-equal reference and is never a runtime input.
 - Keep generated data, caches, datasets, experiment files, logs, and temporary
   artifacts outside the Git working tree. Under a shared temporary directory,
   place all SANOS files below a project-specific `sanos/` directory.
@@ -144,7 +148,7 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   credentials to logs, Markdown, manifests, or generated configuration files.
 - Represent the AM-settlement overnight variance assumption explicitly as
   `overnight_variance_fraction`. Its default is `0.2` for parity with the
-  reference implementation. Include it in canonical configuration and artifact
+  migration implementation. Include it in canonical configuration and artifact
   identity, and do not change the default without an approved semantic change.
 - Treat the overnight fraction as a clock input, not merely a displayed DTE.
   Trace and test its effect on AM expiry ordering, NMS and eligibility, variance

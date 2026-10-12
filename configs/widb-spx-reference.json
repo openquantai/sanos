@@ -15,5 +15,32 @@
       "drop_irregular_expiries": true,
       "min_bid": 0.011
     }
+  },
+  "surface": {
+    "no_arbitrage": {
+      "max_dlv": null,
+      "mid_fit_weight": 0.1,
+      "min_atm_volatility": 0.05,
+      "min_dc_epsilon": 0.001,
+      "min_density": 0.0001,
+      "min_dlv": null,
+      "min_half_spread": 0.0001,
+      "min_strikes_per_expiry": 5
+    },
+    "options_filter": {
+      "max_business_days_to_expiry": 70,
+      "max_nms": [-100.0, 100.0],
+      "max_num_options": 100000,
+      "min_log_open_interest": 1.0,
+      "min_log_volume": 1.0,
+      "min_options_per_expiry": 10,
+      "min_vega_sqrt_var": 0.001,
+      "nms_use_atm": true,
+      "normalize": true,
+      "remove_am": false
+    },
+    "smooth_sanos": {
+      "smoothness": 0.25
+    }
   }
 }

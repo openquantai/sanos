@@ -3,7 +3,9 @@
 The four and only four storage classes are **raw**, **intermediate**,
 **dataset**, and **experiment**. Generated artifacts live outside Git. The
 existing 891-date SPX collection from 2022-01-03 through 2025-08-29 is a
-read-only parity oracle and is never an upstream input to the fresh build.
+read-only migration oracle and is never an upstream input to the fresh build.
+The fresh SANOS dataset becomes the canonical reference only after immutable
+publication, validation, and dual review.
 
 ## Common rules
 
@@ -180,6 +182,36 @@ Both stages persist exactly one tabular payload, `data.parquet`. Portable
 completion marker are metadata, not separate quote/expiry/surface tables.
 Known-bad dates produce an exact typed empty frame. Other unexpected empty or
 invalid populations fail rather than becoming silent exclusions.
+
+### Phase 6 persisted stages
+
+`no-arb-day` consumes `enriched-day` and applies the initial linear surface
+fit. It retains all enriched rows, marks expiries dropped by the fit, preserves
+the strike mask, appends reference-compatible Float32 fit/Greek fields, and
+stores the complete pre-filter linear surface state. This is the explicitly
+named compatibility DLV state under CD-021.
+
+`filtered-day` consumes `no-arb-day` and applies the recovered production
+sequence: inclusive 70-business-day horizon, spot normalization, inclusive
+ATM-NMS `[-100,100]`, volume and open-interest thresholds, optional AM rule,
+minimum 10 rows per expiry, then the stable 100,000-row cap. It retains rejected
+rows with cumulative eligibility booleans and the first rejection reason.
+`min_vega_sqrt_var=0.001` remains a versioned no-op under CD-012.
+
+`fitted-day` fits the selected pure call books with smoothness 0.25, retaining
+the full smooth SANOS state, quote-aligned mids/errors, distinct pre-fit,
+smooth-fit and intersection masks, and separately active real call/put books.
+Real books are represented in `C/(DF*F)` units. Solver events record stage,
+solver, status, fallback and objective; elapsed time remains in the run journal
+rather than deterministic frame content. A failed solver publishes no terminal
+artifact.
+
+All three artifacts keep one Polars frame per day. Model support and density
+vectors are typed list columns repeated within an expiry; Parquet compression
+avoids a separate state table while every rejected input row remains auditable.
+The exact selected legacy row view is the subset where
+`options_filter_eligible` is true, stably ordered by expiry and normalized
+strike.
 
 ## Internal dataset
 

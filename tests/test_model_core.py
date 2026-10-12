@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from cdxcore.bs import bs
 from cdxcore.verbose import Context
+from cvxpy.error import SolverError
 
 from sanos.model import (
     ArbFreePricer,
@@ -380,15 +381,184 @@ def test_arbfree_surface_contains_quotes_and_preserves_geometry() -> None:
 
 def test_lp_solver_reports_infeasible_problem() -> None:
     variable = cp.Variable()
+    events: list[dict[str, object]] = []
     success, status, fell_back = SanosLPSolver(timeout_seconds=10.0)(
         objective=variable,
         constraints=[variable >= 1.0, variable <= 0.0],
         variables=[],
+        diagnostic_sink=lambda event: events.append(dict(event)),
         verbose=cast(Any, Context).quiet,
     )
     assert not success
     assert status in {"infeasible", "infeasible_inaccurate"}
     assert not fell_back
+    assert events == [
+        {
+            "solver": "HIGHS",
+            "algorithm": "simplex",
+            "status": status,
+            "is_fallback": False,
+            "for_expiry": False,
+            "objective": None,
+        }
+    ]
+
+
+def test_lp_solver_diagnostics_are_numerically_neutral() -> None:
+    def solve(events: list[dict[str, object]] | None) -> tuple[str, float]:
+        variable = cp.Variable()
+        success, status, _ = SanosLPSolver(timeout_seconds=10.0)(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=(
+                None if events is None else lambda event: events.append(dict(event))
+            ),
+            verbose=cast(Any, Context).quiet,
+        )
+        assert success
+        return status, float(variable.value)
+
+    without_sink = solve(None)
+    events: list[dict[str, object]] = []
+    with_sink = solve(events)
+    assert with_sink == without_sink
+    assert len(events) == 1
+    assert events[0]["status"] == with_sink[0]
+
+
+def test_lp_solver_forced_primary_failure_uses_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def force_primary_failure(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("solver") == "HIGHS":
+            raise SolverError("forced primary failure")
+        return original_solve(problem, *args, **kwargs)
+
+    monkeypatch.setattr(cp.Problem, "solve", force_primary_failure)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="fallback solver"):
+        success, status, fell_back = SanosLPSolver(timeout_seconds=10.0)(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert success
+    assert status in {"optimal", "optimal_inaccurate"}
+    assert fell_back
+    assert [
+        (event["solver"], event["status"], event["is_fallback"])
+        for event in events
+    ] == [
+        ("HIGHS", "solver_error", False),
+        ("CLARABEL", status, True),
+    ]
+
+
+def test_lp_solver_forced_primary_user_limit_uses_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def force_primary_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("solver") == "HIGHS":
+            problem._status = "user_limit"
+            return 0.0
+        return original_solve(problem, *args, **kwargs)
+
+    monkeypatch.setattr(cp.Problem, "solve", force_primary_limit)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="reached its limit"):
+        success, status, fell_back = SanosLPSolver(timeout_seconds=10.0)(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert success
+    assert status in {"optimal", "optimal_inaccurate"}
+    assert fell_back
+    assert [
+        (event["solver"], event["status"], event["is_fallback"])
+        for event in events
+    ] == [
+        ("HIGHS", "user_limit", False),
+        ("CLARABEL", status, True),
+    ]
+
+
+def test_lp_solver_terminal_user_limit_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def force_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> float:
+        del args, kwargs
+        problem._status = "user_limit"
+        return 0.0
+
+    monkeypatch.setattr(cp.Problem, "solve", force_limit)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="reached its limit"):
+        success, status, fell_back = SanosLPSolver(timeout_seconds=10.0)(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert not success
+    assert status == "user_limit"
+    assert fell_back
+    assert [
+        (event["solver"], event["status"], event["is_fallback"])
+        for event in events
+    ] == [
+        ("HIGHS", "user_limit", False),
+        ("CLARABEL", "user_limit", True),
+    ]
+
+
+def test_lp_solver_terminal_unexpected_error_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def force_terminal_error(
+        problem: cp.Problem,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        del problem, args
+        if kwargs.get("solver") == "HIGHS":
+            raise SolverError("forced primary failure")
+        raise ValueError("forced terminal failure")
+
+    monkeypatch.setattr(cp.Problem, "solve", force_terminal_error)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with (
+        pytest.warns(UserWarning, match="fallback solver"),
+        pytest.raises(ValueError, match="Unexpected error: forced terminal failure"),
+    ):
+        SanosLPSolver(timeout_seconds=10.0)(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert [
+        (event["solver"], event["status"], event["is_fallback"])
+        for event in events
+    ] == [
+        ("HIGHS", "solver_error", False),
+        ("CLARABEL", "unexpected_error", True),
+    ]
 
 
 def test_extended_strikes_and_blocked_vector_diagnostic_contract() -> None:
@@ -456,7 +626,7 @@ def test_numerical_components_have_resolved_versions() -> None:
         "warn_and_fix_density",
     }
     assert "1.0-blocked-cd013" in str(getattr(SanosPricer, "version"))
-    assert str(getattr(SanosLPSolver, "version")).startswith("1.0")
+    assert str(getattr(SanosLPSolver, "version")).startswith("1.1")
 
 
 def test_defective_reference_jax_optimizer_is_explicitly_blocked() -> None:

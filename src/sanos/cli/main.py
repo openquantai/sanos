@@ -26,7 +26,7 @@ from sanos.config import (
 )
 from sanos.pipeline import DailyExecutionError
 from sanos.widb.build import IntermediateBuildRequest, build_intermediates
-from sanos.widb.config import DailyWidbConfig
+from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.wrds import (
     ALL_RAW_TABLES,
     RawDownloadConfig,
@@ -536,7 +536,10 @@ def intermediate() -> None:
     "config_path",
     required=True,
     type=click.Path(path_type=Path, dir_okay=False, exists=True),
-    help="Strict portable JSON containing one 'daily' configuration object.",
+    help=(
+        "Strict portable JSON containing 'daily' and an optional 'surface' "
+        "configuration object."
+    ),
 )
 @click.option("--ticker", required=True, help="OptionMetrics ticker, for example SPX.")
 @click.option(
@@ -553,7 +556,9 @@ def intermediate() -> None:
 )
 @click.option(
     "--through",
-    type=click.Choice(("paired-day", "enriched-day")),
+    type=click.Choice(
+        ("paired-day", "enriched-day", "no-arb-day", "filtered-day", "fitted-day")
+    ),
     default="enriched-day",
     show_default=True,
 )
@@ -599,7 +604,7 @@ def intermediate_build(
     max_workers: int,
     version_request: str,
 ) -> None:
-    """Build restartable per-day paired or enriched WIDB frames offline from Raw."""
+    """Build a restartable daily WIDB/filter/SANOS stage offline from Raw."""
 
     try:
         locations = context.locations.require_complete()
@@ -609,11 +614,18 @@ def intermediate_build(
             raise ValueError(
                 f"Cannot read intermediate configuration {config_path}: {exc}"
             ) from exc
-        if not isinstance(document, dict) or set(document) != {"daily"}:
-            raise ValueError("Intermediate configuration must contain exactly one 'daily' object")
+        if not isinstance(document, dict) or "daily" not in document:
+            raise ValueError("Intermediate configuration must contain a 'daily' object")
+        unknown = set(document) - {"daily", "surface"}
+        if unknown:
+            raise ValueError(f"Unknown intermediate configuration sections: {sorted(unknown)}")
         if not isinstance(document["daily"], dict):
             raise ValueError("Intermediate configuration 'daily' must be an object")
         daily = DailyWidbConfig.from_mapping(document["daily"])
+        surface_payload = document.get("surface", {})
+        if not isinstance(surface_payload, dict):
+            raise ValueError("Intermediate configuration 'surface' must be an object")
+        surface = DailySurfaceConfig.from_mapping(surface_payload)
         request = IntermediateBuildRequest(
             ticker=ticker,
             start_date=start_date.date(),
@@ -633,6 +645,7 @@ def intermediate_build(
             locations,
             request,
             daily,
+            surface,
             dry_run=context.dry_run,
             progress=progress,
         )
@@ -656,12 +669,17 @@ def intermediate_build(
         tuple(store.path_for(pointer) for pointer in dependencies.all())
         for dependencies in result.raw_dependencies
     )
+    reported_configuration: Any
+    if through in {"paired-day", "enriched-day"}:
+        reported_configuration = daily
+    else:
+        reported_configuration = {"daily": daily, "surface": surface}
     _emit(
         context,
         "intermediate_result",
         stage=through,
-        config_id=canonical_sha256(daily),
-        configuration=canonical_value(daily),
+        config_id=canonical_sha256(reported_configuration),
+        configuration=canonical_value(reported_configuration),
         plan_id=result.plan.plan_id,
         total=len(result.expected),
         existing=len(result.existing),

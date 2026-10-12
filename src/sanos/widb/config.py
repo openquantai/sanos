@@ -117,4 +117,171 @@ class DailyWidbConfig:
         return cls(clock=clock, raw=raw, enrichment=enrichment)
 
 
-__all__ = ["ClockConfig", "DailyWidbConfig", "ExpiryEnrichmentConfig", "RawDayConfig"]
+@version("1.0", dependencies=[_finite])
+@dataclass(frozen=True, slots=True)
+class OptionsFilterConfig:
+    """Production option-population rules used by the 891-day reference."""
+
+    normalize: bool = True
+    max_num_options: int = 100_000
+    max_business_days_to_expiry: int = 70
+    max_nms: tuple[float, float] = (-100.0, 100.0)
+    nms_use_atm: bool = True
+    min_vega_sqrt_var: float = 0.001
+    min_log_volume: float = 1.0
+    min_log_open_interest: float = 1.0
+    remove_am: bool = False
+    min_options_per_expiry: int = 10
+
+    def __post_init__(self) -> None:
+        for name in ("max_num_options", "max_business_days_to_expiry", "min_options_per_expiry"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.max_num_options < 10:
+            raise ValueError("max_num_options must be at least 10")
+        if self.min_options_per_expiry > self.max_num_options:
+            raise ValueError("min_options_per_expiry cannot exceed max_num_options")
+        if not isinstance(self.max_nms, tuple) or len(self.max_nms) != 2:
+            raise ValueError("max_nms must be a two-element tuple")
+        lower, upper = self.max_nms
+        _finite("max_nms[0]", lower)
+        _finite("max_nms[1]", upper)
+        if not lower < 0.0 < upper:
+            raise ValueError("max_nms must straddle zero")
+        for name in ("min_vega_sqrt_var", "min_log_volume", "min_log_open_interest"):
+            value = getattr(self, name)
+            _finite(name, value)
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative")
+        for name in ("normalize", "nms_use_atm", "remove_am"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+
+
+@version("1.0", dependencies=[_finite])
+@dataclass(frozen=True, slots=True)
+class NoArbitrageConfig:
+    """Content-affecting settings shared by the linear and smooth surface fits.
+
+    The reference solver timeout is deliberately fixed in code at 300 seconds.
+    Exposing it as a content setting would resolve open decision CD-006 without
+    approval; operational provenance records the fixed value instead.
+    """
+
+    min_half_spread: float = 1.0e-4
+    mid_fit_weight: float = 0.1
+    min_atm_volatility: float = 0.05
+    min_dlv: float | None = None
+    max_dlv: float | None = None
+    min_strikes_per_expiry: int = 5
+    min_density: float = 1.0e-4
+    min_dc_epsilon: float = 1.0e-3
+
+    def __post_init__(self) -> None:
+        for name in (
+            "min_half_spread",
+            "mid_fit_weight",
+            "min_atm_volatility",
+            "min_density",
+            "min_dc_epsilon",
+        ):
+            _finite(name, getattr(self, name))
+        if self.min_half_spread <= 0.0:
+            raise ValueError("min_half_spread must be positive")
+        if not 0.0 <= self.mid_fit_weight <= 1.0:
+            raise ValueError("mid_fit_weight must lie in [0, 1]")
+        if self.min_atm_volatility < 0.0:
+            raise ValueError("min_atm_volatility must be non-negative")
+        if self.min_density <= 0.0 or self.min_dc_epsilon <= 0.0:
+            raise ValueError("min_density and min_dc_epsilon must be positive")
+        if (
+            isinstance(self.min_strikes_per_expiry, bool)
+            or not isinstance(self.min_strikes_per_expiry, int)
+            or self.min_strikes_per_expiry < 3
+        ):
+            raise ValueError("min_strikes_per_expiry must be an integer of at least 3")
+        for name in ("min_dlv", "max_dlv"):
+            value = getattr(self, name)
+            if value is not None:
+                _finite(name, value)
+                if value < 0.0:
+                    raise ValueError(f"{name} must be non-negative or null")
+        if self.min_dlv is not None and self.max_dlv is not None:
+            if self.max_dlv <= self.min_dlv:
+                raise ValueError("max_dlv must exceed min_dlv")
+
+
+@version("1.0", dependencies=[_finite])
+@dataclass(frozen=True, slots=True)
+class SmoothSanosConfig:
+    """Production smooth-SANOS settings applied after option filtering."""
+
+    smoothness: float = 0.25
+
+    def __post_init__(self) -> None:
+        _finite("smoothness", self.smoothness)
+        if self.smoothness <= 0.01:
+            raise ValueError("smoothness must be strictly greater than 0.01")
+
+
+@version(
+    "1.0",
+    dependencies=[OptionsFilterConfig, NoArbitrageConfig, SmoothSanosConfig],
+)
+@dataclass(frozen=True, slots=True)
+class DailySurfaceConfig:
+    """Complete Phase 6 compatibility configuration for a fitted day."""
+
+    options_filter: OptionsFilterConfig = OptionsFilterConfig()
+    no_arbitrage: NoArbitrageConfig = NoArbitrageConfig()
+    smooth_sanos: SmoothSanosConfig = SmoothSanosConfig()
+
+    def __post_init__(self) -> None:
+        if not self.options_filter.normalize:
+            raise ValueError("The smooth SANOS pipeline requires options_filter.normalize=true")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> DailySurfaceConfig:
+        """Parse a strict portable mapping without accepting unknown fields."""
+
+        allowed = {"options_filter", "no_arbitrage", "smooth_sanos"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(f"Unknown daily surface configuration keys: {sorted(unknown)}")
+        filter_value = value.get("options_filter", {})
+        no_arb_value = value.get("no_arbitrage", {})
+        smooth_value = value.get("smooth_sanos", {})
+        if not all(
+            isinstance(item, Mapping)
+            for item in (filter_value, no_arb_value, smooth_value)
+        ):
+            raise ValueError(
+                "options_filter, no_arbitrage, and smooth_sanos values must be mappings"
+            )
+        filter_payload = dict(filter_value)
+        if "max_nms" in filter_payload:
+            max_nms = filter_payload["max_nms"]
+            if not isinstance(max_nms, list | tuple) or len(max_nms) != 2:
+                raise ValueError("options_filter.max_nms must contain exactly two values")
+            filter_payload["max_nms"] = tuple(max_nms)
+        try:
+            return cls(
+                options_filter=OptionsFilterConfig(**filter_payload),
+                no_arbitrage=NoArbitrageConfig(**dict(no_arb_value)),
+                smooth_sanos=SmoothSanosConfig(**dict(smooth_value)),
+            )
+        except TypeError as exc:
+            raise ValueError(f"Invalid daily surface configuration field: {exc}") from exc
+
+
+__all__ = [
+    "ClockConfig",
+    "DailySurfaceConfig",
+    "DailyWidbConfig",
+    "ExpiryEnrichmentConfig",
+    "NoArbitrageConfig",
+    "OptionsFilterConfig",
+    "RawDayConfig",
+    "SmoothSanosConfig",
+]

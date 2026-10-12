@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import warnings as warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -523,7 +524,12 @@ class SanosPricer:
         """
         Compute densities from discrete local volatilities.
 
-        This is the inverse operation to :func:`dlvsqs`, and will return the original densities if the input ``dlvsqs`` are the same as those computed by :func:`dlvsqs` (up to numerical precision).
+        This is the inverse operation to :func:`dlvsqs`, and will return the
+        original densities if the input ``dlvsqs`` are the same as those
+        computed by :func:`dlvsqs` (up to numerical precision). The lower- and
+        upper-grid coefficients use their mathematically corresponding
+        tridiagonal directions; the pinned reference reversed them on unequal
+        grids (CD-022).
         """
         T = len(self.expiries)
         assert len(dlvsqs) == T, f"Expected 'dlvsqs' to have length {T}, but found {len(dlvsqs)}"
@@ -597,7 +603,7 @@ class SanosPricer:
                 f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed 'wdn' must be non-negative, but found min {np.min(wdn)}"
             )
 
-            q_t = solve_sanos_tridiagonal(w_minus=wup, w_plus=wdn, rhs=q_t)
+            q_t = solve_sanos_tridiagonal(w_minus=wdn, w_plus=wup, rhs=q_t)
             assert np.all(q_t >= -self._eps_dlv_dens_pos), (
                 f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must be non-negative, but found min {np.min(q_t)} [tolerance 'dlv_dens_pos' {self._eps_dlv_dens_pos:.4g}]"
             )
@@ -613,7 +619,7 @@ class SanosPricer:
         return xdensities
 
 
-@version("1.0")
+@version("1.1")
 @dataclass(frozen=True)
 class SanosLPSolver:
     timeout_seconds: float = 60 * 5.0  # timeout in seconds
@@ -642,6 +648,7 @@ class SanosLPSolver:
         message_context: callable | str | None = None,
         for_expiry: bool = False,
         is_fallback: bool = False,
+        diagnostic_sink: Callable[[Mapping[str, object]], None] | None = None,
         verbose: Context = Context.quiet,
     ) -> tuple[bool, str, bool]:
         """
@@ -661,6 +668,25 @@ class SanosLPSolver:
             else:
                 msg = str(message_context)
             return (msg + ": ") if msg != "" else ""
+
+        def emit(status: str, objective_value: float | None = None) -> None:
+            if diagnostic_sink is not None:
+                if objective_value is not None and not math.isfinite(objective_value):
+                    objective_value = None
+                diagnostic_sink(
+                    {
+                        "solver": (
+                            "CLARABEL"
+                            if is_fallback or self.algorithm == "clarabel"
+                            else "HIGHS"
+                        ),
+                        "algorithm": self.algorithm,
+                        "status": status,
+                        "is_fallback": is_fallback,
+                        "for_expiry": for_expiry,
+                        "objective": objective_value,
+                    }
+                )
 
         # Preserve the primary solver's final iterate when the fallback is
         # entered after a limit or solver failure.
@@ -690,6 +716,7 @@ class SanosLPSolver:
                 prob.solve(solver=slv, **opt)
                 prob_status = str(prob.status)
             except SolverError as e:
+                emit("solver_error")
                 if not is_fallback and self.algorithm != "clarabel":
                     warnings.warn(
                         f"{message()}Solver error: {str(e)}. Attempting to solve with fallback solver."
@@ -701,6 +728,7 @@ class SanosLPSolver:
                         message_context=message_context,
                         for_expiry=for_expiry,
                         is_fallback=True,
+                        diagnostic_sink=diagnostic_sink,
                         verbose=verbose,
                     )
                 raise type(e)(f"{message()}Solver error: {str(e)}.") from e
@@ -710,6 +738,7 @@ class SanosLPSolver:
                 if not is_fallback:
                     msg = str(e)
                     if "Cannot unpack invalid solution" in msg:
+                        emit("invalid_solution")
                         return self(
                             objective=objective,
                             constraints=constraints,
@@ -717,11 +746,14 @@ class SanosLPSolver:
                             message_context=message_context,
                             for_expiry=for_expiry,
                             is_fallback=True,
+                            diagnostic_sink=diagnostic_sink,
                             verbose=verbose,
                         )
+                emit("unexpected_error")
                 raise type(e)(f"{message()}Unexpected error: {str(e)}.") from e
 
             if prob_status == "user_limit" and not is_fallback and self.algorithm != "clarabel":
+                emit(prob_status, None if prob.value is None else float(prob.value))
                 warnings.warn(
                     f"{message()}Primary solver reached its limit. "
                     "Attempting to solve with fallback solver."
@@ -733,9 +765,11 @@ class SanosLPSolver:
                     message_context=message_context,
                     for_expiry=for_expiry,
                     is_fallback=True,
+                    diagnostic_sink=diagnostic_sink,
                     verbose=verbose,
                 )
             success = prob_status in ["optimal", "optimal_inaccurate"]
+            emit(prob_status, None if prob.value is None else float(prob.value))
         return success, prob_status, is_fallback
 
     def _lp_solver_settings(self, *, for_expiry: bool, is_fallback: bool) -> tuple[str, dict]:
@@ -1186,7 +1220,7 @@ def _compute_market_fit(
 # This class is decorated after the diagnostic helper is defined so the direct
 # dependency can be resolved without a string or a separate compatibility token.
 version(
-    "0.8",
+    "0.9",
     dependencies=[solve_sanos_tridiagonal, one_minute_year_fraction, _compute_market_fit],
 )(SanosPricer)
 

@@ -4,21 +4,24 @@ SANOS is a standalone implementation of the smooth arbitrage-free normalized
 option surface model, together with a reproducible WIDB/WRDS data pipeline and
 research-dataset tooling.
 
-The repository is being migrated from the read-only `quant_data` reference.
+The repository is being migrated from the read-only `quant_data` implementation.
 The implementation follows [PROGRAM_PLAN.md](PROGRAM_PLAN.md). The existing
-891-date SPX dataset from 2022-01-03 through 2025-08-29 is the authoritative
-parity reference; the new dataset will be built from a fresh WRDS extraction.
+891-date SPX dataset from 2022-01-03 through 2025-08-29 is a migration oracle,
+not the final authority. The newly downloaded, validated, and published SANOS
+dataset will be the canonical reference dataset.
 
 ## Current status
 
-Phases 0 through 5 are complete with code and quantitative review. CD-020's
+Phases 0 through 6 are complete with code and quantitative review. The daily
+no-arbitrage, filtering, compatibility-DLV and smooth-SANOS stages are available
+through the CLI. CD-020's
 all-valid-day failure is preserved for parity; repairing it remains an optional
 future change requiring approval. All
 ordinary tests, including the guarded WRDS layer, are offline; no live WRDS
-access has occurred yet. The exact 2022–2025 reference endpoint and numerical
-baseline are catalogued. Dataset and experiment commands still fail with an
+access has occurred yet. The exact 2022–2025 legacy comparison endpoint and
+numerical baseline are catalogued. Dataset and experiment commands still fail with an
 actionable "not implemented" message until their reviewed phases land. See
-[the reference baseline](docs/reference-baseline.md) for the 891-date parity
+[the legacy baseline](docs/reference-baseline.md) for the 891-date parity
 oracle and the distinction between its legacy artifact populations.
 
 ## Development installation
@@ -86,16 +89,20 @@ download prerequisite:
 sanos --root /path/to/quant-data intermediate build \
   --config configs/widb-spx-reference.json \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
-  --through enriched-day --exclude-half-days --max-workers 4
+  --through fitted-day --exclude-half-days --max-workers 4
 ```
 
 Use the global `--dry-run` before material work and `--log-format json` for
 automation. The default includes half days, matching the recovered general
-pipeline; the 891-date reference compatibility run explicitly excludes them.
+pipeline; the 891-date legacy-parity run explicitly excludes them.
 Each artifact contains `data.parquet`, `config.json`, a small `README.md`, and
 the checksummed manifest/completion records. Re-running is output-first and
 shallow: a valid terminal artifact is reused without requiring Raw ancestors.
 `--version '*'` is reuse-only and fails if no matching complete output exists.
+The available terminal stages are `paired-day`, `enriched-day`, `no-arb-day`,
+`filtered-day`, and `fitted-day`. The final frame retains rejected rows with
+eligibility/reason fields and stores both the pre-filter linear compatibility
+DLV state and the post-filter smooth 0.25 SANOS state as typed list columns.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

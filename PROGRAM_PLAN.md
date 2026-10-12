@@ -1,6 +1,6 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0 through 5 are complete with dual
+Status: implementation in progress; Phases 0 through 6 are complete with dual
 review. No live WRDS access has occurred.
 
 Initial review anchors are paper commit
@@ -24,12 +24,15 @@ Build a standalone, human-operable Python repository that:
   and structured progress output.
 
 The existing 891-date SPX dataset from 2022-01-03 through 2025-08-29 is the
-acceptance reference. Phase 1 will identify its exact files, configuration, and
-checksums before implementation. The fresh build must not consume it, but every
+migration acceptance oracle. Phase 1 identifies its exact files, configuration,
+and checksums before implementation. The fresh build must not consume it, but every
 date, population decision, field, mask, SANOS/DLV value, and experiment tensor
-is compared with it. An unexplained discrepancy blocks publication. The date
-range remains configuration; an extension through 2025-12-31 is a separate
-dataset identity.
+is compared with it. An unexplained discrepancy blocks publication, while an
+approved correction is recorded as an intentional difference. After the fresh
+dataset passes publication validation and dual review, its manifest identity is
+the canonical SANOS reference dataset; the legacy oracle is no longer normative.
+The date range remains configuration; an extension through 2025-12-31 is a
+separate dataset identity.
 
 ## Binding design decisions
 
@@ -271,9 +274,9 @@ smoke test pass; paper still builds; no generated data is inside Git.
   than assuming every historical module is live.
 - Copy representative tests first and establish synthetic/golden numerical
   fixtures that can run without WRDS.
-- Catalogue and checksum the existing 891-date reference dataset outside Git,
-  and build a read-only comparison adapter for it. It is the authoritative
-  parity oracle but never an upstream artifact of the new build.
+- Catalogue and checksum the existing 891-date legacy dataset outside Git,
+  and build a read-only comparison adapter for it. It is the migration parity
+  oracle but never an upstream artifact of the new build.
 - Capture current versions, default values, schemas, filter order, tolerances,
   solver choices, and 2022--2025 date/eligibility counts as acceptance evidence.
 - Open the compatibility decision register with all suspected defects.
@@ -389,7 +392,7 @@ self-describing Polars frame.
   no-arbitrage and SANOS cores.
 - Retain all quote, liquidity, expiry, eligibility, fitted, SANOS/DLV, and
   diagnostic columns in one daily frame.
-- Preserve the reference implementation's explicit float32 daily-frame cast
+- Preserve the migration implementation's explicit float32 daily-frame cast
   boundaries before selected numerical arrays are promoted back to float64 by
   the solvers. A float64-through-fit variant requires measured parity evidence,
   an explicit numerical error budget, a new version, and approval under
@@ -512,13 +515,14 @@ docs are complete; discrepancies are explained or approved.
   default to two unless pilot evidence justifies more.
 - Build daily intermediates, publish the internal dataset, materialize and audit
   the public candidate, and build the reference experiment HDF5.
-- Compare coverage, exclusions, distributions, fits, and all reference values
+- Compare coverage, exclusions, distributions, fits, and all legacy-oracle values
   with the existing 891-date dataset. A vendor revision is a discrepancy to
   investigate and present for approval, never a reason to mutate fresh data to
   force equality or to waive the reference silently.
 
 Acceptance: both reviewers approve the production evidence bundle; all manifests
-and checksums validate; the documented non-AI reproduction commands work.
+and checksums validate; the documented non-AI reproduction commands work; and
+the published SANOS dataset identity is recorded as the canonical reference.
 
 ### Phase 12 — Documentation and release readiness
 
@@ -544,7 +548,7 @@ The following item is flagged now and must not be silently copied or fixed:
   array but initializes `market.expiries` as empty and computes unique expiries
   from that empty list. The grouping loop therefore appears unable to populate
   the SANOS input. It also appears to request stale field names. Phase 1 must
-  confirm whether this path produced the reference dataset, add a regression
+  confirm whether this path produced the legacy dataset, add a regression
   test, identify the actual production path, and request approval for the
   intended correction. Byte parity with a non-working path is not a goal.
 
@@ -567,7 +571,7 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
   explicit regression fixtures.
 - The generic legacy option cap defaults to 1,000, while recent DYSANOS/FLEX
   paths use a practically non-binding 100,000 before later selection. The
-  reference dataset's actual population rule must be recovered, not guessed.
+  legacy dataset's actual population rule must be recovered, not guessed.
 - A FLEX 4.8-business-day first-node convention may encode a different 20%
   overnight clock from WIDB AM settlement. Preserve each behavior until traced.
 - Public half-spreads in spot-one units and model prices reconstructed in

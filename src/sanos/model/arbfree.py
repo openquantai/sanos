@@ -610,6 +610,7 @@ class MkArbFree:
     _eps_density: float = 1e-7
     _eps_dens_1: float = 1e-4  #: (expert use only) What passes as ``sum(p)==1`` and ``p@K==1`` for the fitted density.
     _eps_no_arb: float = 0.01  #: % half spread to tighten fit.
+    _solver_diagnostic_sink: callable | None = None
 
     def __post_init__(self):
         verify_inp(
@@ -1140,6 +1141,7 @@ class MkArbFree:
             xstrikes=r.mstrikes,
             xguessed_p=mguess_p,
             hard_fit=False,
+            diagnostic_stage="surface",
             message_context=surface_message,
             verbose=verbose,
         )
@@ -1165,6 +1167,7 @@ class MkArbFree:
         xguessed_p: list[np.ndarray] | None = None,
         force_linear: bool = False,
         hard_fit: bool = False,
+        diagnostic_stage: str = "surface",
         message_context: callable | str | None = None,
         verbose: Context = Context.quiet,
     ):
@@ -1377,6 +1380,14 @@ class MkArbFree:
                 variables=variables,
                 constraints=constraints,
                 message_context=lambda: message(False),
+                for_expiry=diagnostic_stage.startswith("expiry"),
+                diagnostic_sink=(
+                    None
+                    if self._solver_diagnostic_sink is None
+                    else lambda payload: self._solver_diagnostic_sink(
+                        {"stage": diagnostic_stage, **dict(payload)}
+                    )
+                ),
                 verbose=verbose,
             )
             if fell_back:
@@ -1565,6 +1576,7 @@ class MkArbFree:
             xguessed_p=None,
             hard_fit=False,
             force_linear=force_linear,
+            diagnostic_stage="expiry_soft",
             message_context=lambda: message(False),
             verbose=Context.quiet,
         )
@@ -1598,6 +1610,7 @@ class MkArbFree:
             xguessed_p=[xdensity],
             hard_fit=True,
             force_linear=force_linear,
+            diagnostic_stage="expiry_hard",
             message_context=lambda: message(False),
             verbose=verbose,
         )

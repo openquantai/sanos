@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -9,20 +12,33 @@ import pytest
 from cdxcore.bs import bs
 
 from sanos.artifacts import ArtifactStore, WildcardReuseMissError
-from sanos.config import StorageLocations
+from sanos.config import StorageLocations, canonical_sha256
+from sanos.pipeline import DailyExecutionError
 from sanos.widb import (
     ENRICHED_SCHEMA,
+    FILTERED_SCHEMA,
+    FITTED_SCHEMA,
     PAIRED_SCHEMA,
     ClockConfig,
+    DailySurfaceConfig,
     DailyWidbConfig,
+    OptionsFilterConfig,
+    SmoothSanosConfig,
     count_business_days_between,
     enrich_daily_frame,
+    previous_business_day,
 )
 from sanos.widb.build import (
     IntermediateBuildRequest,
     build_intermediates,
     enriched_day_producer_version,
     enriched_day_spec,
+    filtered_day_producer_version,
+    filtered_day_spec,
+    fitted_day_producer_version,
+    fitted_day_spec,
+    no_arb_day_producer_version,
+    no_arb_day_spec,
     paired_day_producer_version,
     paired_day_spec,
     plan_intermediate_build,
@@ -88,7 +104,13 @@ def _raw_frames(trading_date: date, expiry: date) -> dict[RawTable | str, pl.Dat
         RawTable.SPOT: pl.DataFrame(
             {"secid": [108105], "date": [trading_date.isoformat()], "close": [spot]}
         ),
-        "previous_spot": pl.DataFrame({"secid": [108105], "date": ["2024-01-02"], "close": [99.0]}),
+        "previous_spot": pl.DataFrame(
+            {
+                "secid": [108105],
+                "date": [previous_business_day(trading_date).isoformat()],
+                "close": [99.0],
+            }
+        ),
         RawTable.FORWARDS: pl.DataFrame(
             {
                 "secid": [108105],
@@ -115,7 +137,7 @@ def _publish_raw_inputs(store: ArtifactStore, trading_date: date) -> None:
         (RawTable.SECURITY, None, frames[RawTable.SECURITY]),
         (RawTable.OPTIONS, trading_date, frames[RawTable.OPTIONS]),
         (RawTable.SPOT, trading_date, frames[RawTable.SPOT]),
-        (RawTable.SPOT, date(2024, 1, 2), frames["previous_spot"]),
+        (RawTable.SPOT, previous_business_day(trading_date), frames["previous_spot"]),
         (RawTable.FORWARDS, trading_date, frames[RawTable.FORWARDS]),
         (RawTable.ZERO_CURVE, trading_date, frames[RawTable.ZERO_CURVE]),
     )
@@ -126,6 +148,8 @@ def _publish_raw_inputs(store: ArtifactStore, trading_date: date) -> None:
             source_generation="default-v1",
             producer_version=producer,
         ).spec
+        if store.resolve(spec) is not None:
+            continue
         with store.writer(spec, metadata={"test_fixture": True}) as builder:
             frame.write_parquet(builder.staging_path / "data.parquet")
 
@@ -195,6 +219,298 @@ def test_daily_io_and_producer_version_closures_resolve() -> None:
     assert str(publish_daily_frame.version)
     assert paired_day_producer_version()
     assert enriched_day_producer_version()
+    assert no_arb_day_producer_version()
+    assert filtered_day_producer_version()
+    assert fitted_day_producer_version()
+
+
+def test_surface_stage_identities_use_projected_configuration() -> None:
+    trading_date = date(2024, 1, 3)
+    daily = DailyWidbConfig()
+    raw = plan_raw_day_pointers(
+        ticker="SPX",
+        trading_date=trading_date,
+        source="optionmetrics",
+        source_generation="default-v1",
+        raw_producer_version=raw_content_producer_version(),
+    )
+    paired = paired_day_spec(
+        ticker="SPX", trading_date=trading_date, config=daily, raw=raw
+    )
+    enriched = enriched_day_spec(
+        ticker="SPX", trading_date=trading_date, config=daily, paired=paired.pointer
+    )
+    base = DailySurfaceConfig()
+    changed_smooth = replace(
+        base,
+        smooth_sanos=SmoothSanosConfig(smoothness=0.5),
+    )
+    no_arb_base = no_arb_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=base,
+        enriched=enriched.pointer,
+    )
+    no_arb_changed = no_arb_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=changed_smooth,
+        enriched=enriched.pointer,
+    )
+    assert no_arb_base.artifact_id == no_arb_changed.artifact_id
+    filtered_base = filtered_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=base,
+        no_arb=no_arb_base.pointer,
+    )
+    filtered_changed = filtered_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=changed_smooth,
+        no_arb=no_arb_changed.pointer,
+    )
+    assert filtered_base.artifact_id == filtered_changed.artifact_id
+    fitted_base = fitted_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=base,
+        filtered=filtered_base.pointer,
+    )
+    fitted_changed = fitted_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=changed_smooth,
+        filtered=filtered_changed.pointer,
+    )
+    assert fitted_base.artifact_id != fitted_changed.artifact_id
+    with pytest.raises(ValueError, match="at most four"):
+        IntermediateBuildRequest(
+            ticker="SPX",
+            start_date=trading_date,
+            end_date=trading_date,
+            through="fitted-day",
+            max_workers=5,
+        )
+
+
+def test_fitted_build_reuses_terminal_and_rebuilds_from_filtered_only(tmp_path: Path) -> None:
+    locations = _locations(tmp_path)
+    store = ArtifactStore(locations)
+    trading_date = date(2024, 1, 3)
+    daily = DailyWidbConfig()
+    surface = DailySurfaceConfig()
+    _publish_raw_inputs(store, trading_date)
+    request = IntermediateBuildRequest(
+        ticker="SPX",
+        start_date=trading_date,
+        end_date=trading_date,
+        through="fitted-day",
+        max_workers=1,
+    )
+    first = build_intermediates(locations, request, daily, surface)
+    assert first.summary is not None
+    assert first.summary.completed == 1
+
+    raw = plan_raw_day_pointers(
+        ticker="SPX",
+        trading_date=trading_date,
+        source="optionmetrics",
+        source_generation="default-v1",
+        raw_producer_version=raw_content_producer_version(),
+    )
+    paired = paired_day_spec(
+        ticker="SPX", trading_date=trading_date, config=daily, raw=raw
+    )
+    enriched = enriched_day_spec(
+        ticker="SPX", trading_date=trading_date, config=daily, paired=paired.pointer
+    )
+    no_arb = no_arb_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=surface,
+        enriched=enriched.pointer,
+    )
+    filtered = filtered_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=surface,
+        no_arb=no_arb.pointer,
+    )
+    fitted = fitted_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=surface,
+        filtered=filtered.pointer,
+    )
+    assert first.terminal == (fitted.pointer,)
+    frame = read_daily_frame(
+        store,
+        store.validate(fitted.pointer, expected=fitted),
+        schema=FITTED_SCHEMA,
+        ticker="SPX",
+        trading_date=trading_date,
+    )
+    assert frame.schema == pl.Schema(FITTED_SCHEMA)
+    assert frame.get_column("options_filter_eligible").sum() > 0
+
+    shutil.rmtree(locations.raw)
+    reused = build_intermediates(locations, request, daily, surface)
+    assert reused.summary is not None
+    assert reused.summary.reused == 1
+
+    shutil.rmtree(store.path_for(fitted.pointer))
+    for pointer in (paired.pointer, enriched.pointer, no_arb.pointer):
+        shutil.rmtree(store.path_for(pointer))
+    assert store.validate(filtered.pointer, expected=filtered)
+    rebuilt = build_intermediates(locations, request, daily, surface)
+    assert rebuilt.summary is not None
+    assert rebuilt.summary.completed == 1
+    rebuilt_frame = read_daily_frame(
+        store,
+        store.validate(fitted.pointer, expected=fitted),
+        schema=FITTED_SCHEMA,
+        ticker="SPX",
+        trading_date=trading_date,
+    )
+    assert rebuilt_frame.equals(frame)
+
+
+def test_failed_fitted_worker_journals_error_publishes_nothing_and_restarts(
+    tmp_path: Path,
+) -> None:
+    locations = _locations(tmp_path)
+    store = ArtifactStore(locations)
+    trading_date = date(2024, 1, 3)
+    daily = DailyWidbConfig()
+    base_surface = DailySurfaceConfig()
+    _publish_raw_inputs(store, trading_date)
+    filtered_request = IntermediateBuildRequest(
+        ticker="SPX",
+        start_date=trading_date,
+        end_date=trading_date,
+        through="filtered-day",
+        max_workers=1,
+    )
+    filtered_result = build_intermediates(
+        locations, filtered_request, daily, base_surface
+    )
+    valid_filtered = read_daily_frame(
+        store,
+        store.validate(filtered_result.terminal[0]),
+        schema=FILTERED_SCHEMA,
+        ticker="SPX",
+        trading_date=trading_date,
+    )
+
+    surface = DailySurfaceConfig(
+        options_filter=OptionsFilterConfig(max_nms=(-99.0, 99.0))
+    )
+    raw = plan_raw_day_pointers(
+        ticker="SPX",
+        trading_date=trading_date,
+        source="optionmetrics",
+        source_generation="default-v1",
+        raw_producer_version=raw_content_producer_version(),
+    )
+    paired = paired_day_spec(
+        ticker="SPX", trading_date=trading_date, config=daily, raw=raw
+    )
+    enriched = enriched_day_spec(
+        ticker="SPX", trading_date=trading_date, config=daily, paired=paired.pointer
+    )
+    no_arb = no_arb_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=surface,
+        enriched=enriched.pointer,
+    )
+    filtered = filtered_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=surface,
+        no_arb=no_arb.pointer,
+    )
+    fitted = fitted_day_spec(
+        ticker="SPX",
+        trading_date=trading_date,
+        config=surface,
+        filtered=filtered.pointer,
+    )
+    invalid_filtered = valid_filtered.with_columns(
+        pl.when(pl.col("options_filter_eligible"))
+        .then(pl.lit(0.0, dtype=pl.Float32))
+        .otherwise(pl.col("spot_normalized_implied_forward"))
+        .alias("spot_normalized_implied_forward"),
+        pl.lit(canonical_sha256({"options_filter": surface.options_filter})).alias(
+            "options_filter_configuration_id"
+        ),
+    ).select(*FILTERED_SCHEMA)
+    publish_daily_frame(
+        store,
+        filtered,
+        invalid_filtered,
+        schema=FILTERED_SCHEMA,
+        ticker="SPX",
+        trading_date=trading_date,
+    )
+
+    fitted_request = replace(filtered_request, through="fitted-day")
+    with pytest.raises(DailyExecutionError) as caught:
+        build_intermediates(locations, fitted_request, daily, surface)
+    assert caught.value.summary.failed == 1
+    assert caught.value.summary.failures[0].error_type == "DailyDataError"
+    assert "finite positive discounted forward" in caught.value.summary.failures[0].message
+    records = [
+        json.loads(line)
+        for line in caught.value.summary.journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+    failed = [record for record in records if record["event"] == "unit_failed"]
+    assert len(failed) == 1
+    assert "finite positive discounted forward" in str(failed[0]["message"])
+    assert not store.path_for(fitted.pointer).exists()
+
+    shutil.rmtree(store.path_for(filtered.pointer))
+    restarted = build_intermediates(locations, fitted_request, daily, surface)
+    assert restarted.summary is not None
+    assert restarted.summary.completed == 1
+    assert store.validate(fitted.pointer, expected=fitted)
+
+
+def test_multi_day_fitted_build_reuses_completed_day_after_failure(
+    tmp_path: Path,
+) -> None:
+    locations = _locations(tmp_path)
+    store = ArtifactStore(locations)
+    first_date = date(2024, 1, 3)
+    second_date = date(2024, 1, 4)
+    daily = DailyWidbConfig()
+    surface = DailySurfaceConfig()
+    _publish_raw_inputs(store, first_date)
+    request = IntermediateBuildRequest(
+        ticker="SPX",
+        start_date=first_date,
+        end_date=second_date,
+        through="fitted-day",
+        max_workers=1,
+    )
+    inspection = build_intermediates(
+        locations, request, daily, surface, dry_run=True
+    )
+    with pytest.raises(DailyExecutionError) as caught:
+        build_intermediates(locations, request, daily, surface)
+    assert caught.value.summary.completed == 1
+    assert caught.value.summary.failed == 1
+    assert store.validate(inspection.expected[0])
+    assert not store.path_for(inspection.expected[1]).exists()
+
+    _publish_raw_inputs(store, second_date)
+    restarted = build_intermediates(locations, request, daily, surface)
+    assert restarted.summary is not None
+    assert restarted.summary.reused == 1
+    assert restarted.summary.completed == 1
+    assert restarted.summary.failed == 0
+    assert all(store.validate(pointer) for pointer in inspection.expected)
 
 
 def test_known_bad_typed_empty_manifest_records_reason_and_policy(tmp_path: Path) -> None:

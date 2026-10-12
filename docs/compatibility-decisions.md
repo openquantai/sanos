@@ -20,7 +20,7 @@ both accepted it. Only `approved` may alter reference behavior.
   function.
 - **Proposed treatment:** keep it as provenance only and port
   `smooth_interpolated_market` plus the actual downstream adapter.
-- **Output impact:** none for the authoritative 2022–2025 reference path.
+- **Output impact:** none for the legacy 2022–2025 migration-parity path.
 
 ## CD-002 — Option column-set assertion is reversed
 
@@ -85,6 +85,10 @@ both accepted it. Only `approved` may alter reference behavior.
   or operational metadata.
 - **Expected impact:** possibly new artifact identities for otherwise identical
   inputs; successful deterministic outputs should remain equal.
+- **Current compatibility behavior:** Phase 6 fixes the reference timeout at
+  300 seconds and does not expose a timeout override. It records that fixed
+  value in solver diagnostics, while artifact content identity remains driven
+  by the versioned implementation. A configurable timeout remains blocked.
 
 ## CD-007 — Exact option cap and population filters
 
@@ -300,11 +304,52 @@ both accepted it. Only `approved` may alter reference behavior.
   survives. This preserves the reference's failure boundary without exposing
   its temporary control column in the Polars schema.
 
+## CD-021 — Meaning of the unsmoothed DLV state
+
+- **Status:** provisional compatibility interpretation; adding a new refit is
+  open and blocked.
+- **Evidence:** the production path first constructs a linear surface with
+  `MkArbFree(smoothness=None)`, then applies `OptionsFilter`, and finally fits a
+  smooth `0.25` SANOS surface. The legacy daily payload serializes only the
+  final smooth pricer, so it does not contain a separately labelled
+  post-filter DLV fit.
+- **Current compatibility behavior:** Phase 6 preserves and explicitly names
+  the complete pre-filter linear surface state as the compatibility
+  unsmoothed DLV state. It also preserves the post-filter smooth SANOS state.
+  It does not add a second post-filter `smoothness=0` optimization.
+- **Expected impact if changed:** a new post-filter DLV refit would use a
+  different quote population and solve a new optimization problem; its grids,
+  densities, DLV values, diagnostics, runtime and failure population can all
+  differ. It requires explicit approval and a separate versioned identity.
+
+## CD-022 — Unequal-grid DLV inverse reverses spacing coefficients
+
+- **Status:** approved correction on 2026-10-12; do not expose a legacy bug
+  mode in the standalone repository.
+- **Evidence:** the forward `SanosPricer.dlvsqs` calculation uses the lower and
+  upper unequal-grid strike spacings in the finite-difference coefficients.
+  The pinned `densities_from_dlvsqs` inverse passes those two coefficients in
+  the opposite orientation to the tridiagonal solve. On an actual Phase 6
+  fitted-day surface, decoding the persisted full-support DLV vector produces
+  first moment `1.009062`, outside the model tolerance `0.0001`, and raises.
+  Symmetric/equal-grid fixtures conceal the reversal.
+- **Approved treatment:** correct the decoder's tridiagonal coefficient
+  orientation, bump the owning `SanosPricer` version, and require density plus
+  off-grid call-price round trips on irregular supports. Keep the forward DLV
+  encoding unchanged. Per the user's decision, the defective behavior is
+  documented but is not retained as an API mode in this new repository.
+- **Expected impact if fixed:** newly decoded unequal-grid DLV states recover
+  the fitted densities and calls rather than failing or returning distorted
+  masses. The authoritative fitted density, forward DLV values, option
+  population, and smooth SANOS fit are unchanged; only inverse decoding
+  behavior changes.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-004,
-CD-006, CD-009, CD-010, CD-012, CD-013, CD-015, and CD-020. CD-014 and CD-016
-through CD-019 need a choice only if their preserved compatibility behavior is
-to change. The implementation can build
+CD-006, CD-009, CD-010, CD-012, CD-013, CD-015, CD-020, and CD-021. CD-014 and
+CD-016 through CD-019 need a choice only if their preserved compatibility
+behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
-scaffolding while those specific behavior points remain blocked.
+scaffolding while those specific behavior points remain blocked. CD-022 is
+resolved by the approved corrected inverse and its irregular-grid regressions.

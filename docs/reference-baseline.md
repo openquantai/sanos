@@ -1,11 +1,12 @@
-# DySANOS reference baseline
+# Legacy DySANOS migration baseline
 
 This document freezes the legacy evidence used to judge the standalone
-implementation.  Every referenced artifact is read-only and is a parity oracle,
-never an input to a new dataset build.  The fresh build must start from newly
-downloaded WRDS extracts.
+implementation. Every referenced artifact is read-only and is a migration
+oracle, never an input to a new dataset build. The fresh build must start from
+newly downloaded WRDS extracts. Once published and approved, the fresh SANOS
+dataset—not these artifacts—is the canonical reference dataset.
 
-## Authoritative endpoint
+## Legacy comparison endpoint
 
 The DySANOS reference interval is **2022-01-03 through 2025-08-29**, inclusive.
 It contains **891 populated SPX trading dates**.  The smooth-market cache has

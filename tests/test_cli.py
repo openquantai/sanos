@@ -6,6 +6,8 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from sanos.cli import main
+from sanos.config import canonical_sha256, canonical_value
+from sanos.widb import DailyWidbConfig
 
 
 def test_help_lists_stable_command_groups() -> None:
@@ -165,6 +167,45 @@ def test_intermediate_build_dry_run_is_structured_offline_and_non_mutating(
     assert payload["stage"] == "enriched-day"
     assert payload["total"] == 1
     assert payload["existing"] == 0
+    assert payload["config_id"] == canonical_sha256(DailyWidbConfig())
+    assert payload["configuration"] == canonical_value(DailyWidbConfig())
+    assert "surface" not in payload["configuration"]
+    assert payload["network_accessed"] is False
+    assert payload["dry_run"] is True
+    assert not root.exists()
+
+
+def test_fitted_intermediate_dry_run_exposes_surface_configuration(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    config = Path(__file__).parents[1] / "configs" / "widb-spx-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "intermediate",
+            "build",
+            "--config",
+            str(config),
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2024-01-03",
+            "--end-date",
+            "2024-01-03",
+            "--through",
+            "fitted-day",
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["stage"] == "fitted-day"
+    assert payload["configuration"]["surface"]["smooth_sanos"]["smoothness"] == 0.25
     assert payload["network_accessed"] is False
     assert payload["dry_run"] is True
     assert not root.exists()
