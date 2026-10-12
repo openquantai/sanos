@@ -1,0 +1,19 @@
+{
+  "daily": {
+    "clock": {
+      "overnight_variance_fraction": 0.2
+    },
+    "enrichment": {
+      "max_implied_vol": 5.0,
+      "min_implied_vol": 0.01,
+      "min_pure_spread": 1e-06,
+      "normalize": false,
+      "num_min_both_traded": 4,
+      "num_min_either_traded": 10
+    },
+    "raw": {
+      "drop_irregular_expiries": true,
+      "min_bid": 0.011
+    }
+  }
+}

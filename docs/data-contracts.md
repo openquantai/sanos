@@ -70,7 +70,13 @@ typed list/struct columns hold state whose geometry is not quote-aligned.
 ### Identity and daily fields
 
 `ticker`, `trading_date`, `spot`, `previous_spot`, `is_half_day`,
-`source_secid`, `stage_version`, `configuration_id`, `raw_artifact_id`.
+`source_secid`, `stage_version`, `configuration_id`,
+`raw_options_artifact_id`.
+
+The manifest, rather than every quote row, records all six direct Raw pointers:
+security identity, options, current and previous-session spot, forwards, and
+zero curve. The row-level field names the options partition explicitly and does
+not imply that one identifier covers the whole day.
 
 The internal frame may contain source identifiers and absolute levels. They are
 forbidden in the public projection.
@@ -158,6 +164,22 @@ input `V` curve is not a fitted ATM implied-volatility curve.
 The initial parity implementation preserves legacy float32 cast boundaries even
 when solvers operate in float64. A future dtype change is versioned and tested
 as a semantic change.
+
+### Phase 5 persisted stages
+
+`paired-day` cleans and pairs call/put books, attaches the reference forward and
+discount factor, and computes the settlement clock. `enriched-day` consumes
+that one frame, projects an implied forward, forms the blended synthetic call
+book, converts to pure units, inverts volatility, and appends Greeks and NMS.
+Their namespaces are respectively
+`widb/paired-day/ticker-<T>/year-<Y>/date-<D>` and
+`widb/enriched-day/ticker-<T>/year-<Y>/date-<D>`.
+
+Both stages persist exactly one tabular payload, `data.parquet`. Portable
+`config.json`, explanatory `README.md`, checksummed `manifest.json`, and the
+completion marker are metadata, not separate quote/expiry/surface tables.
+Known-bad dates produce an exact typed empty frame. Other unexpected empty or
+invalid populations fail rather than becoming silent exclusions.
 
 ## Internal dataset
 

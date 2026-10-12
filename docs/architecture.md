@@ -39,6 +39,15 @@ while an old pool worker remains able to publish. This keeps Polars frames at
 daily artifact boundaries rather than moving them through the process-pool
 result channel.
 
+Phase 5 uses two immutable per-day Intermediate stages behind that runner.
+`paired-day` has six Raw pointers and one Polars frame as output;
+`enriched-day` has the paired artifact as its sole direct parent and appends its
+fields to the same logical frame. A terminal hit is resolved before any parent
+is read. On a miss, only that day's prerequisite is built or reused. The parent
+writes the journal under `QUANT_DATA_INTERMEDIATE/.runs/widb/`; spawned workers
+exchange only artifact pointers. No workflow-engine database or Redun runtime
+is part of the public contract.
+
 See [configuration.md](configuration.md) and [artifacts.md](artifacts.md) for
 the operational contracts.
 

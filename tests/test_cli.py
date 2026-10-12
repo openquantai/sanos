@@ -47,7 +47,7 @@ def test_doctor_json_is_offline_structured_and_non_mutating(tmp_path: Path) -> N
     assert not root.exists()
 
 
-def test_status_json_reports_guarded_raw_capability(tmp_path: Path) -> None:
+def test_status_json_reports_daily_intermediate_capability(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         main,
         ["--root", str(tmp_path / "data"), "--log-format", "json", "status"],
@@ -57,10 +57,11 @@ def test_status_json_reports_guarded_raw_capability(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["event"] == "status"
     assert payload["network_accessed"] is False
-    assert payload["phase"] == "guarded-wrds-raw"
+    assert payload["phase"] == "daily-widb-intermediate"
     assert payload["pipeline_available"] is True
-    assert payload["material_pipeline_available"] is False
+    assert payload["material_pipeline_available"] is True
     assert payload["raw_download_available"] is True
+    assert payload["intermediate_build_available"] is True
     assert payload["live_wrds_verified"] is False
 
 
@@ -131,12 +132,72 @@ def test_structured_errors_and_global_dry_run_are_machine_readable(tmp_path: Pat
     assert json.loads(status.output)["dry_run"] is True
 
 
-def test_material_commands_fail_actionably_until_implemented() -> None:
-    result = CliRunner().invoke(main, ["intermediate", "build"])
+def test_intermediate_build_dry_run_is_structured_offline_and_non_mutating(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    config = Path(__file__).parents[1] / "configs" / "widb-spx-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(root),
+            "--dry-run",
+            "--log-format",
+            "json",
+            "intermediate",
+            "build",
+            "--config",
+            str(config),
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2024-01-03",
+            "--end-date",
+            "2024-01-03",
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
 
-    assert result.exit_code == 7
-    assert "planned for Phases 5-6" in result.output
-    assert "PROGRAM_PLAN.md" in result.output
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["event"] == "intermediate_result"
+    assert payload["stage"] == "enriched-day"
+    assert payload["total"] == 1
+    assert payload["existing"] == 0
+    assert payload["network_accessed"] is False
+    assert payload["dry_run"] is True
+    assert not root.exists()
+
+
+def test_intermediate_raw_miss_is_actionable_and_never_connects(tmp_path: Path) -> None:
+    config = Path(__file__).parents[1] / "configs" / "widb-spx-reference.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "--log-format",
+            "json",
+            "intermediate",
+            "build",
+            "--config",
+            str(config),
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2024-01-03",
+            "--end-date",
+            "2024-01-03",
+        ],
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+    )
+
+    assert result.exit_code == 4
+    payloads = [json.loads(line) for line in result.output.splitlines()]
+    assert payloads[-1]["event"] == "error"
+    assert "Required Raw artifact is absent" in payloads[-1]["message"]
+    assert "sanos raw download" in payloads[-1]["message"]
 
 
 def test_raw_download_dry_run_is_structured_and_never_connects(tmp_path: Path) -> None:

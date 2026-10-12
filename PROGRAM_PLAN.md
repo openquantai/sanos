@@ -1,8 +1,7 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0 through 3 are complete with dual
-review. Phase 4 is implemented and under dual review. No live WRDS access has
-occurred.
+Status: implementation in progress; Phases 0 through 5 are complete with dual
+review. No live WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -354,6 +353,13 @@ that every non-live command refuses network access; no live WRDS query occurs in
 this phase's ordinary test suite.
 
 ### Phase 5 — Daily WIDB normalization and enrichment
+
+Status: complete; final code and quantitative reviews passed on 2026-10-12.
+The initial migration preserves the CD-020 legacy all-valid failure; repairing
+it remains an optional future decision. The implementation uses
+`paired-day` and `enriched-day` immutable Intermediate artifacts, the existing
+atomic artifact store, and the bounded spawn runner. It does not use Redun and
+it performs no implicit WRDS access.
 
 - Copy and adapt business-calendar, table resolution, zero-curve interpolation,
   forward, spot-return, quote pairing, expiry, and enrichment logic.

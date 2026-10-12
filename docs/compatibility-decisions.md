@@ -226,10 +226,85 @@ both accepted it. Only `approved` may alter reference behavior.
   optimized densities and prices instead of failure or the initial state; the
   authoritative LP-produced dataset is unchanged.
 
+## CD-016 — Duplicate spot rows select the first observation
+
+- **Status:** open; initial migration preserves the observable behavior.
+- **Evidence:** `collect_raw_day` obtains the spot and previous spot through a
+  helper that selects the first returned close. It does not require uniqueness
+  or declare an ordering rule for a malformed duplicate response.
+- **Compatibility choice:** the paired-day transform selects row zero and has a
+  regression test. A future ingestion rule may reject duplicate `(secid,date)`
+  closes, but that is a versioned semantic change requiring approval.
+- **Expected impact if changed:** only malformed or vendor-changed partitions;
+  valid reference partitions should remain unchanged.
+
+## CD-017 — Duplicate option keys create Cartesian call/put pairs
+
+- **Status:** open; initial migration preserves the observable behavior.
+- **Evidence:** the reference performs an inner merge on expiry, AM/PM,
+  strike, and exercise style without checking uniqueness or choosing a
+  contract. Duplicate calls or puts therefore multiply rows.
+- **Compatibility choice:** the Polars paired-day join retains the same
+  Cartesian population, pinned by an offline test. Rejecting duplicates or
+  introducing a tie-break requires a new version and measured reference impact.
+- **Expected impact if changed:** row populations, liquidity counts, implied
+  forwards, eligibility, and every downstream SANOS/DLV fit can change.
+
+## CD-018 — `ExpiryFilter.normalize` is an identity-only no-op
+
+- **Status:** open; initial migration retains the field without applying it.
+- **Evidence:** the reference field is validated and appears in the readable
+  cache label, but `enrich_day` never reads it. Numerically identical enriched
+  outputs for `False` and `True` are now regression-tested.
+- **Compatibility choice:** preserve the no-op in Phase 5. Remove it from the
+  future public configuration or implement a meaning only after explicit
+  approval and a new producer/configuration version.
+- **Expected impact if activated:** units and potentially all downstream filter
+  and fit values could change.
+
+## CD-019 — Vector `add_business_days` drops `count_start`
+
+- **Status:** open; the standalone Phase 5 API exposes the reviewed scalar
+  operation only.
+- **Evidence:** the reference's array branches recursively call the scalar
+  function without forwarding `count_start`, so array and scalar results differ
+  when that flag is true. The daily WIDB path needs only scalar navigation.
+- **Compatibility choice:** do not advertise the defective vector navigation
+  surface. Scalar behavior and vector start/end business-day counting are
+  supported and parity-tested. Adding vector navigation requires an approved
+  contract rather than silently copying or fixing the defect.
+- **Expected impact if fixed:** only callers of vector navigation with
+  `count_start=True`; the authoritative daily dataset is unaffected.
+
+## CD-020 — All-valid enrichment retains its control column
+
+- **Status:** open; initial migration preserves the observable failure.
+- **Evidence:** the pinned `enrich_day` adds an internal `is_valid` column and
+  drops it only when at least one row is invalid. An expiry for which every row
+  survives therefore reaches schema validation with the extra column and fails
+  with `has extra columns is_valid`. This was reproduced against revision
+  `de15be96d2f283b6c31e60d3ea47325a0c093ff0` using an offline 14-strike
+  synthetic book. The behavior appears accidental because the downstream time
+  series explicitly requires enriched daily frames not to contain `is_valid`.
+- **Proposed treatment:** always treat `is_valid` as an internal control mask,
+  remove it before validating the enriched schema, and return the otherwise
+  valid rows. The standalone Polars implementation naturally has this behavior
+  because its mask is never added as a data column.
+- **Expected impact if fixed:** all-valid synthetic or real days succeed rather
+  than raising a schema error. Days with one or more rejected rows and all
+  authoritative days that completed in the legacy producer are numerically
+  unchanged. The fresh-build report must count any real all-valid days so the
+  population impact is explicit.
+- **Current compatibility behavior:** until the repair is explicitly approved,
+  `enrich_daily_frame` raises a targeted `DailyDataError` when every input row
+  survives. This preserves the reference's failure boundary without exposing
+  its temporary control column in the Polars schema.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-004,
-CD-006, CD-009, CD-010, CD-012, CD-013 and CD-015. CD-014 needs a choice only if the
-legacy pre-first-expiry jump is to change. The implementation can build
+CD-006, CD-009, CD-010, CD-012, CD-013, CD-015, and CD-020. CD-014 and CD-016
+through CD-019 need a choice only if their preserved compatibility behavior is
+to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked.

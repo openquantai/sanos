@@ -20,9 +20,13 @@ from sanos.config import (
     LocationConfigurationError,
     LocationOverrides,
     LocationResolution,
+    canonical_sha256,
     canonical_value,
     resolve_locations,
 )
+from sanos.pipeline import DailyExecutionError
+from sanos.widb.build import IntermediateBuildRequest, build_intermediates
+from sanos.widb.config import DailyWidbConfig
 from sanos.wrds import (
     ALL_RAW_TABLES,
     RawDownloadConfig,
@@ -315,10 +319,11 @@ def status(context: CliContext) -> None:
     _emit(
         context,
         "status",
-        phase="guarded-wrds-raw",
+        phase="daily-widb-intermediate",
         pipeline_available=True,
-        material_pipeline_available=False,
+        material_pipeline_available=True,
         raw_download_available=True,
+        intermediate_build_available=True,
         live_wrds_verified=False,
         network_accessed=False,
         dry_run=context.dry_run,
@@ -467,8 +472,7 @@ def raw_download(
                 return
             if not sys.stdin.isatty():
                 raise MaterialCliError(
-                    "Live WRDS access from a non-interactive caller requires "
-                    "--confirm-2fa-ready",
+                    "Live WRDS access from a non-interactive caller requires --confirm-2fa-ready",
                     log_format=context.log_format,
                 )
             if not click.confirm(
@@ -527,10 +531,157 @@ def intermediate() -> None:
 
 
 @intermediate.command("build")
-def intermediate_build() -> None:
-    """Build intermediate artifacts."""
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict portable JSON containing one 'daily' configuration object.",
+)
+@click.option("--ticker", required=True, help="OptionMetrics ticker, for example SPX.")
+@click.option(
+    "--start-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="First requested NYSE session (YYYY-MM-DD).",
+)
+@click.option(
+    "--end-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Last requested NYSE session (YYYY-MM-DD).",
+)
+@click.option(
+    "--through",
+    type=click.Choice(("paired-day", "enriched-day")),
+    default="enriched-day",
+    show_default=True,
+)
+@click.option(
+    "--include-half-days/--exclude-half-days",
+    default=True,
+    show_default=True,
+    help="Include NYSE early-close sessions in the requested date range.",
+)
+@click.option("--source", type=click.Choice(("optionmetrics",)), default="optionmetrics")
+@click.option(
+    "--source-generation",
+    default="default-v1",
+    show_default=True,
+    help="Raw source generation that the intermediates must consume.",
+)
+@click.option(
+    "--max-workers",
+    type=click.IntRange(1),
+    default=1,
+    show_default=True,
+    help="Bound local per-day worker processes.",
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete terminal artifact.",
+)
+@click.pass_obj
+def intermediate_build(
+    context: CliContext,
+    config_path: Path,
+    ticker: str,
+    start_date: datetime,
+    end_date: datetime,
+    through: str,
+    include_half_days: bool,
+    source: str,
+    source_generation: str,
+    max_workers: int,
+    version_request: str,
+) -> None:
+    """Build restartable per-day paired or enriched WIDB frames offline from Raw."""
 
-    _phase_not_implemented("intermediate build", "Phases 5-6")
+    try:
+        locations = context.locations.require_complete()
+        try:
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Cannot read intermediate configuration {config_path}: {exc}"
+            ) from exc
+        if not isinstance(document, dict) or set(document) != {"daily"}:
+            raise ValueError("Intermediate configuration must contain exactly one 'daily' object")
+        if not isinstance(document["daily"], dict):
+            raise ValueError("Intermediate configuration 'daily' must be an object")
+        daily = DailyWidbConfig.from_mapping(document["daily"])
+        request = IntermediateBuildRequest(
+            ticker=ticker,
+            start_date=start_date.date(),
+            end_date=end_date.date(),
+            through=through,
+            include_half_days=include_half_days,
+            source=source,
+            source_generation=source_generation,
+            max_workers=max_workers,
+            version_override="*" if version_request == "*" else None,
+        )
+
+        def progress(payload: Any) -> None:
+            _emit(context, "intermediate_progress", **dict(payload))
+
+        result = build_intermediates(
+            locations,
+            request,
+            daily,
+            dry_run=context.dry_run,
+            progress=progress,
+        )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except DailyExecutionError as exc:
+        details = "; ".join(
+            f"{failure.key}: {failure.error_type}: {failure.message}"
+            for failure in exc.summary.failures
+        )
+        raise MaterialCliError(
+            f"{exc}{'; ' if details else ''}{details}",
+            log_format=context.log_format,
+        ) from exc
+    except (ArtifactError, OSError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    store = ArtifactStore(locations)
+    summary = result.summary
+    planned_journal = locations.intermediate / ".runs" / "widb" / f"{result.plan.plan_id}.jsonl"
+    raw_paths = tuple(
+        tuple(store.path_for(pointer) for pointer in dependencies.all())
+        for dependencies in result.raw_dependencies
+    )
+    _emit(
+        context,
+        "intermediate_result",
+        stage=through,
+        config_id=canonical_sha256(daily),
+        configuration=canonical_value(daily),
+        plan_id=result.plan.plan_id,
+        total=len(result.expected),
+        existing=len(result.existing),
+        built=0 if summary is None else summary.completed,
+        reused=len(result.existing) if summary is None else summary.reused,
+        failed=0 if summary is None else summary.failed,
+        dry_run=result.dry_run,
+        network_accessed=False,
+        version_override=version_request == "*",
+        journal=planned_journal if summary is None else summary.journal_path,
+        previous_spot_paths=tuple(
+            store.path_for(dependencies.previous_spot) for dependencies in result.raw_dependencies
+        ),
+        raw_dependency_count=sum(len(dependencies) for dependencies in raw_paths),
+        raw_dependency_paths=raw_paths if context.verbose else (),
+        artifact_paths=tuple(store.path_for(pointer) for pointer in result.terminal),
+        expected_artifact_paths=tuple(store.path_for(pointer) for pointer in result.expected),
+        reuse_records=tuple(reuse.as_log_record() for reuse in result.reuses),
+        warnings=tuple(reuse.warning for reuse in result.reuses if reuse.warning),
+    )
 
 
 @main.group()
