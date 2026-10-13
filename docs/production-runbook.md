@@ -99,6 +99,12 @@ absence of any other process, notebook, host, or scheduled job using the same
 account. An earlier confirmation does not satisfy this gate. Then repeat the
 resource check and require every result to be `OK`:
 
+The standard `.pgpass` entry must already have been configured and
+permission-checked using [wrds-runbook.md](wrds-runbook.md). The live command is
+fail-closed and must never ask for a username or password. If credentials or 2FA
+are rejected, stop; update `.pgpass` only from a private terminal and obtain a
+new immediate-readiness confirmation before another attempt.
+
 ```bash
 gpuctl resources --json | tee "$PRODUCTION_EVIDENCE/resources-pre-live.json"
 ```

@@ -25,6 +25,29 @@ password, 2FA response, or other credentials to an artifact, log, README, or
 query record. `WRDS_OFF=1` disables live access while leaving planning and cache
 validation available.
 
+Configure the standard libpq password file from a private interactive terminal
+before running a live SANOS command. Use the same Python environment that will
+run SANOS:
+
+```bash
+read -r -p "WRDS username: " WRDS_USERNAME
+export WRDS_USERNAME
+python -c \
+'import getpass, os, wrds; c = wrds.Connection(autoconnect=False, wrds_username=os.environ["WRDS_USERNAME"], wrds_password=getpass.getpass("New WRDS password: ")); c.create_pgpass_file()'
+unset WRDS_USERNAME
+stat -c 'mode=%a file=%n' "$HOME/.pgpass"
+```
+
+The password prompt is hidden. Do not put a password in chat, shell history, an
+environment variable, a command argument, or a SANOS configuration file. The
+final mode must be `400` or `600`. The setup command only updates `.pgpass`; it
+does not connect to WRDS or trigger 2FA. If a password has been exposed, rotate
+it before storing the replacement.
+
+SANOS opens WRDS in fail-closed mode. A missing, stale, or rejected `.pgpass`
+entry produces a sanitized error and never falls back to an interactive username
+or password prompt inside a command whose output may be logged.
+
 ## Plan without network access
 
 Always inspect a substantial request first:
@@ -88,6 +111,8 @@ configuration reject a requested limit above four before connecting, and a
 host-wide account-keyed four-slot lease enforces that limit across SANOS
 processes. Authentication, 2FA, connection-limit, and permission failures are
 never retried; only recognized transient query failures receive bounded retry.
+If authentication fails, stop the command and update `.pgpass` from a private
+terminal before obtaining a fresh immediate 2FA-readiness confirmation.
 
 Progress is flushed as partitions finish and at least every five minutes while
 a connection or query is blocked. JSON mode emits one object per line with

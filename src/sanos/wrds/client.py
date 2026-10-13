@@ -51,6 +51,74 @@ ConnectionFactory = Callable[[str], WrdsConnection]
 
 
 @version("1.0")
+def _string_column(frame: Any, name: str) -> list[str]:
+    """Read a string column from a pandas-like metadata query result."""
+
+    column = frame[name]
+    to_list = getattr(column, "tolist", None)
+    values = to_list() if callable(to_list) else list(column)
+    return [str(value) for value in values]
+
+
+@version("1.0", dependencies=[_string_column])
+def _query_optionmetrics_libraries(delegate: Any) -> list[str]:
+    """Return only supported, accessible OptionMetrics schemas."""
+
+    frame = delegate.raw_sql(
+        """
+        SELECT n.nspname AS library
+        FROM pg_catalog.pg_namespace AS n
+        WHERE n.nspname IN ('optionm_all', 'optionm')
+          AND has_schema_privilege(n.nspname, 'USAGE')
+        ORDER BY n.nspname
+        """
+    )
+    return _string_column(frame, "library")
+
+
+@version("1.0", dependencies=[_string_column])
+def _query_optionmetrics_tables(delegate: Any, library: str) -> list[str]:
+    """Return source-relevant relations from one allowlisted OptionMetrics schema."""
+
+    if library not in {"optionm_all", "optionm"}:
+        raise ValueError("Unsupported WRDS library")
+    frame = delegate.raw_sql(
+        f"""
+        SELECT c.relname AS table_name
+        FROM pg_catalog.pg_class AS c
+        JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{library}'
+          AND c.relkind IN ('r', 'v', 'f', 'p')
+        ORDER BY c.relname
+        """
+    )
+    return _string_column(frame, "table_name")
+
+
+@version(
+    "1.0",
+    dependencies=[_query_optionmetrics_libraries, _query_optionmetrics_tables],
+)
+class _NonInteractiveWrdsConnection:
+    """Expose the WRDS methods SANOS needs without the printing catalog loader."""
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def list_libraries(self) -> list[str]:
+        return _query_optionmetrics_libraries(self._delegate)
+
+    def list_tables(self, library: str) -> list[str]:
+        return _query_optionmetrics_tables(self._delegate, library)
+
+    def raw_sql(self, sql: str) -> Any:
+        return self._delegate.raw_sql(sql)
+
+    def close(self) -> None:
+        self._delegate.close()
+
+
+@version("1.0")
 @dataclass(frozen=True, slots=True)
 class WrdsCredentials:
     """WRDS environment configuration whose representation redacts the username."""
@@ -133,9 +201,23 @@ def classify_wrds_failure(error: BaseException) -> WrdsFailureKind:
     return WrdsFailureKind.PERMANENT_QUERY
 
 
-@version("1.0")
+@version(
+    "1.1",
+    dependencies=[
+        _NonInteractiveWrdsConnection,
+        WrdsFailureKind,
+        classify_wrds_failure,
+    ],
+)
 def default_connection_factory(username: str) -> WrdsConnection:
-    """Import the optional WRDS package lazily at the authorized network boundary."""
+    """Open WRDS from the existing credential store without interactive fallback.
+
+    ``wrds.Connection.connect`` falls back to ``input``/``getpass`` when its
+    initial libpq connection fails. Material SANOS commands are commonly piped
+    to a persistent log, so that fallback could capture a username and could
+    also leave an unattended process waiting for a password. Use the client's
+    non-interactive first connection attempt directly and fail closed instead.
+    """
 
     try:
         wrds = importlib.import_module("wrds")
@@ -143,10 +225,61 @@ def default_connection_factory(username: str) -> WrdsConnection:
         raise WrdsConfigurationError(
             "The optional WRDS client is not installed; install sanos[wrds]"
         ) from exc
-    return wrds.Connection(wrds_username=username)
+    try:
+        connection = wrds.Connection(autoconnect=False, wrds_username=username)
+    except Exception:
+        raise WrdsConfigurationError(
+            "The WRDS client could not be initialized without an interactive credential prompt"
+        ) from None
+
+    # wrds 3.x has no public fail-closed equivalent of the first connection
+    # attempt in Connection.connect(). This is the same method connect() calls
+    # before its input/getpass fallback. Keep the optional dependency bounded
+    # to wrds<4 and reject an incompatible client rather than silently prompt.
+    connect_without_prompt = getattr(connection, "_Connection__make_sa_engine_conn", None)
+    if not callable(connect_without_prompt):
+        raise WrdsConfigurationError(
+            "The installed WRDS client cannot connect in fail-closed mode; "
+            "install a supported sanos[wrds] dependency"
+        )
+
+    try:
+        connect_without_prompt(raise_err=True)
+        if getattr(connection, "engine", None) is None:
+            raise RuntimeError("WRDS client returned no connection engine")
+    except Exception as exc:
+        try:
+            if getattr(connection, "engine", None) is not None:
+                connection.close()
+        except Exception:
+            pass
+        kind = classify_wrds_failure(exc)
+        if kind is WrdsFailureKind.AUTHENTICATION:
+            raise WrdsAuthenticationError(
+                "WRDS authentication or 2FA failed without opening an interactive "
+                "credential prompt; verify the local .pgpass entry and retry only "
+                "when ready for a new 2FA request"
+            ) from None
+        raise WrdsQueryError(
+            "WRDS connection failed without opening an interactive credential "
+            "prompt; the operation was not retried"
+        ) from None
+    # Connection.load_library_list() prints unconditional prose to stdout and
+    # mutating process-global streams to suppress it is unsafe during fan-out.
+    # The adapter performs only the two fixed OptionMetrics catalog queries used
+    # by SANOS and otherwise delegates directly to the connected client.
+    return _NonInteractiveWrdsConnection(connection)
 
 
-@version("1.0", dependencies=[OptionMetricsCatalog, choose_optionmetrics_catalog])
+@version(
+    "1.1",
+    dependencies=[
+        OptionMetricsCatalog,
+        _query_optionmetrics_libraries,
+        _query_optionmetrics_tables,
+        choose_optionmetrics_catalog,
+    ],
+)
 def inspect_optionmetrics(connection: WrdsConnection) -> OptionMetricsCatalog:
     """Verify account access and snapshot the selected library's table catalog."""
 

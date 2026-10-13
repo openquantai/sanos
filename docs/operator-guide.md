@@ -112,7 +112,7 @@ JSON Lines until EOF and branch on `event` and the process exit status.
 | A root is unresolved | Set `QUANT_DATA_ROOT`, all four class variables, or a documented local TOML; confirm with `config show`. |
 | Import for WRDS or HDF5 is missing | Install `.[operator]`, or the exact `.[wrds,experiment]` combination. |
 | `WRDS_OFF` blocks a download | This is intentional. Keep it set for all non-Raw work; unset it only for an owner-confirmed live Raw command. |
-| Authentication or 2FA fails | Do not retry automatically. Close competing clients, wait for the account state to settle, and obtain a new immediate 2FA-readiness confirmation. |
+| Authentication or 2FA fails | SANOS fails closed without prompting. Do not retry automatically or enter credentials into a logged command. Close competing clients, update the standard `.pgpass` entry from a private terminal if needed, wait for the account state to settle, and obtain a new immediate 2FA-readiness confirmation. |
 | WRDS lease is unavailable | Inspect the reported account-scoped lease and running clients. Never delete a live lease or raise the aggregate limit above four. |
 | Artifact checksum or manifest fails | Preserve the artifact and log. Immutable outputs are not repaired in place; rebuild only under a new valid identity after diagnosis. |
 | A no-arbitrage/SANOS solver day fails | Preserve its daily journal and inputs. It is a blocking data/numerical discrepancy, not permission to drop the day. |

@@ -93,6 +93,12 @@ Stop here until the repository owner is present and explicitly confirms both:
 2. the same WRDS account has no notebook, remote host, scheduled process, or
    other client active.
 
+Before that confirmation, configure and permission-check `.pgpass` using the
+terminal-only procedure in [wrds-runbook.md](wrds-runbook.md). The live command
+is fail-closed: never type credentials into it or into its persistent log. A
+credential or 2FA failure ends the attempt and requires a fresh readiness
+confirmation; do not retry it automatically.
+
 Do not infer readiness from an earlier conversation. The host-wide SANOS lease
 cannot see external clients. Authentication, 2FA, permission, connection-limit
 or unknown failures are not retried automatically.

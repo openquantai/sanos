@@ -706,6 +706,8 @@ def test_raw_producer_version_closes_over_content_and_safety_contracts() -> None
     assert "build_raw_query" in content
     assert "normalize_raw_frame" in content
     assert "inspect_optionmetrics" in content
+    assert "_query_optionmetrics_libraries" in content
+    assert "_query_optionmetrics_tables" in content
     assert "security_secid" in content
     assert "_safe_ticker_label" in content
     assert "_date_literal" in content
