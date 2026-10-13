@@ -28,10 +28,17 @@ legacy consumer in an isolated CPU-only worker.
 Configure all four lifecycle roots with one general root:
 
 ```bash
-export QUANT_DATA_ROOT=/data/sanos/local
+export QUANT_DATA_ROOT=/path/to/writable/sanos/local
 sanos --log-format json config show --require-complete
 sanos doctor --strict-locations
 ```
+
+The path is an operator choice, not a required system mount. Choose durable
+storage with enough capacity, keep all SANOS-owned files beneath a dedicated
+`sanos/` directory, and verify that the parent is writable before a live Raw
+download. The guarded reference runbooks use a separate shell-only
+`SANOS_RUNS_ROOT` variable so their data and evidence directories share that
+explicitly selected parent without baking a machine path into configuration.
 
 Class-specific `QUANT_DATA_RAW`, `QUANT_DATA_INTERMEDIATE`,
 `QUANT_DATA_DATASETS`, and `QUANT_DATA_EXPERIMENTS` values override that root.

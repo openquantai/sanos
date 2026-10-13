@@ -13,14 +13,19 @@ the account.
 
 ## 1. Freeze paths and source state
 
-Run from the repository root. Keep every generated file below the SANOS-owned
-`/data/sanos/phase-11/` directory and outside Git.
+Run from the repository root. Choose a durable writable parent on the target
+host and keep every generated file below its SANOS-owned `phase-11/` directory
+and outside Git. `SANOS_RUNS_ROOT` is a shell-only runbook variable, not a SANOS
+configuration key; replace the placeholder before running anything.
 
 ```bash
 set -o pipefail
-export PRODUCTION_ROOT=/data/sanos/phase-11/data
+export SANOS_RUNS_ROOT=/path/to/writable/sanos
+mkdir -p "$SANOS_RUNS_ROOT"
+test -d "$SANOS_RUNS_ROOT" && test -w "$SANOS_RUNS_ROOT"
+export PRODUCTION_ROOT="$SANOS_RUNS_ROOT/phase-11/data"
 export PRODUCTION_RUN_ID=<UTC-date-and-operator-label>
-export PRODUCTION_EVIDENCE=/data/sanos/phase-11/evidence/$PRODUCTION_RUN_ID
+export PRODUCTION_EVIDENCE="$SANOS_RUNS_ROOT/phase-11/evidence/$PRODUCTION_RUN_ID"
 export LEGACY_MARKET_ROOT='<legacy_QUANTDATA_TRAINING_DATA>/dysanos/market/bid=0.011, nat,eth=10,bth=4,mps=1e-06,m ca250824/sm_0.25 6b930b59/SPX'
 export LEGACY_CODE_ROOT=/home/hans/python/quant_data
 mkdir -p "$PRODUCTION_EVIDENCE"

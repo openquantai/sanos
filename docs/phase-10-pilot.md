@@ -11,14 +11,19 @@ more than two WRDS connections and one query attempt.
 
 ## 1. Choose immutable run identities
 
-Run from a clean, reviewed SANOS checkout. Keep every generated file outside
-Git and beneath the SANOS-owned shared directory.
+Run from a clean, reviewed SANOS checkout. Choose a durable writable parent on
+the target host and keep every generated file outside Git and beneath its
+SANOS-owned directory. `SANOS_RUNS_ROOT` is a shell-only runbook variable, not
+a SANOS configuration key; replace the placeholder before running anything.
 
 ```bash
 set -o pipefail
-export PILOT_ROOT=/data/sanos/phase-10/data
+export SANOS_RUNS_ROOT=/path/to/writable/sanos
+mkdir -p "$SANOS_RUNS_ROOT"
+test -d "$SANOS_RUNS_ROOT" && test -w "$SANOS_RUNS_ROOT"
+export PILOT_ROOT="$SANOS_RUNS_ROOT/phase-10/data"
 export PILOT_RUN_ID=<UTC-date-and-operator-label>
-export PILOT_EVIDENCE=/data/sanos/phase-10/evidence/$PILOT_RUN_ID
+export PILOT_EVIDENCE="$SANOS_RUNS_ROOT/phase-10/evidence/$PILOT_RUN_ID"
 export PILOT_GENERATION=phase10-pilot-$PILOT_RUN_ID
 export LEGACY_MARKET_ROOT='<legacy_QUANTDATA_TRAINING_DATA>/dysanos/market/bid=0.011, nat,eth=10,bth=4,mps=1e-06,m ca250824/sm_0.25 6b930b59/SPX'
 mkdir -p "$PILOT_EVIDENCE"
