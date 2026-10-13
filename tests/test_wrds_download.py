@@ -10,8 +10,10 @@ from typing import Any
 
 import polars as pl
 import pytest
+from click.testing import CliRunner
 
 from sanos.artifacts import ArtifactStore
+from sanos.cli import main
 from sanos.config import StorageLocations
 from sanos.wrds import (
     RawCacheMissError,
@@ -21,6 +23,7 @@ from sanos.wrds import (
     WrdsNetworkAuthorizationError,
     download_raw,
     normalize_raw_frame,
+    raw_artifact_validation_record,
     raw_content_producer_version,
 )
 from sanos.wrds.plan import RawPartition
@@ -76,6 +79,8 @@ class _FakeWrdsState:
         empty_options: bool = False,
         security_secid: int = 108105,
         security_barrier: threading.Barrier | None = None,
+        fail_on_dated_query: int | None = None,
+        failure: BaseException | None = None,
     ) -> None:
         self.lock = threading.Lock()
         self.created = 0
@@ -87,6 +92,9 @@ class _FakeWrdsState:
         self.empty_options = empty_options
         self.security_secid = security_secid
         self.security_barrier = security_barrier
+        self.fail_on_dated_query = fail_on_dated_query
+        self.failure = failure
+        self.dated_queries = 0
 
     def factory(self, username: str) -> _FakeConnection:
         assert username == "test-account"
@@ -130,6 +138,14 @@ class _FakeConnection:
         date_match = re.search(r"date = '(\d{4}-\d{2}-\d{2})'", sql)
         assert date_match is not None
         observation_date = date_match.group(1)
+        with self.state.lock:
+            self.state.dated_queries += 1
+            dated_query = self.state.dated_queries
+        if dated_query == self.state.fail_on_dated_query:
+            failure = self.state.failure
+            if failure is None:
+                raise RuntimeError("synthetic dated-query failure")
+            raise failure
         secid_match = re.search(r"secid = (\d+)", sql)
         requested_secid = int(secid_match.group(1)) if secid_match is not None else None
         if ".opprcd" in sql:
@@ -355,6 +371,17 @@ def test_live_download_is_guarded_bounded_documented_and_output_first(
     assert reused.downloaded == 0
     assert reused.network_accessed is False
 
+    record = raw_artifact_validation_record(option_artifact)
+    assert record["event"] == "raw_artifact_validated"
+    assert record["logical_table"] == "options"
+    assert record["physical_table"] == "optionm_all.opprcd2024"
+    assert record["source_generation"] == "default-v1"
+    assert record["observation_date"] == "2024-01-03"
+    assert record["row_count"] == 1
+    assert record["empty_vendor_result"] is False
+    assert record["persisted_schema"]["strike_price"] == "Int64"
+    assert len(record["query_sha256"]) == len(record["data_sha256"]) == 64
+
 
 def test_security_publication_race_uses_the_winning_secid_downstream(
     tmp_path: Path,
@@ -457,6 +484,146 @@ def test_refresh_resumes_generation_and_never_replaces_it(tmp_path: Path) -> Non
     assert refreshed.downloaded == 8
     assert old_paths.isdisjoint({artifact.path for artifact in refreshed.artifacts})
     assert all(path.exists() for path in old_paths)
+
+
+class _SyntheticInterrupt(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (RuntimeError("synthetic terminal failure"), _SyntheticInterrupt("interrupt")),
+    ids=("terminal", "base-exception"),
+)
+def test_partial_raw_failure_resumes_only_missing_partitions(
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    store = _store(tmp_path)
+    config = RawDownloadConfig(
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        source_generation=f"partial-{type(failure).__name__}",
+        max_connections=1,
+        retry_attempts=1,
+        retry_base_seconds=0.0,
+    )
+    failing_state = _FakeWrdsState(
+        fail_on_dated_query=2,
+        failure=failure,
+    )
+    with pytest.raises(type(failure)):
+        download_raw(
+            store,
+            config,
+            refresh=True,
+            authorize_network=lambda: None,
+            connection_factory=failing_state.factory,
+            environment={"WRDS_USERNAME": "test-account"},
+            lease_root=tmp_path / "leases",
+        )
+    assert failing_state.created == failing_state.closed
+    assert failing_state.active == 0
+    completed_before = tuple(
+        sorted((tmp_path / "raw").glob("wrds/**/manifest.json"))
+    )
+    assert len(completed_before) == 2
+    manifest_bytes = {path: path.read_bytes() for path in completed_before}
+
+    resumed_state = _FakeWrdsState()
+    resumed = download_raw(
+        store,
+        config,
+        refresh=True,
+        authorize_network=lambda: None,
+        connection_factory=resumed_state.factory,
+        environment={"WRDS_USERNAME": "test-account"},
+        lease_root=tmp_path / "leases",
+    )
+    assert resumed.planned == 8
+    assert resumed.reused == 2
+    assert resumed.downloaded == 6
+    assert len(resumed_state.queries) == 6
+    assert resumed_state.created == resumed_state.closed
+    assert resumed_state.active == 0
+    assert all(path.read_bytes() == payload for path, payload in manifest_bytes.items())
+    assert all(artifact.path.exists() for artifact in resumed.artifacts)
+
+
+def test_raw_cache_only_verbose_emits_provenance_and_rejects_tamper(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    state = _FakeWrdsState()
+    result = download_raw(
+        store,
+        _config(),
+        authorize_network=lambda: None,
+        connection_factory=state.factory,
+        environment={"WRDS_USERNAME": "test-account"},
+        lease_root=tmp_path / "leases",
+    )
+    command = [
+        "--root",
+        str(tmp_path),
+        "-v",
+        "--log-format",
+        "json",
+        "raw",
+        "download",
+        "--ticker",
+        "SPX",
+        "--start-date",
+        "2024-01-03",
+        "--end-date",
+        "2024-01-03",
+        "--cache-only",
+    ]
+    environment = {"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"}
+    validated = CliRunner().invoke(main, command, env=environment)
+    assert validated.exit_code == 0, validated.output
+    records = [json.loads(line) for line in validated.output.splitlines()]
+    provenance = [
+        record for record in records if record["event"] == "raw_artifact_validated"
+    ]
+    assert len(provenance) == 8
+    assert records[-1]["event"] == "raw_result"
+    assert records[-1]["network_accessed"] is False
+    assert all(
+        {
+            "artifact",
+            "path",
+            "logical_table",
+            "physical_table",
+            "source_generation",
+            "ticker",
+            "observation_date",
+            "query_sha256",
+            "row_count",
+            "empty_vendor_result",
+            "persisted_schema",
+            "data_sha256",
+        }
+        <= set(record)
+        for record in provenance
+    )
+
+    target = next(
+        artifact
+        for artifact in result.artifacts
+        if artifact.manifest["configuration"]["table"] == "options"
+    )
+    data_path = target.path / "data.parquet"
+    payload = bytearray(data_path.read_bytes())
+    payload[len(payload) // 2] ^= 1
+    data_path.write_bytes(payload)
+    rejected = CliRunner().invoke(main, command, env=environment)
+    assert rejected.exit_code == 4
+    rejected_records = [json.loads(line) for line in rejected.output.splitlines()]
+    assert rejected_records[-1]["event"] == "error"
+    assert "checksum" in rejected_records[-1]["message"].lower()
+    assert all(record["event"] != "wrds_2fa_confirmed" for record in rejected_records)
 
 
 def test_wildcard_reuse_can_never_build_raw_data(tmp_path: Path) -> None:

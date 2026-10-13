@@ -8,7 +8,7 @@ import json
 import platform
 import sys
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +62,13 @@ from sanos.experiments import (
     validate_experiment,
 )
 from sanos.pipeline import DailyExecutionError
+from sanos.reference import (
+    DailyComparisonRequest,
+    ReferenceComparisonError,
+    compare_daily_artifacts,
+    repository_source_revision,
+    write_comparison_report,
+)
 from sanos.widb.build import IntermediateBuildRequest, build_intermediates
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.wrds import (
@@ -72,6 +79,7 @@ from sanos.wrds import (
     WrdsError,
     WrdsLeaseUnavailableError,
     download_raw,
+    raw_artifact_validation_record,
 )
 
 
@@ -264,6 +272,27 @@ def _read_experiment_config(path: Path) -> ExperimentConfig:
     return ExperimentConfig.from_document(document)
 
 
+def _read_widb_config(path: Path) -> tuple[DailyWidbConfig, DailySurfaceConfig]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read WIDB configuration {path}: {exc}") from exc
+    if not isinstance(document, dict) or "daily" not in document:
+        raise ValueError("WIDB configuration must contain a 'daily' object")
+    unknown = set(document) - {"dataset", "daily", "surface"}
+    if unknown:
+        raise ValueError(f"Unknown WIDB configuration sections: {sorted(unknown)}")
+    if not isinstance(document["daily"], dict):
+        raise ValueError("WIDB configuration 'daily' must be an object")
+    surface_payload = document.get("surface", {})
+    if not isinstance(surface_payload, dict):
+        raise ValueError("WIDB configuration 'surface' must be an object")
+    return (
+        DailyWidbConfig.from_mapping(document["daily"]),
+        DailySurfaceConfig.from_mapping(surface_payload),
+    )
+
+
 @click.group(cls=SanosGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="sanos")
 @click.option("-v", "--verbose", count=True, help="Increase diagnostic output.")
@@ -408,6 +437,7 @@ def status(context: CliContext) -> None:
         public_release_approval_available=True,
         experiment_build_available=True,
         experiment_validate_available=True,
+        reference_compare_daily_available=True,
         live_wrds_verified=False,
         network_accessed=False,
         dry_run=context.dry_run,
@@ -445,6 +475,156 @@ def config_show(context: CliContext, require_complete: bool) -> None:
         dry_run=context.dry_run,
         verbosity=context.verbose,
     )
+
+
+@main.group()
+def reference() -> None:
+    """Compare existing SANOS artifacts with read-only migration oracles."""
+
+
+@reference.command("compare-daily")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict portable JSON containing daily and surface configuration.",
+)
+@click.option("--ticker", required=True, help="OptionMetrics ticker, for example SPX.")
+@click.option(
+    "--start-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="First existing fitted session to compare.",
+)
+@click.option(
+    "--end-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Last existing fitted session to compare.",
+)
+@click.option("--source", type=click.Choice(("optionmetrics",)), default="optionmetrics")
+@click.option("--source-generation", required=True, help="Exact fresh Raw generation identity.")
+@click.option(
+    "--legacy-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    help="Read-only directory containing the pinned daily HDF5 files.",
+)
+@click.option(
+    "--legacy-catalog",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=lambda: Path(__file__).resolve().parents[3]
+    / "reviews"
+    / "phase-1"
+    / "reference-market-catalog.json",
+    show_default="checked-in Phase 1 catalog",
+    help="Pinned catalog whose selected file checksums must match the legacy root.",
+)
+@click.option(
+    "--expected-oracle-gap",
+    multiple=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Predeclare a valid populated date with no physical legacy file.",
+)
+@click.option(
+    "--phase10-pilot-contract",
+    is_flag=True,
+    help="Enforce the frozen 16-session Phase 10 representative-case contract.",
+)
+@click.option(
+    "--approvals",
+    "approvals_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Optional exact evidence-bound discrepancy approval document.",
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="New atomic JSON report path outside the legacy root and Git tree.",
+)
+@click.option(
+    "--progress-interval-seconds",
+    type=click.FloatRange(min=0.001, max=300.0),
+    default=30.0,
+    show_default=True,
+)
+@click.pass_obj
+def reference_compare_daily(
+    context: CliContext,
+    config_path: Path,
+    ticker: str,
+    start_date: datetime,
+    end_date: datetime,
+    source: str,
+    source_generation: str,
+    legacy_root: Path,
+    legacy_catalog: Path,
+    expected_oracle_gap: tuple[datetime, ...],
+    phase10_pilot_contract: bool,
+    approvals_path: Path | None,
+    output: Path,
+    progress_interval_seconds: float,
+) -> None:
+    """Compare completed fitted days without building or opening a network connection."""
+
+    try:
+        locations = context.locations.require_complete()
+        daily, surface = _read_widb_config(config_path)
+        request = DailyComparisonRequest(
+            ticker=ticker,
+            start_date=start_date.date(),
+            end_date=end_date.date(),
+            source=source,
+            source_generation=source_generation,
+            declared_oracle_gaps=tuple(value.date() for value in expected_oracle_gap),
+            enforce_phase10_pilot=phase10_pilot_contract,
+        )
+
+        def progress(payload: Mapping[str, Any]) -> None:
+            event = str(payload.get("event", "reference_comparison_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        report = compare_daily_artifacts(
+            locations,
+            request,
+            daily_config=daily,
+            surface_config=surface,
+            legacy_root=legacy_root,
+            catalog_path=legacy_catalog,
+            source_revision=repository_source_revision(),
+            approvals_path=approvals_path,
+            progress=progress if context.verbose else None,
+            progress_interval_seconds=progress_interval_seconds,
+        )
+        if not context.dry_run:
+            write_comparison_report(output, report, legacy_root=legacy_root)
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, ReferenceComparisonError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "reference_comparison_result",
+        status=report["outcome"],
+        report_id=report["report_id"],
+        report_path=None if context.dry_run else output,
+        classification_counts=report["classification_counts"],
+        dry_run=context.dry_run,
+        network_accessed=False,
+        artifacts_built=False,
+        filesystem_modified=not context.dry_run,
+    )
+    if report["outcome"] != "passed":
+        raise MaterialCliError(
+            "Daily legacy comparison found unexplained discrepancies; Phase 11 is blocked",
+            log_format=context.log_format,
+        )
 
 
 @main.group()
@@ -584,6 +764,15 @@ def raw_download(
             authorize_network=authorize_network,
             progress=progress,
         )
+        if context.verbose:
+            for artifact in result.artifacts:
+                record = raw_artifact_validation_record(artifact)
+                event = str(record["event"])
+                _emit(
+                    context,
+                    event,
+                    **{key: value for key, value in record.items() if key != "event"},
+                )
     except LocationConfigurationError as exc:
         raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
     except (
@@ -692,24 +881,7 @@ def intermediate_build(
 
     try:
         locations = context.locations.require_complete()
-        try:
-            document = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                f"Cannot read intermediate configuration {config_path}: {exc}"
-            ) from exc
-        if not isinstance(document, dict) or "daily" not in document:
-            raise ValueError("Intermediate configuration must contain a 'daily' object")
-        unknown = set(document) - {"dataset", "daily", "surface"}
-        if unknown:
-            raise ValueError(f"Unknown intermediate configuration sections: {sorted(unknown)}")
-        if not isinstance(document["daily"], dict):
-            raise ValueError("Intermediate configuration 'daily' must be an object")
-        daily = DailyWidbConfig.from_mapping(document["daily"])
-        surface_payload = document.get("surface", {})
-        if not isinstance(surface_payload, dict):
-            raise ValueError("Intermediate configuration 'surface' must be an object")
-        surface = DailySurfaceConfig.from_mapping(surface_payload)
+        daily, surface = _read_widb_config(config_path)
         request = IntermediateBuildRequest(
             ticker=ticker,
             start_date=start_date.date(),

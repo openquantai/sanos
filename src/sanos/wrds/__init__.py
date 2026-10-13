@@ -17,6 +17,7 @@ from sanos.wrds.download import (
     download_raw,
     normalize_raw_frame,
     raw_artifact_request,
+    raw_artifact_validation_record,
     raw_content_producer_version,
 )
 from sanos.wrds.lease import WrdsConnectionLease, WrdsLeaseUnavailableError
@@ -50,5 +51,6 @@ __all__ = [
     "normalize_raw_frame",
     "plan_raw_partitions",
     "raw_artifact_request",
+    "raw_artifact_validation_record",
     "raw_content_producer_version",
 ]

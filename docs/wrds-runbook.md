@@ -1,5 +1,9 @@
 # WRDS runbook
 
+The first live extraction must follow the stricter
+[Phase 10 guarded pilot](phase-10-pilot.md). The generic commands below do not
+replace its fresh-generation, evidence, comparison, or review gates.
+
 The guarded raw OptionMetrics layer is implemented. It has been exercised only
 with offline connection fakes so far; no live WRDS query has been made from this
 repository. A live pilot needs a separate, immediate confirmation that the user

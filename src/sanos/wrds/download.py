@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import threading
@@ -23,7 +25,7 @@ from sanos.artifacts import (
     ValidatedArtifact,
     WildcardReuseMissError,
 )
-from sanos.config import canonical_value
+from sanos.config import canonical_json, canonical_value
 from sanos.wrds.client import (
     ConnectionFactory,
     WrdsAuthenticationError,
@@ -85,6 +87,125 @@ class RawDownloadResult:
     network_accessed: bool
     dry_run: bool
     artifacts: tuple[ValidatedArtifact, ...]
+
+
+@version("1.0", dependencies=[ValidatedArtifact, canonical_json, raw_table_spec])
+def raw_artifact_validation_record(artifact: ValidatedArtifact) -> dict[str, Any]:
+    """Reconcile one complete Raw payload and return non-secret provenance."""
+
+    manifest = artifact.manifest
+    configuration = manifest.get("configuration")
+    metadata = manifest.get("metadata")
+    if not isinstance(configuration, Mapping) or set(configuration) != {
+        "source",
+        "table",
+        "ticker",
+        "observation_date",
+    }:
+        raise RawDownloadError("Raw artifact configuration fields changed")
+    if not isinstance(metadata, Mapping) or set(metadata) != {
+        "row_count",
+        "column_count",
+        "empty_vendor_result",
+        "persisted_schema",
+        "query_sha256",
+        "physical_table",
+    }:
+        raise RawDownloadError("Raw artifact metadata fields changed")
+    query_path = artifact.path / "query.json"
+    if query_path.is_symlink() or not query_path.is_file():
+        raise RawDownloadError(f"Raw artifact has no safe query.json: {query_path}")
+    try:
+        query_source = query_path.read_text(encoding="utf-8")
+        query = json.loads(query_source)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RawDownloadError(f"Cannot read Raw query provenance: {exc}") from exc
+    if not isinstance(query, dict) or query_source != canonical_json(query) + "\n":
+        raise RawDownloadError("Raw query provenance is not a canonical JSON object")
+    required_query = {
+        "source",
+        "dataset",
+        "logical_table",
+        "physical_table",
+        "ticker",
+        "observation_date",
+        "columns",
+        "persisted_schema",
+        "row_count",
+        "empty_vendor_result",
+        "sql",
+        "sql_sha256",
+    }
+    if set(query) != required_query:
+        raise RawDownloadError("Raw query provenance fields changed")
+    table = RawTable(str(configuration["table"]))
+    expected_columns = list(raw_table_spec(table).columns)
+    if (
+        configuration["source"] != "optionmetrics"
+        or query["source"] != "wrds"
+        or query["dataset"] != "optionmetrics"
+        or query["logical_table"] != table.value
+        or query["ticker"] != configuration["ticker"]
+        or query["observation_date"] != configuration["observation_date"]
+        or query["columns"] != expected_columns
+        or query["physical_table"] != metadata["physical_table"]
+        or query["persisted_schema"] != metadata["persisted_schema"]
+        or query["row_count"] != metadata["row_count"]
+        or query["empty_vendor_result"] != metadata["empty_vendor_result"]
+        or query["sql_sha256"] != metadata["query_sha256"]
+        or not isinstance(query["sql"], str)
+        or hashlib.sha256(query["sql"].encode("utf-8")).hexdigest()
+        != query["sql_sha256"]
+    ):
+        raise RawDownloadError("Raw manifest and query provenance disagree")
+    data_path = artifact.path / "data.parquet"
+    try:
+        frame = pl.read_parquet(data_path)
+    except Exception as exc:
+        raise RawDownloadError(f"Cannot read validated Raw Parquet payload: {exc}") from exc
+    persisted_schema = {name: str(dtype) for name, dtype in frame.schema.items()}
+    if (
+        list(frame.columns) != expected_columns
+        or persisted_schema != metadata["persisted_schema"]
+        or frame.height != metadata["row_count"]
+        or frame.width != metadata["column_count"]
+        or frame.is_empty() is not metadata["empty_vendor_result"]
+    ):
+        raise RawDownloadError("Raw Parquet payload disagrees with immutable provenance")
+    file_records = manifest.get("files")
+    if not isinstance(file_records, list):
+        raise RawDownloadError("Raw artifact manifest has no file records")
+    record_by_path = {
+        record.get("path"): record
+        for record in file_records
+        if isinstance(record, Mapping) and isinstance(record.get("path"), str)
+    }
+    if set(record_by_path) != {"README.md", "data.parquet", "query.json"}:
+        raise RawDownloadError("Raw artifact payload file contract changed")
+    data_record = record_by_path["data.parquet"]
+    data_sha256 = data_record.get("sha256")
+    if not isinstance(data_sha256, str):
+        raise RawDownloadError("Raw data payload checksum is missing")
+    source_generation = manifest.get("source_generation")
+    if not isinstance(source_generation, str) or not source_generation:
+        raise RawDownloadError("Raw source generation is missing")
+    return canonical_value(
+        {
+            "event": "raw_artifact_validated",
+            "artifact": artifact.pointer.as_dict(),
+            "path": artifact.path,
+            "logical_table": table.value,
+            "physical_table": query["physical_table"],
+            "source_generation": source_generation,
+            "ticker": configuration["ticker"],
+            "observation_date": configuration["observation_date"],
+            "query_sha256": query["sql_sha256"],
+            "row_count": frame.height,
+            "empty_vendor_result": frame.is_empty(),
+            "persisted_schema": persisted_schema,
+            "data_sha256": data_sha256,
+        }
+    )
 
 
 @version("1.0")
@@ -752,6 +873,7 @@ __all__ = [
     "download_raw",
     "normalize_raw_frame",
     "raw_artifact_request",
+    "raw_artifact_validation_record",
     "raw_content_producer_version",
     "security_secid",
 ]

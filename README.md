@@ -22,7 +22,9 @@ access has occurred yet. The exact 2022–2025 legacy comparison endpoint and
 numerical baseline are catalogued. A technically validated projection remains
 `public_candidate` until separate redistribution approval is recorded. See
 [the legacy baseline](docs/reference-baseline.md) for the 891-date parity oracle
-and the distinction between its legacy artifact populations.
+and the distinction between its legacy artifact populations. Follow the
+[guarded Phase 10 WRDS pilot](docs/phase-10-pilot.md) before any full-range
+extraction.
 
 ## Development installation
 
@@ -106,6 +108,29 @@ DLV state and the post-filter smooth 0.25 SANOS state as typed list columns.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.
+
+## Read-only legacy comparison
+
+After a fresh fitted build, compare existing daily artifacts with the pinned
+DySANOS HDF5 oracle without rebuilding or opening WRDS:
+
+```bash
+env WRDS_OFF=1 sanos -v --root /path/to/quant-data --log-format json \
+  reference compare-daily --config configs/widb-spx-reference.json \
+  --ticker SPX --start-date 2024-12-23 --end-date 2025-01-16 \
+  --source-generation <fresh-generation> \
+  --legacy-root <read-only-legacy-SPX-directory> \
+  --expected-oracle-gap 2024-12-24 \
+  --phase10-pilot-contract \
+  --output /external/sanos-evidence/daily-comparison.json
+```
+
+The command validates fitted artifacts shallowly, checks the pinned catalog and
+each selected legacy checksum, reports every structural and numerical
+difference, and exits 4 for an unexplained discrepancy. Reports contain only
+artifact identities, summary metrics, classifications, digests, and first
+mismatch keys—not raw vendor rows or values. See the
+[Phase 10 pilot runbook](docs/phase-10-pilot.md) for the mandatory live gate.
 
 ## Internal Dataset publication
 

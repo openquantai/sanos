@@ -2,7 +2,9 @@
 
 Status: implementation in progress; Phases 0 through 9 are complete with dual
 review. Public redistribution approval remains a separate human/legal action.
-No live WRDS access has occurred.
+Phase 10's offline design and implementation prerequisites are complete with
+dual review; its live pilot remains pending the owner-present 2FA and healthy
+daemon-backed resource gates. No live WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -506,6 +508,10 @@ materialization with value/mask/shape parity, or any intentional interface
 change has an approved compatibility decision and adapter.
 
 ### Phase 10 — Fresh-download pilot
+
+Offline prerequisite status: implemented, tested, and approved independently by
+the code and quantitative reviewers. The operational pilot and its external
+evidence review are still pending; Phase 11 remains blocked.
 
 - Run `gpuctl resources --json` as required by host policy before material work.
 - Ask the user to confirm readiness for WRDS 2FA immediately before access.
