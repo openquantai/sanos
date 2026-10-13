@@ -201,10 +201,70 @@ def classify_wrds_failure(error: BaseException) -> WrdsFailureKind:
     return WrdsFailureKind.PERMANENT_QUERY
 
 
+@version("1.0")
+def _connect_wrds_using_libpq_credentials(
+    connection: Any,
+    username: str,
+    sqlalchemy: Any,
+) -> None:
+    """Connect WRDS without inserting an empty password into the SQLAlchemy URL.
+
+    WRDS 3.x formats its first connection URL as ``username:@host`` when no
+    password was passed to Python. The bare ``postgresql`` scheme also lets
+    current SQLAlchemy select psycopg 3 even when WRDS installed psycopg2. An
+    explicit psycopg2 URL whose password is genuinely absent preserves the
+    standard libpq ``.pgpass`` lookup while keeping SANOS unaware of the
+    password value.
+    """
+
+    hostname = getattr(connection, "_hostname", None)
+    port = getattr(connection, "_port", None)
+    database = getattr(connection, "_dbname", None)
+    connect_args = getattr(connection, "_connect_args", None)
+    if (
+        not isinstance(hostname, str)
+        or not hostname
+        or not isinstance(port, int)
+        or not isinstance(database, str)
+        or not database
+        or not isinstance(connect_args, Mapping)
+    ):
+        raise WrdsConfigurationError(
+            "The installed WRDS client does not expose the supported connection metadata"
+        )
+
+    url = sqlalchemy.URL.create(
+        "postgresql+psycopg2",
+        username=username,
+        password=None,
+        host=hostname,
+        port=port,
+        database=database,
+    )
+    engine = sqlalchemy.create_engine(
+        url,
+        isolation_level="AUTOCOMMIT",
+        connect_args=dict(connect_args),
+    )
+    try:
+        database_connection = engine.connect()
+    except BaseException:
+        engine.dispose()
+        raise
+    try:
+        connection.engine = engine
+        connection.connection = database_connection
+    except BaseException:
+        database_connection.close()
+        engine.dispose()
+        raise
+
+
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         _NonInteractiveWrdsConnection,
+        _connect_wrds_using_libpq_credentials,
         WrdsFailureKind,
         classify_wrds_failure,
     ],
@@ -215,15 +275,17 @@ def default_connection_factory(username: str) -> WrdsConnection:
     ``wrds.Connection.connect`` falls back to ``input``/``getpass`` when its
     initial libpq connection fails. Material SANOS commands are commonly piped
     to a persistent log, so that fallback could capture a username and could
-    also leave an unattended process waiting for a password. Use the client's
-    non-interactive first connection attempt directly and fail closed instead.
+    also leave an unattended process waiting for a password. Build the same
+    SQLAlchemy connection without a password component so libpq can read the
+    standard credential store, and fail closed instead of prompting.
     """
 
     try:
         wrds = importlib.import_module("wrds")
+        sqlalchemy = importlib.import_module("sqlalchemy")
     except ImportError as exc:
         raise WrdsConfigurationError(
-            "The optional WRDS client is not installed; install sanos[wrds]"
+            "The optional WRDS dependencies are not installed; install sanos[wrds]"
         ) from exc
     try:
         connection = wrds.Connection(autoconnect=False, wrds_username=username)
@@ -232,27 +294,11 @@ def default_connection_factory(username: str) -> WrdsConnection:
             "The WRDS client could not be initialized without an interactive credential prompt"
         ) from None
 
-    # wrds 3.x has no public fail-closed equivalent of the first connection
-    # attempt in Connection.connect(). This is the same method connect() calls
-    # before its input/getpass fallback. Keep the optional dependency bounded
-    # to wrds<4 and reject an incompatible client rather than silently prompt.
-    connect_without_prompt = getattr(connection, "_Connection__make_sa_engine_conn", None)
-    if not callable(connect_without_prompt):
-        raise WrdsConfigurationError(
-            "The installed WRDS client cannot connect in fail-closed mode; "
-            "install a supported sanos[wrds] dependency"
-        )
-
     try:
-        connect_without_prompt(raise_err=True)
-        if getattr(connection, "engine", None) is None:
-            raise RuntimeError("WRDS client returned no connection engine")
+        _connect_wrds_using_libpq_credentials(connection, username, sqlalchemy)
+    except WrdsConfigurationError:
+        raise
     except Exception as exc:
-        try:
-            if getattr(connection, "engine", None) is not None:
-                connection.close()
-        except Exception:
-            pass
         kind = classify_wrds_failure(exc)
         if kind is WrdsFailureKind.AUTHENTICATION:
             raise WrdsAuthenticationError(

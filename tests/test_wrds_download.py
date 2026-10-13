@@ -20,12 +20,17 @@ from sanos.wrds import (
     RawDownloadConfig,
     RawDownloadError,
     RawTable,
+    WrdsAuthenticationError,
+    WrdsConfigurationError,
+    WrdsCredentials,
     WrdsNetworkAuthorizationError,
+    WrdsQueryError,
     download_raw,
     normalize_raw_frame,
     raw_artifact_validation_record,
     raw_content_producer_version,
 )
+from sanos.wrds.download import _inspect_optionmetrics_guarded, _open_connection
 from sanos.wrds.plan import RawPartition
 
 
@@ -195,6 +200,47 @@ def _config(*, generation: str = "default-v1") -> RawDownloadConfig:
         max_connections=2,
         retry_base_seconds=0.0,
     )
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        WrdsAuthenticationError("authentication failed"),
+        WrdsConfigurationError("credential setup is incompatible"),
+        WrdsQueryError("credential transport failed"),
+    ),
+    ids=("authentication", "configuration", "query-mentioning-credential"),
+)
+def test_open_connection_preserves_typed_wrds_failures(error: Exception) -> None:
+    credentials = WrdsCredentials(username="test-account")
+
+    def fail(_username: str) -> _FakeConnection:
+        raise error
+
+    with pytest.raises(type(error)) as caught:
+        _open_connection(fail, credentials)
+
+    assert caught.value is error
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        WrdsAuthenticationError("authentication failed"),
+        WrdsConfigurationError("credential setup is incompatible"),
+        WrdsQueryError("credential catalog failed"),
+    ),
+    ids=("authentication", "configuration", "query-mentioning-credential"),
+)
+def test_catalog_probe_preserves_typed_wrds_failures(error: Exception) -> None:
+    class FailingConnection:
+        def list_libraries(self) -> list[str]:
+            raise error
+
+    with pytest.raises(type(error)) as caught:
+        _inspect_optionmetrics_guarded(FailingConnection())
+
+    assert caught.value is error
 
 
 def test_dry_run_and_cache_only_never_authorize_connect_or_create_roots(

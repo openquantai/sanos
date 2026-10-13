@@ -29,6 +29,7 @@ from sanos.config import canonical_json, canonical_value
 from sanos.wrds.client import (
     ConnectionFactory,
     WrdsAuthenticationError,
+    WrdsConfigurationError,
     WrdsCredentials,
     WrdsFailureKind,
     WrdsQueryError,
@@ -430,6 +431,8 @@ def _open_connection(
 ) -> Any:
     try:
         return factory(credentials.username)
+    except (WrdsAuthenticationError, WrdsConfigurationError, WrdsQueryError):
+        raise
     except Exception as exc:
         kind = classify_wrds_failure(exc)
         if kind is WrdsFailureKind.AUTHENTICATION:
@@ -442,6 +445,8 @@ def _open_connection(
 def _inspect_optionmetrics_guarded(connection: Any) -> Any:
     try:
         return inspect_optionmetrics(connection)
+    except (WrdsAuthenticationError, WrdsConfigurationError, WrdsQueryError):
+        raise
     except Exception as exc:
         kind = classify_wrds_failure(exc)
         if kind is WrdsFailureKind.AUTHENTICATION:

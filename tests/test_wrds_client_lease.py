@@ -85,20 +85,50 @@ def test_query_retry_is_limited_to_recognized_transients() -> None:
         )
 
 
-def test_default_connection_factory_uses_fail_closed_wrds_path(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    calls: list[object] = []
+def _fake_sqlalchemy(
+    calls: list[object],
+    *,
+    connect: object | None = None,
+) -> object:
+    class FakeDatabaseConnection:
+        def close(self) -> None:
+            calls.append("database_close")
 
+    class FakeEngine:
+        def connect(self) -> object:
+            calls.append("engine_connect")
+            if isinstance(connect, BaseException):
+                raise connect
+            if callable(connect):
+                return connect()
+            return FakeDatabaseConnection()
+
+        def dispose(self) -> None:
+            calls.append("engine_dispose")
+
+    class FakeURL:
+        @staticmethod
+        def create(drivername: str, **kwargs: object) -> object:
+            calls.append(("url", drivername, kwargs))
+            return types.SimpleNamespace(drivername=drivername, **kwargs)
+
+    def create_engine(url: object, **kwargs: object) -> FakeEngine:
+        calls.append(("create_engine", url, kwargs))
+        return FakeEngine()
+
+    return types.SimpleNamespace(URL=FakeURL, create_engine=create_engine)
+
+
+def _fake_wrds_connection(calls: list[object]) -> type:
     class FakeConnection:
         def __init__(self, *, autoconnect: bool, wrds_username: str) -> None:
             calls.append((autoconnect, wrds_username))
+            self._hostname = "wrds-pgdata.wharton.upenn.edu"
+            self._port = 9737
+            self._dbname = "wrds"
+            self._connect_args = {"sslmode": "require"}
             self.engine: object | None = None
-
-        def _Connection__make_sa_engine_conn(self, *, raise_err: bool) -> None:
-            calls.append(("connect", raise_err))
-            self.engine = object()
+            self.connection: object | None = None
 
         def raw_sql(self, sql: str) -> dict[str, list[str]]:
             if "AS library" in sql:
@@ -109,50 +139,74 @@ def test_default_connection_factory_uses_fail_closed_wrds_path(
                 return {"table_name": ["securd", "opprcd2025"]}
             raise AssertionError("unexpected SQL")
 
-        def close(self) -> None:
-            calls.append("close")
+    return FakeConnection
 
-    fake_wrds = types.SimpleNamespace(Connection=FakeConnection)
-    monkeypatch.setattr(client_module.importlib, "import_module", lambda name: fake_wrds)
+
+def _install_connection_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[object],
+    *,
+    connect: object | None = None,
+) -> None:
+    fake_wrds = types.SimpleNamespace(Connection=_fake_wrds_connection(calls))
+    fake_sqlalchemy = _fake_sqlalchemy(calls, connect=connect)
+
+    def fake_import(name: str) -> object:
+        if name == "wrds":
+            return fake_wrds
+        if name == "sqlalchemy":
+            return fake_sqlalchemy
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(client_module.importlib, "import_module", fake_import)
+
+
+def test_default_connection_factory_uses_pgpass_compatible_url(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[object] = []
+    _install_connection_fakes(monkeypatch, calls)
+
     connection = default_connection_factory("private-account")
 
     assert connection.list_libraries() == ["optionm_all"]
     assert connection.list_tables("optionm_all") == ["securd", "opprcd2025"]
-    assert calls == [
-        (False, "private-account"),
-        ("connect", True),
-        "libraries",
-        "tables",
-    ]
+    url_call = next(call for call in calls if isinstance(call, tuple) and call[0] == "url")
+    assert url_call[1] == "postgresql+psycopg2"
+    assert url_call[2]["username"] == "private-account"
+    assert url_call[2]["password"] is None
+    assert url_call[2]["host"] == "wrds-pgdata.wharton.upenn.edu"
+    engine_call = next(
+        call for call in calls if isinstance(call, tuple) and call[0] == "create_engine"
+    )
+    assert engine_call[2] == {
+        "isolation_level": "AUTOCOMMIT",
+        "connect_args": {"sslmode": "require"},
+    }
     assert capsys.readouterr() == ("", "")
 
 
 def test_default_connection_factory_has_resolved_version() -> None:
-    assert str(default_connection_factory.version).startswith("1.1")
+    assert str(default_connection_factory.version).startswith("1.2")
 
 
 def test_default_connection_factory_never_prompts_or_leaks_authentication_details(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    class FailingConnection:
-        engine = None
-
-        def __init__(self, *, autoconnect: bool, wrds_username: str) -> None:
-            assert autoconnect is False
-            assert wrds_username == "private-account"
-
-        def _Connection__make_sa_engine_conn(self, *, raise_err: bool) -> None:
-            assert raise_err is True
-            raise RuntimeError(
-                'password authentication failed for user "private-account"; secret-value'
-            )
+    calls: list[object] = []
+    _install_connection_fakes(
+        monkeypatch,
+        calls,
+        connect=RuntimeError(
+            'password authentication failed for user "private-account"; secret-value'
+        ),
+    )
 
     def forbidden_prompt(*args: object, **kwargs: object) -> str:
         raise AssertionError("credential prompt must not be called")
 
-    fake_wrds = types.SimpleNamespace(Connection=FailingConnection)
-    monkeypatch.setattr(client_module.importlib, "import_module", lambda name: fake_wrds)
     monkeypatch.setattr(builtins, "input", forbidden_prompt)
     monkeypatch.setattr(getpass, "getpass", forbidden_prompt)
 
@@ -163,6 +217,7 @@ def test_default_connection_factory_never_prompts_or_leaks_authentication_detail
     assert "private-account" not in rendered
     assert "secret-value" not in rendered
     assert caught.value.__cause__ is None
+    assert "engine_dispose" in calls
     assert capsys.readouterr() == ("", "")
 
 
@@ -174,44 +229,17 @@ def test_default_connection_factory_rejects_incompatible_wrds_without_prompt(
             assert autoconnect is False
             assert wrds_username == "private-account"
 
+    calls: list[object] = []
     fake_wrds = types.SimpleNamespace(Connection=IncompatibleConnection)
-    monkeypatch.setattr(client_module.importlib, "import_module", lambda name: fake_wrds)
+    fake_sqlalchemy = _fake_sqlalchemy(calls)
 
-    with pytest.raises(WrdsConfigurationError, match="fail-closed"):
+    def fake_import(name: str) -> object:
+        return fake_wrds if name == "wrds" else fake_sqlalchemy
+
+    monkeypatch.setattr(client_module.importlib, "import_module", fake_import)
+
+    with pytest.raises(WrdsConfigurationError, match="connection metadata"):
         default_connection_factory("private-account")
-
-
-def test_default_connection_factory_closes_after_connection_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    calls: list[str] = []
-
-    class PartiallyConnectedFailure:
-        def __init__(self, *, autoconnect: bool, wrds_username: str) -> None:
-            assert autoconnect is False
-            assert wrds_username == "private-account"
-            self.engine: object | None = None
-
-        def _Connection__make_sa_engine_conn(self, *, raise_err: bool) -> None:
-            assert raise_err is True
-            self.engine = object()
-            raise RuntimeError("password authentication failed; secret-value")
-
-        def close(self) -> None:
-            calls.append("close")
-            self.engine = None
-
-    fake_wrds = types.SimpleNamespace(Connection=PartiallyConnectedFailure)
-    monkeypatch.setattr(client_module.importlib, "import_module", lambda name: fake_wrds)
-
-    with pytest.raises(WrdsAuthenticationError) as caught:
-        default_connection_factory("private-account")
-
-    assert calls == ["close"]
-    assert "secret-value" not in f"{caught.value!r} {caught.value}"
-    assert caught.value.__cause__ is None
-    assert capsys.readouterr() == ("", "")
 
 
 def test_default_connection_factory_does_not_mutate_streams_during_fanout(
@@ -219,20 +247,13 @@ def test_default_connection_factory_does_not_mutate_streams_during_fanout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     barrier = threading.Barrier(2)
+    calls: list[object] = []
 
-    class ConcurrentConnection:
-        def __init__(self, *, autoconnect: bool, wrds_username: str) -> None:
-            assert autoconnect is False
-            assert wrds_username == "private-account"
-            self.engine: object | None = None
+    def connect() -> object:
+        barrier.wait(timeout=2.0)
+        return object()
 
-        def _Connection__make_sa_engine_conn(self, *, raise_err: bool) -> None:
-            assert raise_err is True
-            barrier.wait(timeout=2.0)
-            self.engine = object()
-
-    fake_wrds = types.SimpleNamespace(Connection=ConcurrentConnection)
-    monkeypatch.setattr(client_module.importlib, "import_module", lambda name: fake_wrds)
+    _install_connection_fakes(monkeypatch, calls, connect=connect)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
 

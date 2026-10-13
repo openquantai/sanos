@@ -48,6 +48,13 @@ SANOS opens WRDS in fail-closed mode. A missing, stale, or rejected `.pgpass`
 entry produces a sanitized error and never falls back to an interactive username
 or password prompt inside a command whose output may be logged.
 
+The connection URL explicitly selects the `psycopg2` driver and omits the
+password field rather than inserting an empty password. This prevents current
+SQLAlchemy from selecting psycopg 3 for a bare `postgresql` URL when only the
+WRDS-supported psycopg2 driver is installed. It also lets libpq perform its
+standard `.pgpass` lookup without SANOS reading, parsing, or holding the password
+itself; an explicit empty password prevents that credential-file lookup.
+
 ## Plan without network access
 
 Always inspect a substantial request first:

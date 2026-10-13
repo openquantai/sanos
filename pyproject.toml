@@ -38,6 +38,8 @@ reference = [
 ]
 wrds = [
   "pandas>=2.2,<4",
+  "psycopg2-binary>=2.9,<3",
+  "SQLAlchemy>=2,<3",
   "wrds>=3.2,<4",
 ]
 jax = [
@@ -49,6 +51,8 @@ experiment = [
 operator = [
   "h5py>=3.10,<4",
   "pandas>=2.2,<4",
+  "psycopg2-binary>=2.9,<3",
+  "SQLAlchemy>=2,<3",
   "torch>=2,<3",
   "wrds>=3.2,<4",
 ]
