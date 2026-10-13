@@ -7,6 +7,9 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    env:
+      WRDS_OFF: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,12 +17,42 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install
-        run: python -m pip install --upgrade pip && python -m pip install '.[dev]'
+        run: python -m pip install --upgrade pip && python -m pip install '.[dev,operator]'
       - name: Lint
-        run: ruff check src tests scripts
+        run: ruff check src tests scripts setup.py
       - name: Type check
         run: mypy
+      - name: Compile
+        run: python -m compileall -q src tests scripts setup.py
       - name: Test
-        run: python -m pytest -q
+        run: python -m pytest -q -p no:cacheprovider
+      - name: Check Markdown links
+        run: python scripts/check_markdown_links.py
       - name: Build distributions
-        run: python -m build
+        run: |
+          mkdir -p "$RUNNER_TEMP/sanos/dist"
+          python -m build --outdir "$RUNNER_TEMP/sanos/dist"
+      - name: Verify wheel and source distribution outside checkout
+        run: >-
+          python scripts/verify_distribution.py
+          --dist-dir "$RUNNER_TEMP/sanos/dist"
+          --work-root "$RUNNER_TEMP/sanos/verify"
+          --expected-revision "$GITHUB_SHA"
+
+  paper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install TeX dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          latexmk texlive-latex-base texlive-latex-extra texlive-science
+          texlive-fonts-recommended texlive-fonts-extra
+      - name: Build paper outside checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/sanos/paper"
+          cp -a tex/. "$RUNNER_TEMP/sanos/paper/"
+          latexmk -cd -pdf -interaction=nonstopmode -halt-on-error \
+            "$RUNNER_TEMP/sanos/paper/sanos.tex"
+          test -s "$RUNNER_TEMP/sanos/paper/sanos.pdf"
+          test -z "$(git status --porcelain)"

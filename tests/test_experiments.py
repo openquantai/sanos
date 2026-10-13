@@ -15,13 +15,21 @@ import numpy as np
 import polars as pl
 import pytest
 from test_widb_build import _dataset_config, _locations, _publish_raw_inputs
+from test_widb_surface import _two_expiry_raw_inputs
 
 import sanos.datasets.internal as internal_dataset_module
 import sanos.experiments.hdf5 as hdf5_module
-from sanos.artifacts import ArtifactNotFoundError, ArtifactStore, WildcardReuseMissError
+from sanos.artifacts import (
+    ArtifactNotFoundError,
+    ArtifactPointer,
+    ArtifactStore,
+    StorageClass,
+    WildcardReuseMissError,
+)
 from sanos.config import canonical_sha256
 from sanos.datasets import build_internal_dataset, open_internal_dataset
 from sanos.experiments import (
+    DailyFrontDay,
     ExperimentBuildOptions,
     ExperimentConfig,
     ExperimentValidationError,
@@ -44,6 +52,16 @@ from sanos.experiments.hdf5 import (
     write_experiment_hdf5,
 )
 from sanos.pipeline import RunJournal
+from sanos.widb import (
+    ClockConfig,
+    DailyDataError,
+    DailyWidbConfig,
+    apply_options_filter,
+    enrich_daily_frame,
+    fit_initial_no_arbitrage,
+    fit_smooth_sanos,
+    pair_daily_frame,
+)
 from sanos.widb.surface import smooth_sanos_pricer
 
 _PINNED_TRAINING_SHA256 = "2b5d19f919932ed64eb6f7304a88551690771f72637517a769de6137f6c5a80a"
@@ -610,6 +628,107 @@ def test_every_experiment_content_section_changes_identity() -> None:
         for value in (0.0, 0.2, 0.5, 1.0)
     }
     assert len(overnight_ids) == 4
+
+
+def test_overnight_fraction_reaches_dlv_experiment_horizon_and_hdf5(
+    tmp_path: Path,
+) -> None:
+    source = ArtifactPointer(
+        StorageClass.DATASET,
+        "widb/internal/name-overnight-sensitivity",
+        "a" * 64,
+    )
+    base = _config(source.namespace, source.artifact_id)
+    observed_dlv: list[np.ndarray] = []
+    observed_days: dict[float, DailyFrontDay] = {}
+    observed_frames: dict[float, pl.DataFrame] = {}
+    for fraction in (0.1, 0.2, 0.5):
+        daily = DailyWidbConfig(
+            clock=ClockConfig(overnight_variance_fraction=fraction)
+        )
+        fitted = fit_smooth_sanos(
+            apply_options_filter(
+                fit_initial_no_arbitrage(
+                    enrich_daily_frame(
+                        pair_daily_frame(
+                            ticker="SPX",
+                            trading_date=date(2024, 1, 3),
+                            raw=_two_expiry_raw_inputs(first_is_am=True),
+                            config=daily,
+                        ),
+                        config=daily,
+                    )
+                )
+            )
+        )
+        ordered = fitted.sort("time_to_expiry_years", "expiry_id")
+        observed_frames[fraction] = fitted
+        first = ordered.row(0, named=True)
+        assert first["business_dte"] == pytest.approx(np.float32(10.0 + fraction))
+        observed_dlv.append(
+            np.asarray(first["initial_surface_dlv_squares"], dtype=np.float64)
+        )
+        config = replace(
+            base,
+            market=replace(
+                base.market,
+                overnight_variance_fraction=fraction,
+            ),
+        )
+        day = project_daily_front(
+            fitted,
+            source_dataset=source,
+            market=config.market,
+            geometry=config.geometry,
+        )
+        observed_days[fraction] = day
+        assert day.expiries_y[0] * 252.0 == pytest.approx(10.0 + fraction)
+        assert day.expiries_y[1] * 252.0 == pytest.approx(31.0)
+        hdf_path = tmp_path / f"overnight-{fraction}.h5"
+        write_experiment_hdf5(
+            hdf_path,
+            (day,),
+            config=config,
+            producer_version="overnight-sensitivity-v1",
+        )
+        validation = validate_experiment_hdf5(
+            hdf_path,
+            config=config,
+            producer_version="overnight-sensitivity-v1",
+        )
+        assert validation["dates"]["count"] == 1
+
+    assert any(
+        not np.array_equal(left, right)
+        for left, right in zip(observed_dlv, observed_dlv[1:], strict=True)
+    )
+    short_geometry = replace(
+        base.geometry,
+        model_business_dtes=(1.0, 5.0, 10.25),
+    )
+    for fraction in (0.1, 0.2):
+        day = observed_days[fraction]
+        assert project_daily_front(
+            observed_frames[fraction],
+            source_dataset=source,
+            market=replace(
+                base.market,
+                overnight_variance_fraction=fraction,
+            ),
+            geometry=short_geometry,
+        ).expiry_count == 1
+        assert day.expiry_count == 2
+    with pytest.raises(DailyDataError, match="no daily-front eligible books"):
+        fraction = 0.5
+        project_daily_front(
+            observed_frames[fraction],
+            source_dataset=source,
+            market=replace(
+                base.market,
+                overnight_variance_fraction=fraction,
+            ),
+            geometry=short_geometry,
+        )
 
 
 def test_experiment_version_closure_and_identity_are_fresh_process_stable() -> None:

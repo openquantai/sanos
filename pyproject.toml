@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "sanos"
 version = "0.1.0"
 description = "Standalone SANOS analytics and reproducible WIDB data pipeline."
+readme = "README.md"
 requires-python = ">=3.12"
 authors = [
   { name = "Hans Buehler" },
@@ -33,6 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 reference = [
   "h5py>=3.10,<4",
+  "torch>=2,<3",
 ]
 wrds = [
   "pandas>=2.2,<4",
@@ -43,6 +45,12 @@ jax = [
 ]
 experiment = [
   "h5py>=3.10,<4",
+]
+operator = [
+  "h5py>=3.10,<4",
+  "pandas>=2.2,<4",
+  "torch>=2,<3",
+  "wrds>=3.2,<4",
 ]
 test = [
   "h5py>=3.10,<4",
@@ -70,6 +78,9 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["sanos*"]
+
+[tool.setuptools.package-data]
+"sanos.resources" = ["*.json", "*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

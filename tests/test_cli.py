@@ -29,6 +29,7 @@ def test_help_lists_stable_command_groups() -> None:
         "intermediate",
         "dataset",
         "experiment",
+        "production",
     ):
         assert command in result.output
 
@@ -37,6 +38,13 @@ def test_public_dataset_help_lists_human_release_workflow() -> None:
     result = CliRunner().invoke(main, ["dataset", "public", "--help"])
     assert result.exit_code == 0, result.output
     for command in ("build", "validate", "approval-template", "approve"):
+        assert command in result.output
+
+
+def test_canonical_reference_help_lists_review_and_promotion_workflow() -> None:
+    result = CliRunner().invoke(main, ["dataset", "reference", "--help"])
+    assert result.exit_code == 0, result.output
+    for command in ("review-template", "promotion-template", "promote", "validate"):
         assert command in result.output
 
 
@@ -73,18 +81,21 @@ def test_status_json_reports_daily_intermediate_capability(tmp_path: Path) -> No
     payload = json.loads(result.output)
     assert payload["event"] == "status"
     assert payload["network_accessed"] is False
-    assert payload["phase"] == "internal-experiment-materialization"
+    assert payload["phase"] == "offline-production-readiness"
     assert payload["pipeline_available"] is True
     assert payload["material_pipeline_available"] is True
     assert payload["raw_download_available"] is True
     assert payload["intermediate_build_available"] is True
     assert payload["dataset_build_available"] is True
     assert payload["dataset_validate_available"] is True
+    assert payload["canonical_reference_promotion_available"] is True
     assert payload["public_candidate_build_available"] is True
     assert payload["public_candidate_validate_available"] is True
     assert payload["public_release_approval_available"] is True
     assert payload["experiment_build_available"] is True
     assert payload["experiment_validate_available"] is True
+    assert payload["phase11_config_finalization_available"] is True
+    assert payload["phase11_evidence_index_available"] is True
     assert payload["live_wrds_verified"] is False
 
 
@@ -114,6 +125,26 @@ def test_config_show_reports_precedence_without_creating_paths(tmp_path: Path) -
     assert payload["filesystem_modified"] is False
     assert not root.exists()
     assert not raw.exists()
+
+
+def test_config_resources_reports_packaged_operator_assets() -> None:
+    result = CliRunner().invoke(main, ["--log-format", "json", "config", "resources"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["event"] == "config_resources"
+    assert payload["network_accessed"] is False
+    assert payload["filesystem_modified"] is False
+    assert Path(payload["resources"]["reference_catalog"]).is_file()
+    assert payload["resources"]["source_revision"] == "checkout"
+
+
+def test_production_help_lists_frozen_operator_contract() -> None:
+    result = CliRunner().invoke(main, ["production", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "finalize-configs" in result.output
+    assert "evidence-index" in result.output
 
 
 def test_explicit_bad_config_uses_stable_configuration_exit(tmp_path: Path) -> None:

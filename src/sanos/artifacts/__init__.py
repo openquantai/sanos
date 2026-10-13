@@ -17,6 +17,8 @@ from sanos.artifacts.store import (
     StorageClass,
     ValidatedArtifact,
     WildcardReuseMissError,
+    atomic_create_bytes,
+    atomic_create_json,
     atomic_write_bytes,
     atomic_write_json,
 )
@@ -38,6 +40,8 @@ __all__ = [
     "StorageClass",
     "ValidatedArtifact",
     "WildcardReuseMissError",
+    "atomic_create_bytes",
+    "atomic_create_json",
     "atomic_write_bytes",
     "atomic_write_json",
 ]

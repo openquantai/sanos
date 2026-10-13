@@ -571,6 +571,8 @@ def download_raw(
                 "ticker": config.ticker,
                 "start_date": config.start_date,
                 "end_date": config.end_date,
+                "source": config.source,
+                "source_generation": config.source_generation,
                 "planned": len(requests),
                 "reused": len(resolved),
                 "missing": len(missing),

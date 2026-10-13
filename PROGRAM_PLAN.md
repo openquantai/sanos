@@ -1,10 +1,12 @@
 # SANOS standalone program plan
 
 Status: implementation in progress; Phases 0 through 9 are complete with dual
-review. Public redistribution approval remains a separate human/legal action.
-Phase 10's offline design and implementation prerequisites are complete with
-dual review; its live pilot remains pending the owner-present 2FA and healthy
-daemon-backed resource gates. No live WRDS access has occurred.
+review. Phase 10's offline prerequisites are complete, and Phase 11/12 offline
+production, packaging, and operator-readiness work passed final code and
+quantitative review on 2026-10-13.
+Public redistribution approval remains a separate human/legal action. The live
+pilot remains pending the owner-present 2FA and healthy daemon-backed resource
+gates. No live WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -525,6 +527,12 @@ docs are complete; discrepancies are explained or approved.
 
 ### Phase 11 — Fresh 2022--2025 production build
 
+Offline contract status: the exact full-range comparator, Experiment tensor
+comparator, deterministic downstream-config finalizer, indexed evidence
+contract, canonical designation, and human runbook are implemented, tested, and
+independently approved. Live execution remains blocked by the Phase 10 pilot
+and immediate safety gates.
+
 - After a new explicit 2FA-readiness confirmation, download every required raw
   partition fresh. Do not read old raw/intermediate data as an input.
 - Resume safely across interruptions, never exceeding four WRDS connections;
@@ -541,6 +549,12 @@ and checksums validate; the documented non-AI reproduction commands work; and
 the published SANOS dataset identity is recorded as the canonical reference.
 
 ### Phase 12 — Documentation and release readiness
+
+Offline implementation status: the non-AI operator path, troubleshooting,
+retention policy, aggregate operator extra, self-contained wheel/sdist contract,
+installed-artifact verifier, Markdown-link check, and out-of-tree paper CI are
+implemented and passed final dual review. Project licensing and the
+`.git-real` metadata handoff remain explicit owner/host release gates.
 
 - Complete the README path from installation and configuration through WRDS
   authentication, raw download, intermediate build, dataset publication,

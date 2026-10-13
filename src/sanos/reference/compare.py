@@ -27,6 +27,7 @@ from sanos.datasets.internal import validate_fitted_partition
 from sanos.model.arbfree import ArbFreePricer
 from sanos.model.tools import SanosPricer
 from sanos.reference.legacy_market import read_legacy_pytree_hdf5
+from sanos.resources import packaged_source_revision
 from sanos.widb.build import IntermediateBuildRequest, plan_daily_artifacts, read_daily_frame
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.widb.surface import (
@@ -35,10 +36,18 @@ from sanos.widb.surface import (
     selected_reference_view,
     smooth_sanos_pricer,
 )
-from sanos.wrds import raw_artifact_validation_record
+from sanos.wrds import (
+    RawDownloadConfig,
+    RawTable,
+    plan_raw_partitions,
+    raw_artifact_request,
+    raw_artifact_validation_record,
+    raw_content_producer_version,
+)
 
-REFERENCE_REPORT_SCHEMA = "sanos-legacy-daily-comparison-v1"
+REFERENCE_REPORT_SCHEMA = "sanos-legacy-daily-comparison-v2"
 APPROVAL_SCHEMA = "sanos-legacy-daily-comparison-approvals-v1"
+ORACLE_GAP_DECLARATION_SCHEMA = "sanos-legacy-oracle-gap-declaration-v1"
 PINNED_CATALOG_SHA256 = "9b68a9638f273271ff4dbde6365c75ac9fd749993f9284b42428682339d516b4"
 PINNED_COLLECTION_SHA256 = "f25afda76474a48f25da27be6de113b9fbee648e7ab01691c6367dafe723e280"
 PHASE10_PILOT_DATES = (
@@ -60,6 +69,34 @@ PHASE10_PILOT_DATES = (
     "2025-01-16",
 )
 PHASE10_PILOT_ORACLE_GAPS = ("2024-12-24",)
+PHASE11_PRODUCTION_ORACLE_GAPS = (
+    "2022-03-22",
+    "2022-08-11",
+    "2022-10-28",
+    "2022-11-25",
+    "2023-05-17",
+    "2023-06-02",
+    "2023-07-03",
+    "2023-07-06",
+    "2023-10-02",
+    "2023-10-06",
+    "2023-11-02",
+    "2023-11-24",
+    "2024-01-10",
+    "2024-01-26",
+    "2024-02-13",
+    "2024-02-28",
+    "2024-03-04",
+    "2024-07-03",
+    "2024-07-11",
+    "2024-07-18",
+    "2024-07-24",
+    "2024-08-01",
+    "2024-11-29",
+    "2024-12-24",
+    "2025-05-16",
+    "2025-07-03",
+)
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -115,7 +152,7 @@ class DailyLegacyComparisonTolerances:
         return asdict(self)
 
 
-@version("1.0", dependencies=[DailyLegacyComparisonTolerances])
+@version("1.1", dependencies=[DailyLegacyComparisonTolerances])
 @dataclass(frozen=True, slots=True)
 class DailyComparisonRequest:
     """A read-only selection of already completed fitted artifacts."""
@@ -127,6 +164,7 @@ class DailyComparisonRequest:
     source_generation: str
     declared_oracle_gaps: tuple[date, ...] = ()
     enforce_phase10_pilot: bool = False
+    enforce_phase11_production: bool = False
     tolerances: DailyLegacyComparisonTolerances = DailyLegacyComparisonTolerances()
 
     def __post_init__(self) -> None:
@@ -144,6 +182,10 @@ class DailyComparisonRequest:
             raise ValueError("declared_oracle_gaps contains duplicate dates")
         if not isinstance(self.enforce_phase10_pilot, bool):
             raise TypeError("enforce_phase10_pilot must be a boolean")
+        if not isinstance(self.enforce_phase11_production, bool):
+            raise TypeError("enforce_phase11_production must be a boolean")
+        if self.enforce_phase10_pilot and self.enforce_phase11_production:
+            raise ValueError("Phase 10 and Phase 11 comparison contracts are mutually exclusive")
 
 
 @version("1.0")
@@ -183,8 +225,12 @@ def repository_source_revision() -> str:
                     git_dir = linked
                     break
     if git_dir is None:
+        packaged = packaged_source_revision()
+        if packaged is not None:
+            return packaged
         raise ReferenceComparisonError(
-            "Comparison requires SANOS_SOURCE_REVISION or an identifiable Git checkout"
+            "Comparison requires packaged provenance, SANOS_SOURCE_REVISION, or an "
+            "identifiable Git checkout"
         )
     try:
         status = subprocess.run(
@@ -252,6 +298,97 @@ def load_reference_catalog(path: Path) -> dict[str, Any]:
             raise ReferenceComparisonError("Legacy catalog contains an invalid file identity")
         names.add(file_name)
     return cast(dict[str, Any], value)
+
+
+@version("1.0")
+def load_oracle_gap_declaration(
+    path: Path,
+    *,
+    ticker: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[date, ...]:
+    """Load a strict, catalog-bound declaration of expected missing oracle days."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ReferenceComparisonError(
+            f"Oracle-gap declaration is missing or unsafe: {path}"
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReferenceComparisonError(
+            f"Cannot decode oracle-gap declaration {path}: {exc}"
+        ) from exc
+    required = {
+        "schema",
+        "ticker",
+        "start_date",
+        "end_date",
+        "catalog_sha256",
+        "dates",
+    }
+    if not isinstance(document, dict) or set(document) != required:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration fields are missing or unexpected"
+        )
+    if document["schema"] != ORACLE_GAP_DECLARATION_SCHEMA:
+        raise ReferenceComparisonError("Oracle-gap declaration has an unsupported schema")
+    if document["catalog_sha256"] != PINNED_CATALOG_SHA256:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration does not bind the pinned legacy catalog"
+        )
+    declared_ticker = document["ticker"]
+    if (
+        not isinstance(declared_ticker, str)
+        or declared_ticker.strip().upper() != declared_ticker
+        or not declared_ticker
+    ):
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration ticker must be a non-empty canonical symbol"
+        )
+    if ticker is not None and declared_ticker != ticker.strip().upper():
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration ticker differs from the comparison request"
+        )
+    try:
+        start = date.fromisoformat(document["start_date"])
+        end = date.fromisoformat(document["end_date"])
+    except (TypeError, ValueError) as exc:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration coverage must use ISO dates"
+        ) from exc
+    if end < start:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration end_date cannot precede start_date"
+        )
+    if start_date is not None and start != start_date:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration start_date differs from the comparison request"
+        )
+    if end_date is not None and end != end_date:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration end_date differs from the comparison request"
+        )
+    values = document["dates"]
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise ReferenceComparisonError("Oracle-gap declaration dates must be a list of strings")
+    try:
+        parsed = tuple(date.fromisoformat(value) for value in values)
+    except ValueError as exc:
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration contains an invalid ISO date"
+        ) from exc
+    if parsed != tuple(sorted(set(parsed))):
+        raise ReferenceComparisonError(
+            "Oracle-gap declaration dates must be sorted and unique"
+        )
+    outside = [value.isoformat() for value in parsed if value < start or value > end]
+    if outside:
+        raise ReferenceComparisonError(
+            f"Oracle-gap declaration dates fall outside its coverage: {outside}"
+        )
+    return parsed
 
 
 @version("1.0")
@@ -491,7 +628,7 @@ def _fresh_groups(frame: pl.DataFrame) -> tuple[pl.DataFrame, list[pl.DataFrame]
 
 
 @version(
-    "1.0",
+    "1.1",
     dependencies=[
         DailyLegacyComparisonTolerances,
         ArbFreePricer,
@@ -1590,6 +1727,270 @@ def _validate_phase10_pilot_contract(
     }
 
 
+@version(
+    "1.0",
+    dependencies=[
+        DailyComparisonRequest,
+        DailySurfaceConfig,
+        DailyWidbConfig,
+        RawDownloadConfig,
+        canonical_sha256,
+        plan_raw_partitions,
+        raw_artifact_request,
+        raw_content_producer_version,
+    ],
+)
+def _validate_phase11_production_contract(
+    request: DailyComparisonRequest,
+    *,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig,
+    plans: Sequence[Any],
+    catalog_records: Mapping[str, Mapping[str, Any]],
+    require_pinned_catalog: bool,
+) -> dict[str, Any]:
+    """Validate the immutable full-range migration acceptance selection."""
+
+    if not require_pinned_catalog:
+        raise ReferenceComparisonError(
+            "The Phase 11 production comparison requires the pinned catalog"
+        )
+    failures: list[str] = []
+    observed_dates = tuple(item.trading_date.isoformat() for item in plans)
+    declared_gaps = tuple(
+        sorted(value.isoformat() for value in request.declared_oracle_gaps)
+    )
+    if request.ticker != "SPX":
+        failures.append(f"ticker={request.ticker!r}, expected 'SPX'")
+    if request.start_date != date(2022, 1, 3) or request.end_date != date(2025, 8, 29):
+        failures.append("date interval must be 2022-01-03 through 2025-08-29")
+    if request.source_generation != "default-v1":
+        failures.append("source_generation must equal 'default-v1'")
+    if len(observed_dates) != 918:
+        failures.append(f"planned sessions={len(observed_dates)}, expected 918")
+    if declared_gaps != PHASE11_PRODUCTION_ORACLE_GAPS:
+        failures.append(
+            "declared oracle gaps differ from the exact 26-date production contract"
+        )
+    computed_gaps = tuple(
+        day_key for day_key in observed_dates if day_key not in catalog_records
+    )
+    if computed_gaps != PHASE11_PRODUCTION_ORACLE_GAPS:
+        failures.append(
+            "planned-session/catalog complement differs from the frozen 26-date contract"
+        )
+    expected_daily = DailyWidbConfig()
+    expected_surface = DailySurfaceConfig()
+    if daily_config != expected_daily:
+        failures.append(
+            "daily configuration does not equal the frozen reference DailyWidbConfig"
+        )
+    if surface_config != expected_surface:
+        failures.append(
+            "surface configuration does not equal the frozen reference DailySurfaceConfig"
+        )
+
+    records = tuple(catalog_records.values())
+    populated = tuple(record for record in records if record.get("populated") is True)
+    empty = tuple(record for record in records if record.get("populated") is False)
+    if (
+        len(records) != 892
+        or len(populated) != 891
+        or len(empty) != 1
+        or catalog_records.get("2025-01-08") not in empty
+    ):
+        failures.append(
+            "pinned production catalog must contain 892 files: 891 populated and "
+            "the 2025-01-08 empty marker"
+        )
+    aggregate_fields = {
+        "num_expiries": 26_732,
+        "num_strike_nodes": 2_414_341,
+        "active_call_books": 2_325_708,
+        "active_put_books": 2_325_708,
+        "active_books": 4_651_416,
+        "active_point_two_day_books": 8_090,
+    }
+    observed_aggregates: dict[str, int] = {}
+    for field, expected in aggregate_fields.items():
+        value = sum(int(record.get(field, -10**9)) for record in populated)
+        observed_aggregates[field] = value
+        if value != expected:
+            failures.append(f"catalog {field}={value}, expected {expected}")
+
+    lineage_raw_pointers = {
+        pointer for item in plans for pointer in item.raw.all()
+    }
+    acquired_raw = plan_raw_partitions(
+        RawDownloadConfig(
+            ticker=request.ticker,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            source=request.source,
+            source_generation=request.source_generation,
+            max_connections=2,
+            retry_attempts=1,
+        )
+    )
+    boundary = tuple(item for item in acquired_raw if item.is_boundary_dependency)
+    raw_version = raw_content_producer_version()
+    acquired_by_pointer = {
+        raw_artifact_request(
+            partition,
+            source=request.source,
+            source_generation=request.source_generation,
+            producer_version=raw_version,
+        ).spec.pointer: partition
+        for partition in acquired_raw
+    }
+    acquired_pointers = set(acquired_by_pointer)
+    acquisition_only = acquired_pointers - lineage_raw_pointers
+    unexpected_lineage = lineage_raw_pointers - acquired_pointers
+    expected_acquisition_only = {
+        pointer
+        for pointer, partition in acquired_by_pointer.items()
+        if partition.observation_date == date(2021, 12, 31)
+        and partition.table in {RawTable.FORWARDS, RawTable.ZERO_CURVE}
+    }
+    boundary_spot = next(
+        (
+            pointer
+            for pointer, partition in acquired_by_pointer.items()
+            if partition.observation_date == date(2021, 12, 31)
+            and partition.table is RawTable.SPOT
+        ),
+        None,
+    )
+    if len(lineage_raw_pointers) != 3_674:
+        failures.append(
+            f"daily lineage Raw pointers={len(lineage_raw_pointers)}, expected 3674"
+        )
+    if len(acquired_raw) != 3_676 or len(boundary) != 3:
+        failures.append(
+            f"Raw acquisition plan={len(acquired_raw)} with {len(boundary)} boundary, "
+            "expected 3676 with 3 boundary"
+        )
+    if unexpected_lineage:
+        failures.append(
+            f"daily lineage contains {len(unexpected_lineage)} Raw pointers outside "
+            "the acquisition closure"
+        )
+    if acquisition_only != expected_acquisition_only:
+        failures.append(
+            "acquisition-only Raw pointers must be exactly the prior-session "
+            "forward and zero-curve partitions"
+        )
+    if boundary_spot is None or boundary_spot not in lineage_raw_pointers:
+        failures.append("daily lineage does not consume the prior-session spot partition")
+    if failures:
+        raise ReferenceComparisonError(
+            "Phase 11 production contract validation failed: " + "; ".join(failures)
+        )
+    if boundary_spot is None:  # pragma: no cover - retained for static narrowing
+        raise ReferenceComparisonError("Phase 11 boundary spot was not planned")
+    return {
+        "enabled": True,
+        "passed": True,
+        "planned_sessions": len(observed_dates),
+        "expected_oracle_gaps": PHASE11_PRODUCTION_ORACLE_GAPS,
+        "acquired_raw_artifacts": len(acquired_raw),
+        "boundary_raw_artifacts": len(boundary),
+        "daily_lineage_raw_artifacts": len(lineage_raw_pointers),
+        "acquisition_only_raw_artifacts": [
+            {
+                "table": acquired_by_pointer[pointer].table.value,
+                "observation_date": acquired_by_pointer[
+                    pointer
+                ].observation_date.isoformat(),
+                "artifact": pointer.as_dict(),
+            }
+            for pointer in sorted(acquisition_only)
+        ],
+        "consumed_boundary_raw_artifacts": [
+            {
+                "table": RawTable.SPOT.value,
+                "observation_date": "2021-12-31",
+                "artifact": boundary_spot.as_dict(),
+            }
+        ],
+        "catalog_files": len(records),
+        "catalog_populated_files": len(populated),
+        "catalog_empty_markers": len(empty),
+        "catalog_aggregates": observed_aggregates,
+        "daily_configuration_id": canonical_sha256(daily_config),
+        "surface_configuration_id": canonical_sha256(surface_config),
+    }
+
+
+@version("1.0")
+def _phase11_production_day_checks(
+    day_key: str,
+    *,
+    observations: Mapping[str, Any],
+    typed_empty_reason: str | None,
+    record: Mapping[str, Any] | None,
+    classification: DailyClassification,
+) -> list[dict[str, Any]]:
+    """Prove every full-range date has its one permitted terminal role."""
+
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, passed: bool, observed: Any, expected: Any) -> None:
+        checks.append(
+            {
+                "check": name,
+                "passed": passed,
+                "observed": observed,
+                "expected": expected,
+            }
+        )
+
+    populated = observations.get("populated")
+    if day_key == "2025-01-08":
+        add("policy_empty_frame", populated is False, populated, False)
+        add(
+            "policy_empty_reason",
+            typed_empty_reason == "known_bad_day_all_tickers",
+            typed_empty_reason,
+            "known_bad_day_all_tickers",
+        )
+        add(
+            "policy_empty_legacy_marker",
+            record is not None and record.get("populated") is False,
+            None if record is None else record.get("populated"),
+            False,
+        )
+        add(
+            "policy_empty_classification",
+            classification == "policy_empty",
+            classification,
+            "policy_empty",
+        )
+    elif record is None:
+        add("oracle_gap_fresh_frame", populated is True, populated, True)
+        add(
+            "oracle_gap_classification",
+            classification == "oracle_gap",
+            classification,
+            "oracle_gap",
+        )
+    else:
+        add("common_day_fresh_frame", populated is True, populated, True)
+        add(
+            "common_day_legacy_population",
+            record.get("populated") is True,
+            record.get("populated"),
+            True,
+        )
+        add(
+            "common_day_classification",
+            classification in {"match", "approved_discrepancy"},
+            classification,
+            "match or approved_discrepancy",
+        )
+    return checks
+
+
 @version("1.0")
 def load_comparison_approvals(path: Path | None) -> dict[str, dict[str, Any]]:
     """Load exact, evidence-bound discrepancy approvals."""
@@ -1670,7 +2071,7 @@ ProgressCallback = Callable[[Mapping[str, Any]], None]
 
 
 @version(
-    "1.0",
+    "1.1",
     dependencies=[
         DailyComparisonRequest,
         ArtifactStore,
@@ -1684,7 +2085,9 @@ ProgressCallback = Callable[[Mapping[str, Any]], None]
         _phase10_pilot_day_checks,
         _phase10_irregular_raw_evidence,
         _reference_sha256_file,
+        _phase11_production_day_checks,
         _validate_phase10_pilot_contract,
+        _validate_phase11_production_contract,
         canonical_sha256,
         canonical_value,
         compare_populated_day,
@@ -1728,6 +2131,16 @@ def compare_daily_artifacts(
             "Legacy catalog does not match the pinned 891-date migration oracle"
         )
     approvals = load_comparison_approvals(approvals_path)
+    approval_document = (
+        None
+        if approvals_path is None
+        else {
+            "path": str(approvals_path),
+            "sha256": _reference_sha256_file(approvals_path),
+            "schema": APPROVAL_SCHEMA,
+            "approval_count": len(approvals),
+        }
+    )
     catalog_records: dict[str, Mapping[str, Any]] = {}
     for record in catalog["files"]:
         if not isinstance(record, Mapping):
@@ -1773,6 +2186,18 @@ def compare_daily_artifacts(
             require_pinned_catalog=require_pinned_catalog,
         )
         if request.enforce_phase10_pilot
+        else {"enabled": False, "passed": True}
+    )
+    production_contract = (
+        _validate_phase11_production_contract(
+            request,
+            daily_config=daily_config,
+            surface_config=surface_config,
+            plans=plans,
+            catalog_records=catalog_records,
+            require_pinned_catalog=require_pinned_catalog,
+        )
+        if request.enforce_phase11_production
         else {"enabled": False, "passed": True}
     )
     store = ArtifactStore(locations)
@@ -1935,6 +2360,21 @@ def compare_daily_artifacts(
         )
         if any(not check["passed"] for check in pilot_checks):
             classification = "unexplained_discrepancy"
+        production_checks = (
+            _phase11_production_day_checks(
+                day_key,
+                observations=observations,
+                typed_empty_reason=(
+                    str(typed_empty_reason) if typed_empty_reason is not None else None
+                ),
+                record=record,
+                classification=classification,
+            )
+            if request.enforce_phase11_production
+            else []
+        )
+        if any(not check["passed"] for check in production_checks):
+            classification = "unexplained_discrepancy"
         days.append(
             cast(
                 dict[str, Any],
@@ -1955,6 +2395,7 @@ def compare_daily_artifacts(
                         "observations": observations,
                         "raw_case_evidence": raw_case_evidence,
                         "pilot_checks": pilot_checks,
+                        "production_checks": production_checks,
                         "legacy": (
                             None
                             if record is None
@@ -2011,6 +2452,36 @@ def compare_daily_artifacts(
         "daily_checks_passed": pilot_daily_checks_passed,
         "passed": bool(pilot_contract["passed"] and pilot_daily_checks_passed),
     }
+    production_daily_checks_passed = all(
+        check["passed"] for day in days for check in day["production_checks"]
+    )
+    production_terminal_counts_passed = (
+        len(days) == 918
+        and counts.get("oracle_gap", 0) == 26
+        and counts.get("policy_empty", 0) == 1
+        and counts.get("match", 0) + counts.get("approved_discrepancy", 0) == 891
+        and counts.get("unexplained_discrepancy", 0) == 0
+    )
+    production_contract = {
+        **production_contract,
+        "daily_checks_passed": production_daily_checks_passed,
+        "terminal_counts_passed": (
+            production_terminal_counts_passed
+            if request.enforce_phase11_production
+            else True
+        ),
+        "passed": bool(
+            production_contract["passed"]
+            and production_daily_checks_passed
+            and (
+                production_terminal_counts_passed
+                if request.enforce_phase11_production
+                else True
+            )
+        ),
+    }
+    if request.enforce_phase11_production and not production_contract["passed"]:
+        outcome = "blocked"
     report_without_id = cast(
         dict[str, Any],
         canonical_value(
@@ -2026,6 +2497,7 @@ def compare_daily_artifacts(
                     "source_generation": request.source_generation,
                     "declared_oracle_gaps": request.declared_oracle_gaps,
                     "enforce_phase10_pilot": request.enforce_phase10_pilot,
+                    "enforce_phase11_production": request.enforce_phase11_production,
                 },
                 "resolved_versions": {
                     "comparison": str(compare_daily_artifacts.version),
@@ -2047,7 +2519,9 @@ def compare_daily_artifacts(
                     "selected_files": selected_legacy_files,
                 },
                 "classification_counts": counts,
+                "approval_document": approval_document,
                 "pilot_contract": pilot_contract,
+                "production_contract": production_contract,
                 "dates": days,
                 "network_accessed": False,
                 "artifacts_built": False,
@@ -2108,6 +2582,7 @@ __all__ = [
     "APPROVAL_SCHEMA",
     "DailyComparisonRequest",
     "DailyLegacyComparisonTolerances",
+    "ORACLE_GAP_DECLARATION_SCHEMA",
     "PINNED_CATALOG_SHA256",
     "PINNED_COLLECTION_SHA256",
     "REFERENCE_REPORT_SCHEMA",
@@ -2115,6 +2590,7 @@ __all__ = [
     "compare_daily_artifacts",
     "compare_populated_day",
     "load_comparison_approvals",
+    "load_oracle_gap_declaration",
     "load_reference_catalog",
     "repository_source_revision",
     "write_comparison_report",

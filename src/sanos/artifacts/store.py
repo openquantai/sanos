@@ -571,6 +571,49 @@ def atomic_write_json(path: Path, value: Any) -> None:
     atomic_write_bytes(path, (canonical_json(value) + "\n").encode("utf-8"))
 
 
+@version(
+    "1.0",
+    dependencies=[
+        _lexical_absolute,
+        _assert_no_symlink_components,
+        _ensure_directory_no_symlinks,
+        _fsync_directory,
+    ],
+)
+def atomic_create_bytes(path: Path, data: bytes) -> None:
+    """Durably create one immutable file without replacing an existing leaf."""
+
+    destination = _lexical_absolute(path)
+    _ensure_directory_no_symlinks(destination.parent)
+    _assert_no_symlink_components(destination)
+    temporary = destination.parent / f".{destination.name}.tmp-{uuid.uuid4().hex}"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _assert_no_symlink_components(destination)
+        # A same-filesystem hard link is an atomic create-if-absent operation.
+        # It cannot replace a regular file or a symlink installed by a racer.
+        os.link(temporary, destination, follow_symlinks=False)
+        _fsync_directory(destination.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+@version("1.0", dependencies=[atomic_create_bytes, canonical_json])
+def atomic_create_json(path: Path, value: Any) -> None:
+    """Durably create canonical JSON, failing if the destination exists."""
+
+    atomic_create_bytes(path, (canonical_json(value) + "\n").encode("utf-8"))
+
+
 @version("1.0")
 def _copy_stream(source: BinaryIO, destination: BinaryIO) -> None:
     for chunk in iter(lambda: source.read(1024 * 1024), b""):

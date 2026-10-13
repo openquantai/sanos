@@ -223,7 +223,8 @@ scan for credential-related labels:
 ```bash
 rg -n -i 'password|passwd|one[-_ ]time|otp|credential|wrds[_-]?username|dsn=' \
   "$PILOT_EVIDENCE"
-sha256sum "$PILOT_EVIDENCE"/* > "$PILOT_EVIDENCE/checksums.sha256"
+find "$PILOT_EVIDENCE" -type f ! -name checksums.sha256 -print0 \
+  | sort -z | xargs -0 sha256sum > "$PILOT_EVIDENCE/checksums.sha256"
 gpuctl resources --json | tee "$PILOT_EVIDENCE/resources-after.json"
 ```
 

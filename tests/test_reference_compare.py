@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -27,11 +28,24 @@ from sanos.reference import (
     compare_daily_artifacts,
     compare_populated_day,
     load_comparison_approvals,
+    load_oracle_gap_declaration,
+    load_reference_catalog,
     write_comparison_report,
 )
 from sanos.widb import DailySurfaceConfig, DailyWidbConfig, smooth_sanos_pricer
-from sanos.widb.build import IntermediateBuildRequest, build_intermediates, read_daily_frame
+from sanos.widb.build import (
+    IntermediateBuildRequest,
+    build_intermediates,
+    plan_daily_artifacts,
+    read_daily_frame,
+)
 from sanos.widb.surface import FITTED_SCHEMA, selected_reference_view
+from sanos.wrds import (
+    RawPartition,
+    RawTable,
+    raw_artifact_request,
+    raw_content_producer_version,
+)
 from tests.test_reference_legacy_market import _write_legacy
 from tests.test_widb_build import _locations, _publish_raw_inputs
 
@@ -945,6 +959,165 @@ def test_phase10_contract_pins_dates_configuration_and_catalog() -> None:
         )
 
 
+def test_phase11_contract_pins_full_range_raw_lineage_and_oracle() -> None:
+    root = Path(__file__).resolve().parents[1]
+    compare_module = importlib.import_module("sanos.reference.compare")
+    daily = DailyWidbConfig()
+    surface = DailySurfaceConfig()
+    gaps = load_oracle_gap_declaration(
+        root / "configs" / "spx-2022-2025-oracle-gaps.json",
+        ticker="SPX",
+        start_date=date(2022, 1, 3),
+        end_date=date(2025, 8, 29),
+    )
+    request = DailyComparisonRequest(
+        ticker="SPX",
+        start_date=date(2022, 1, 3),
+        end_date=date(2025, 8, 29),
+        source="optionmetrics",
+        source_generation="default-v1",
+        declared_oracle_gaps=gaps,
+        enforce_phase11_production=True,
+    )
+    plans = plan_daily_artifacts(
+        IntermediateBuildRequest(
+            ticker=request.ticker,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            through="fitted-day",
+            include_half_days=True,
+            source=request.source,
+            source_generation=request.source_generation,
+        ),
+        daily,
+        surface,
+    )
+    catalog = load_reference_catalog(
+        root / "reviews" / "phase-1" / "reference-market-catalog.json"
+    )
+    records = {
+        str(record["trading_date"]): record
+        for record in cast(list[dict[str, object]], catalog["files"])
+    }
+
+    contract = compare_module._validate_phase11_production_contract(
+        request,
+        daily_config=daily,
+        surface_config=surface,
+        plans=plans,
+        catalog_records=records,
+        require_pinned_catalog=True,
+    )
+
+    assert contract["planned_sessions"] == 918
+    assert contract["acquired_raw_artifacts"] == 3676
+    assert contract["boundary_raw_artifacts"] == 3
+    assert contract["daily_lineage_raw_artifacts"] == 3674
+    assert {
+        (record["table"], record["observation_date"])
+        for record in contract["acquisition_only_raw_artifacts"]
+    } == {
+        ("forwards", "2021-12-31"),
+        ("zero_curve", "2021-12-31"),
+    }
+    assert [
+        (record["table"], record["observation_date"])
+        for record in contract["consumed_boundary_raw_artifacts"]
+    ] == [("spot", "2021-12-31")]
+    assert contract["catalog_files"] == 892
+    assert contract["catalog_populated_files"] == 891
+    assert contract["catalog_empty_markers"] == 1
+    assert contract["catalog_aggregates"]["active_books"] == 4_651_416
+
+    with pytest.raises(ReferenceComparisonError, match="source_generation"):
+        compare_module._validate_phase11_production_contract(
+            replace(request, source_generation="changed-v1"),
+            daily_config=daily,
+            surface_config=surface,
+            plans=plans,
+            catalog_records=records,
+            require_pinned_catalog=True,
+        )
+    with pytest.raises(ReferenceComparisonError, match="26-date"):
+        compare_module._validate_phase11_production_contract(
+            replace(request, declared_oracle_gaps=gaps[:-1]),
+            daily_config=daily,
+            surface_config=surface,
+            plans=plans,
+            catalog_records=records,
+            require_pinned_catalog=True,
+        )
+
+    boundary_forward = raw_artifact_request(
+        RawPartition(RawTable.FORWARDS, "SPX", date(2021, 12, 31)),
+        source=request.source,
+        source_generation=request.source_generation,
+        producer_version=raw_content_producer_version(),
+    ).spec.pointer
+    wrong_first = replace(
+        plans[0],
+        raw=replace(plans[0].raw, previous_spot=boundary_forward),
+    )
+    with pytest.raises(ReferenceComparisonError, match="acquisition-only|spot partition"):
+        compare_module._validate_phase11_production_contract(
+            request,
+            daily_config=daily,
+            surface_config=surface,
+            plans=(wrong_first, *plans[1:]),
+            catalog_records=records,
+            require_pinned_catalog=True,
+        )
+
+    empty_record = records["2025-01-08"]
+    empty_checks = compare_module._phase11_production_day_checks(
+        "2025-01-08",
+        observations={"populated": False},
+        typed_empty_reason="known_bad_day_all_tickers",
+        record=empty_record,
+        classification="policy_empty",
+    )
+    assert all(check["passed"] for check in empty_checks)
+    stale_reason = compare_module._phase11_production_day_checks(
+        "2025-01-08",
+        observations={"populated": False},
+        typed_empty_reason="different_reason",
+        record=empty_record,
+        classification="policy_empty",
+    )
+    assert [check["check"] for check in stale_reason if not check["passed"]] == [
+        "policy_empty_reason"
+    ]
+    gap_checks = compare_module._phase11_production_day_checks(
+        gaps[0].isoformat(),
+        observations={"populated": True},
+        typed_empty_reason=None,
+        record=None,
+        classification="oracle_gap",
+    )
+    assert all(check["passed"] for check in gap_checks)
+    converted_gap = compare_module._phase11_production_day_checks(
+        gaps[0].isoformat(),
+        observations={"populated": True},
+        typed_empty_reason=None,
+        record=None,
+        classification="approved_discrepancy",
+    )
+    assert not all(check["passed"] for check in converted_gap)
+
+
+def test_comparison_contract_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        DailyComparisonRequest(
+            ticker="SPX",
+            start_date=date(2024, 12, 23),
+            end_date=date(2025, 1, 16),
+            source="optionmetrics",
+            source_generation="default-v1",
+            enforce_phase10_pilot=True,
+            enforce_phase11_production=True,
+        )
+
+
 def test_comparison_rejects_invalid_source_revision_before_io(tmp_path: Path) -> None:
     with pytest.raises(ReferenceComparisonError, match="source_revision"):
         compare_daily_artifacts(
@@ -988,7 +1161,77 @@ def test_comparison_version_resolves_in_clean_process() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.startswith("1.0 {")
+    assert completed.stdout.startswith("1.1 {")
+
+
+def test_checked_oracle_gap_declaration_is_exact_catalog_complement() -> None:
+    root = Path(__file__).resolve().parents[1]
+    declaration_path = root / "configs" / "spx-2022-2025-oracle-gaps.json"
+    catalog = load_reference_catalog(
+        root / "reviews" / "phase-1" / "reference-market-catalog.json"
+    )
+    gaps = load_oracle_gap_declaration(
+        declaration_path,
+        ticker="SPX",
+        start_date=date(2022, 1, 3),
+        end_date=date(2025, 8, 29),
+    )
+    plans = plan_daily_artifacts(
+        IntermediateBuildRequest(
+            ticker="SPX",
+            start_date=date(2022, 1, 3),
+            end_date=date(2025, 8, 29),
+            through="fitted-day",
+            include_half_days=True,
+            source="optionmetrics",
+            source_generation="default-v1",
+        ),
+        DailyWidbConfig(),
+        DailySurfaceConfig(),
+    )
+    planned = {item.trading_date for item in plans}
+    catalog_dates = {
+        date.fromisoformat(cast(dict[str, object], record)["trading_date"])
+        for record in cast(list[dict[str, object]], catalog["files"])
+    }
+
+    assert len(gaps) == 26
+    assert set(gaps) == planned - catalog_dates
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("ticker", "NDX", "ticker differs"),
+        ("start_date", "2022-01-04", "start_date differs"),
+        ("end_date", "2025-08-28", "end_date differs"),
+        ("catalog_sha256", "0" * 64, "pinned legacy catalog"),
+        ("dates", ["2024-12-24", "2024-01-03"], "sorted and unique"),
+    ],
+)
+def test_oracle_gap_declaration_rejects_identity_drift(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+    message: str,
+) -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "spx-2022-2025-oracle-gaps.json"
+    )
+    document = json.loads(source.read_text(encoding="utf-8"))
+    document[field] = replacement
+    changed = tmp_path / "gaps.json"
+    changed.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ReferenceComparisonError, match=message):
+        load_oracle_gap_declaration(
+            changed,
+            ticker="SPX",
+            start_date=date(2022, 1, 3),
+            end_date=date(2025, 8, 29),
+        )
 
 
 def test_report_write_is_atomic_immutable_and_outside_oracle(tmp_path: Path) -> None:

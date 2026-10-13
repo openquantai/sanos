@@ -36,6 +36,7 @@ from sanos.config import StorageLocations, canonical_json, canonical_sha256, can
 from sanos.datasets.config import DatasetBuildOptions, InternalDatasetConfig
 from sanos.model.tools import SanosPricer
 from sanos.pipeline import DailyRunSummary, RunJournal
+from sanos.resources import packaged_source_revision
 from sanos.widb.bad import bad_data_policy, bad_day_reason
 from sanos.widb.build import (
     DailyArtifactPlan,
@@ -2167,8 +2168,12 @@ def _source_revision() -> str:
     if not git_dir.exists():
         git_dir = root / ".git-real"
     if not git_dir.exists():
+        packaged = packaged_source_revision()
+        if packaged is not None:
+            return packaged
         raise RuntimeError(
-            "Dataset publication requires SANOS_SOURCE_REVISION or an identifiable Git checkout"
+            "Dataset publication requires packaged provenance, SANOS_SOURCE_REVISION, "
+            "or an identifiable Git checkout"
         )
     try:
         status = subprocess.run(

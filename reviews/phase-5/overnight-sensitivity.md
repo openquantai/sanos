@@ -21,12 +21,19 @@ identities; it does not change PM clock values.
 
 For a constant `0.4` variance curve, the forward total variance from AM to PM
 is `0.4² × (1-fraction) / 252`: respectively `0.0005714286`, `0.0005079365`,
-and `0.0003174603`. Phase 5 supplies these time inputs but does not yet execute
-calendar no-arbitrage fitting, the full DLV transition, or experiment horizon
-masks. Those population effects must be measured against the authoritative
-891-date dataset in Phases 6 and 9; this report deliberately does not claim
-results from stages that are not implemented.
+and `0.0003174603`.
 
-Offline tests pin the exact AM shift, PM invariance, NMS response, fraction
-endpoints, configuration identity, and the historical Saturday-AM zero-DTE
-exception.
+The completed offline pipeline now also runs the `0.1`, `0.2`, and `0.5` cases
+through initial no-arbitrage fitting, compatibility DLV, smooth SANOS,
+daily-front Experiment projection, HDF5 write, and semantic HDF5 validation.
+The first AM expiry reaches the Experiment as `10.1`, `10.2`, and `10.5`
+business days respectively, while the following PM expiry remains exactly
+`31.0`; the compatibility-DLV vectors are not identical across the three clock
+inputs. With an intentionally short `10.25`-business-day Experiment horizon,
+the `0.1` and `0.2` cases retain the AM expiry and the `0.5` case is rejected as
+out of horizon. This is a synthetic sensitivity check, not a claim about how
+many dates or books change in the fresh production Dataset.
+
+Offline tests pin the exact AM shift, PM invariance, NMS response, DLV response,
+Experiment horizon response, HDF5 round trip, fraction endpoints,
+configuration identity, and the historical Saturday-AM zero-DTE exception.

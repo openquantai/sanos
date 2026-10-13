@@ -4,6 +4,22 @@ This matrix is based on immutable source revision
 `de15be96d2f283b6c31e60d3ea47325a0c093ff0`.  The exact 55-path snapshot is
 under `reference/quant_data/`; it is not importable by the installed package.
 
+## Current migration status
+
+Phases 0--9 and the Phase 10 offline prerequisites are implemented and
+independently reviewed. The Phase 11 full-range daily comparator, daily-front
+Experiment comparator, immutable canonical-reference designation, frozen
+production configuration/evidence contract, and Phase 12 packaging/operator
+checks are implemented offline. The current authoritative completion reviews
+are under `reviews/program/`; earlier design blockers in phase reviews are
+historical unless they are also listed in the compatibility decision register.
+
+No live WRDS pilot or fresh 2022--2025 production build has run. Those remain
+gated by immediate owner-present 2FA readiness, the account-concurrency check,
+and a daemon-backed all-OK resource result. The separately identified
+Direct-200 neural training producer remains deferred experiment work; it is not
+part of the daily-front HDF5 parity gate and does not define the SANOS Dataset.
+
 Actions mean:
 
 - **copy/adapt**: begin with the proven implementation, move it into `sanos`,
@@ -79,8 +95,8 @@ hash.
 | `quantdata/utils/pd.py` | replace | Polars schemas and validation; retain observable schema rules |
 | `quantdata/jax/__init__.py` | replace | lazy optional JAX imports under the `jax` extra |
 | `quantdata/jax/bbjax.py` | copy/adapt | JAX backbone helpers used by retained numerical path |
-| `quantdata/torch/__init__.py` | defer experiment | lazy Torch environment/model helpers, never a dataset dependency |
-| `quantdata/torch/ffw.py` | defer experiment | optional neural experiment configuration |
+| `quantdata/torch/__init__.py` | pinned reference consumer | exact CPU materialization for 891-day legacy Experiment parity; never a Dataset dependency |
+| `quantdata/torch/ffw.py` | pinned reference consumer | transitive legacy import hashed for exact Experiment parity; new neural training remains deferred |
 | `quantdata/sanos/__init__.py` | copy/adapt | public numerical API and density-floor compatibility constant |
 | `quantdata/sanos/tridiag.py` | copy/adapt | SANOS tridiagonal solve with NumPy/JAX parity tests |
 | `quantdata/sanos/sanos_tools.py` | copy/adapt | `SanosPricer`, `SanosLPSolver`, DLV/density transforms, density repair, market-fit diagnostics |
@@ -189,7 +205,8 @@ contract.
 | JAX | optional `jax` extra for retained differentiable fitter |
 | h5py | reference reader and disposable experiment HDF5 extras only |
 | filelock | Phase 2 runner/atomic artifact coordination |
-| Torch/Flax/Optax | not dataset dependencies; add only for a named experiment implementation |
+| Torch | optional `reference`/aggregate `operator` dependency for the pinned CPU legacy Experiment consumer; never a Dataset dependency |
+| Flax/Optax | deferred until a named neural experiment implementation requires them |
 | Click | stable human-operable CLI |
 | FRED, Yahoo Finance, Massive | excluded from the core WIDB stream; Yahoo may be a separate consumer-side spot adapter |
 

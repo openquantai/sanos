@@ -12,7 +12,9 @@ dataset will be the canonical reference dataset.
 
 ## Current status
 
-Phases 0 through 9 are complete with code and quantitative review. The daily
+Phases 0 through 9 are complete with code and quantitative review. Phase 10's
+offline safety prerequisites and Phase 11's frozen offline production tooling
+are implemented; the owner-present live pilot is still pending. The daily
 no-arbitrage, filtering, compatibility-DLV and smooth-SANOS stages are available
 through the CLI, together with output-first internal Dataset build and
 validation commands. CD-020's all-valid-day failure is preserved for parity;
@@ -24,14 +26,16 @@ numerical baseline are catalogued. A technically validated projection remains
 [the legacy baseline](docs/reference-baseline.md) for the 891-date parity oracle
 and the distinction between its legacy artifact populations. Follow the
 [guarded Phase 10 WRDS pilot](docs/phase-10-pilot.md) before any full-range
-extraction.
+extraction, then use the [fresh production runbook](docs/production-runbook.md).
+The [human operator guide](docs/operator-guide.md) covers installation, exit
+codes, troubleshooting, restart, and retention without requiring an AI agent.
 
 ## Development installation
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,operator]'
 sanos --help
 python -m sanos doctor
 pytest
@@ -58,7 +62,9 @@ The CLI resolves the four storage roots in this order: explicit CLI option,
 specific `QUANT_DATA_*` environment variable, ignored repository-local config,
 user config under `~/.config/quant_data/`, then a documented `QUANT_DATA_ROOT`
 default. The four classes are raw, intermediate, dataset, and experiment. Run
-`sanos config show` to inspect the result without creating directories. See
+`sanos config show` to inspect the result without creating directories, and
+`sanos config resources` to locate packaged reference assets and source
+provenance. See
 [configuration](docs/configuration.md) and [artifact storage](docs/artifacts.md)
 for the contracts implemented in Phase 2, and
 [model numerics](docs/model-numerics.md) for the reviewed Phase 3 equations,
@@ -95,8 +101,9 @@ sanos --root /path/to/quant-data intermediate build \
 ```
 
 Use the global `--dry-run` before material work and `--log-format json` for
-automation. The default includes half days, matching the recovered general
-pipeline; the 891-date legacy-parity run explicitly excludes them.
+automation. The reference production profile includes half days; the legacy
+oracle has 891 populated common dates plus 26 declared populated-date gaps and
+one policy-empty day within the 918-session fresh schedule.
 Each artifact contains `data.parquet`, `config.json`, a small `README.md`, and
 the checksummed manifest/completion records. Re-running is output-first and
 shallow: a valid terminal artifact is reused without requiring Raw ancestors.
@@ -202,3 +209,12 @@ Completed Experiments are output-first and self-contained, so shallow reuse and
 validation do not require the source Dataset. See the
 [Experiment runbook](docs/experiments.md) for recovery, wildcard reuse, schema,
 and legacy-parity details.
+
+## Canonical reference designation
+
+After the complete fresh Dataset and Experiment pass the full-range daily and
+consumer comparisons, independent code and quantitative reviews are bound into
+an immutable designation with `sanos dataset reference`. The designation is
+self-contained, shallow-validatable without lineage, and does not alter the
+internal Dataset or grant redistribution rights. The exact operator sequence is
+in the [fresh production runbook](docs/production-runbook.md).

@@ -21,6 +21,7 @@ from sanos.artifacts import (
     DistributionStatus,
     StorageClass,
     WildcardReuseMissError,
+    atomic_create_json,
     atomic_write_bytes,
 )
 from sanos.config import StorageLocations
@@ -276,6 +277,68 @@ def test_concurrent_publishers_can_create_shared_namespace_parents(tmp_path: Pat
 
     assert all(path.is_dir() for path in paths)
     assert len(set(paths)) == len(specs)
+
+
+def test_atomic_create_json_is_no_replace_under_concurrency(tmp_path: Path) -> None:
+    destination = tmp_path / "nested" / "immutable.json"
+
+    def create(value: int) -> tuple[int, bool]:
+        try:
+            atomic_create_json(destination, {"value": value})
+        except FileExistsError:
+            return value, False
+        return value, True
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = tuple(pool.map(create, range(8)))
+
+    winners = [value for value, created in outcomes if created]
+    assert len(winners) == 1
+    assert json.loads(destination.read_text(encoding="utf-8")) == {
+        "value": winners[0]
+    }
+    assert not list(destination.parent.glob(".immutable.json.tmp-*"))
+
+
+def test_atomic_create_json_rejects_symlinked_leaf_and_parent(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text("do not replace", encoding="utf-8")
+    leaf = tmp_path / "leaf.json"
+    leaf.symlink_to(target)
+    with pytest.raises((ArtifactIntegrityError, FileExistsError)):
+        atomic_create_json(leaf, {"unsafe": True})
+    assert target.read_text(encoding="utf-8") == "do not replace"
+
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(ArtifactIntegrityError, match="symlink"):
+        atomic_create_json(linked_parent / "value.json", {"unsafe": True})
+    assert not (real_parent / "value.json").exists()
+
+
+def test_atomic_create_json_cleans_up_setup_and_commit_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocked_parent = tmp_path / "blocked"
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(ArtifactIntegrityError, match="unsafe"):
+        atomic_create_json(blocked_parent / "value.json", {"value": 1})
+
+    import sanos.artifacts.store as store_module
+
+    destination = tmp_path / "commit" / "value.json"
+
+    def fail_link(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected atomic-link failure")
+
+    monkeypatch.setattr(store_module.os, "link", fail_link)
+    with pytest.raises(OSError, match="injected atomic-link failure"):
+        atomic_create_json(destination, {"value": 2})
+    assert not destination.exists()
+    assert not list(destination.parent.glob(".value.json.tmp-*"))
 
 
 def test_dataset_distribution_is_mandatory_immutable_and_public_is_approved(

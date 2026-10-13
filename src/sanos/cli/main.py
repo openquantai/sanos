@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import click
 
@@ -23,7 +23,7 @@ from sanos.artifacts import (
     ArtifactPointer,
     ArtifactStore,
     StorageClass,
-    atomic_write_json,
+    atomic_create_json,
 )
 from sanos.config import (
     LocationConfigurationError,
@@ -49,6 +49,16 @@ from sanos.datasets import (
     validate_internal_dataset,
     validate_public_dataset,
 )
+from sanos.datasets.promotion import (
+    PROMOTION_CONFIG_SCHEMA,
+    CanonicalReferencePromotionConfig,
+    create_promotion_config,
+    create_review_attestation,
+    plan_reference_promotion,
+    promote_reference_dataset,
+    validate_reference_evidence_binding,
+    validate_reference_promotion,
+)
 from sanos.datasets.public import (
     open_public_dataset,
     public_candidate_label,
@@ -62,13 +72,27 @@ from sanos.experiments import (
     validate_experiment,
 )
 from sanos.pipeline import DailyExecutionError
+from sanos.production import (
+    Phase11EvidenceError,
+    attach_phase11_artifact_binding,
+    build_phase11_evidence_index,
+    finalize_phase11_downstream_configs,
+    validate_phase11_public_candidate_binding,
+    write_phase11_downstream_configs,
+    write_phase11_evidence_index,
+)
 from sanos.reference import (
     DailyComparisonRequest,
+    ExperimentComparisonRequest,
     ReferenceComparisonError,
     compare_daily_artifacts,
+    compare_experiment_artifact,
+    load_oracle_gap_declaration,
     repository_source_revision,
     write_comparison_report,
+    write_experiment_comparison_report,
 )
+from sanos.resources import reference_catalog_path, runtime_resource_inventory
 from sanos.widb.build import IntermediateBuildRequest, build_intermediates
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.wrds import (
@@ -272,6 +296,25 @@ def _read_experiment_config(path: Path) -> ExperimentConfig:
     return ExperimentConfig.from_document(document)
 
 
+def _read_reference_promotion_config(
+    path: Path,
+) -> CanonicalReferencePromotionConfig:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read reference promotion configuration {path}: {exc}") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "promotion"}
+        or document.get("schema") != PROMOTION_CONFIG_SCHEMA
+        or not isinstance(document.get("promotion"), dict)
+    ):
+        raise ValueError(
+            "Reference promotion configuration must contain exact schema and promotion fields"
+        )
+    return CanonicalReferencePromotionConfig.from_document(document["promotion"])
+
+
 def _read_widb_config(path: Path) -> tuple[DailyWidbConfig, DailySurfaceConfig]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -425,19 +468,23 @@ def status(context: CliContext) -> None:
     _emit(
         context,
         "status",
-        phase="internal-experiment-materialization",
+        phase="offline-production-readiness",
         pipeline_available=True,
         material_pipeline_available=True,
         raw_download_available=True,
         intermediate_build_available=True,
         dataset_build_available=True,
         dataset_validate_available=True,
+        canonical_reference_promotion_available=True,
         public_candidate_build_available=True,
         public_candidate_validate_available=True,
         public_release_approval_available=True,
         experiment_build_available=True,
         experiment_validate_available=True,
         reference_compare_daily_available=True,
+        reference_compare_experiment_available=True,
+        phase11_config_finalization_available=True,
+        phase11_evidence_index_available=True,
         live_wrds_verified=False,
         network_accessed=False,
         dry_run=context.dry_run,
@@ -474,6 +521,234 @@ def config_show(context: CliContext, require_complete: bool) -> None:
         filesystem_modified=False,
         dry_run=context.dry_run,
         verbosity=context.verbose,
+    )
+
+
+@config_group.command(name="resources")
+@click.pass_obj
+def config_resources(context: CliContext) -> None:
+    """Show packaged operator resources and exact distribution provenance."""
+
+    _emit(
+        context,
+        "config_resources",
+        resources=runtime_resource_inventory(),
+        network_accessed=False,
+        filesystem_modified=False,
+        dry_run=context.dry_run,
+    )
+
+
+@main.group()
+def production() -> None:
+    """Finalize and validate the frozen Phase 11 production evidence."""
+
+
+@production.command("finalize-configs")
+@click.option("--dataset-name", required=True, help="Exact internal Dataset name.")
+@click.option(
+    "--dataset-artifact-id",
+    required=True,
+    help="Exact 64-hex internal Dataset artifact identity.",
+)
+@click.option(
+    "--public-template",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Portable public-candidate template to bind.",
+)
+@click.option(
+    "--experiment-template",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Portable Experiment template to bind.",
+)
+@click.option(
+    "--output-directory",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="New evidence directory receiving final configs and bundle.json.",
+)
+@click.pass_obj
+def production_finalize_configs(
+    context: CliContext,
+    dataset_name: str,
+    dataset_artifact_id: str,
+    public_template: Path,
+    experiment_template: Path,
+    output_directory: Path,
+) -> None:
+    """Bind downstream configurations to one exact published internal Dataset."""
+
+    try:
+        dataset_pointer = ArtifactPointer(
+            StorageClass.DATASET,
+            f"widb/internal/name-{dataset_name}",
+            dataset_artifact_id,
+        )
+        ArtifactStore(context.locations.require_complete()).validate(dataset_pointer)
+        public_document = json.loads(public_template.read_text(encoding="utf-8"))
+        experiment_document = json.loads(experiment_template.read_text(encoding="utf-8"))
+        if not isinstance(public_document, Mapping) or not isinstance(
+            experiment_document, Mapping
+        ):
+            raise ValueError("Downstream templates must be JSON objects")
+        bundle = finalize_phase11_downstream_configs(
+            dataset_pointer,
+            public_template=public_document,
+            experiment_template=experiment_document,
+        )
+        if not context.dry_run:
+            write_phase11_downstream_configs(output_directory, bundle)
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, Phase11EvidenceError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "phase11_configs_finalized",
+        status="passed",
+        bundle_id=bundle["bundle_id"],
+        source_dataset=dataset_pointer,
+        public_configuration_id=bundle["public_candidate"]["configuration_id"],
+        experiment_configuration_id=bundle["experiment"]["configuration_id"],
+        output_directory=None if context.dry_run else output_directory,
+        dry_run=context.dry_run,
+        network_accessed=False,
+        filesystem_modified=not context.dry_run,
+    )
+
+
+@production.command("evidence-index")
+@click.option("--run-id", required=True, help="Immutable portable production run label.")
+@click.option(
+    "--source-revision",
+    help="Exact 40-hex revision; defaults to packaged or clean-checkout provenance.",
+)
+@click.option(
+    "--raw-preflight",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--raw-validation",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--dataset-validation",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--daily-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--downstream-bundle",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--public-validation",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--experiment-validation",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--experiment-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Immutable evidence index; identical existing output is reused.",
+)
+@click.pass_obj
+def production_evidence_index(
+    context: CliContext,
+    run_id: str,
+    source_revision: str | None,
+    raw_preflight: Path,
+    raw_validation: Path,
+    dataset_validation: Path,
+    daily_report: Path,
+    downstream_bundle: Path,
+    public_validation: Path,
+    experiment_validation: Path,
+    experiment_report: Path,
+    output: Path,
+) -> None:
+    """Machine-check and checksum the complete pre-review production evidence."""
+
+    try:
+        locations = context.locations.require_complete()
+        resolved_revision = source_revision or repository_source_revision()
+        index = build_phase11_evidence_index(
+            run_id=run_id,
+            source_revision=resolved_revision,
+            raw_preflight_path=raw_preflight,
+            raw_validation_path=raw_validation,
+            dataset_validation_path=dataset_validation,
+            daily_report_path=daily_report,
+            downstream_bundle_path=downstream_bundle,
+            public_validation_path=public_validation,
+            experiment_validation_path=experiment_validation,
+            experiment_report_path=experiment_report,
+        )
+        artifacts = cast(Mapping[str, Any], index["artifacts"])
+        internal = artifacts["internal_dataset"]
+        dataset_pointer = ArtifactPointer(
+            StorageClass.DATASET,
+            str(internal["namespace"]),
+            str(internal["artifact_id"]),
+        )
+        public = cast(Mapping[str, Any], artifacts["public_candidate"])
+        public_pointer = ArtifactPointer(
+            StorageClass.DATASET,
+            str(public["namespace"]),
+            str(public["artifact_id"]),
+        )
+        store = ArtifactStore(locations)
+        public_artifact = store.validate(public_pointer)
+        public_binding = validate_phase11_public_candidate_binding(
+            index,
+            public_candidate=public_pointer,
+            manifest_sha256=hashlib.sha256(
+                (public_artifact.path / MANIFEST_NAME).read_bytes()
+            ).hexdigest(),
+        )
+        binding = validate_reference_evidence_binding(
+            store,
+            dataset=dataset_pointer,
+            daily_report_path=daily_report,
+            experiment_report_path=experiment_report,
+        )
+        binding = {**binding, "public_candidate_binding": public_binding}
+        index = attach_phase11_artifact_binding(index, binding)
+        created = False if context.dry_run else write_phase11_evidence_index(output, index)
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (OSError, Phase11EvidenceError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "phase11_evidence_index_result",
+        status="passed",
+        evidence_id=index["evidence_id"],
+        output=None if context.dry_run else output,
+        created=created,
+        reused=not context.dry_run and not created,
+        dry_run=context.dry_run,
+        network_accessed=False,
+        filesystem_modified=created,
     )
 
 
@@ -514,11 +789,8 @@ def reference() -> None:
 @click.option(
     "--legacy-catalog",
     type=click.Path(path_type=Path, dir_okay=False, exists=True),
-    default=lambda: Path(__file__).resolve().parents[3]
-    / "reviews"
-    / "phase-1"
-    / "reference-market-catalog.json",
-    show_default="checked-in Phase 1 catalog",
+    default=reference_catalog_path,
+    show_default="packaged pinned Phase 1 catalog",
     help="Pinned catalog whose selected file checksums must match the legacy root.",
 )
 @click.option(
@@ -528,9 +800,22 @@ def reference() -> None:
     help="Predeclare a valid populated date with no physical legacy file.",
 )
 @click.option(
+    "--expected-oracle-gaps-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help=(
+        "Strict catalog-bound JSON declaration of expected oracle gaps; cannot be "
+        "combined with --expected-oracle-gap."
+    ),
+)
+@click.option(
     "--phase10-pilot-contract",
     is_flag=True,
     help="Enforce the frozen 16-session Phase 10 representative-case contract.",
+)
+@click.option(
+    "--phase11-production-contract",
+    is_flag=True,
+    help="Enforce the frozen 918-session Phase 11 migration-acceptance contract.",
 )
 @click.option(
     "--approvals",
@@ -562,7 +847,9 @@ def reference_compare_daily(
     legacy_root: Path,
     legacy_catalog: Path,
     expected_oracle_gap: tuple[datetime, ...],
+    expected_oracle_gaps_file: Path | None,
     phase10_pilot_contract: bool,
+    phase11_production_contract: bool,
     approvals_path: Path | None,
     output: Path,
     progress_interval_seconds: float,
@@ -572,14 +859,29 @@ def reference_compare_daily(
     try:
         locations = context.locations.require_complete()
         daily, surface = _read_widb_config(config_path)
+        if expected_oracle_gap and expected_oracle_gaps_file is not None:
+            raise ValueError(
+                "--expected-oracle-gap and --expected-oracle-gaps-file are mutually exclusive"
+            )
+        declared_gaps = (
+            load_oracle_gap_declaration(
+                expected_oracle_gaps_file,
+                ticker=ticker,
+                start_date=start_date.date(),
+                end_date=end_date.date(),
+            )
+            if expected_oracle_gaps_file is not None
+            else tuple(value.date() for value in expected_oracle_gap)
+        )
         request = DailyComparisonRequest(
             ticker=ticker,
             start_date=start_date.date(),
             end_date=end_date.date(),
             source=source,
             source_generation=source_generation,
-            declared_oracle_gaps=tuple(value.date() for value in expected_oracle_gap),
+            declared_oracle_gaps=declared_gaps,
             enforce_phase10_pilot=phase10_pilot_contract,
+            enforce_phase11_production=phase11_production_contract,
         )
 
         def progress(payload: Mapping[str, Any]) -> None:
@@ -623,6 +925,129 @@ def reference_compare_daily(
     if report["outcome"] != "passed":
         raise MaterialCliError(
             "Daily legacy comparison found unexplained discrepancies; Phase 11 is blocked",
+            log_format=context.log_format,
+        )
+
+
+@reference.command("compare-experiment")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict daily-front Experiment configuration identifying the fresh artifact.",
+)
+@click.option(
+    "--legacy-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    help="Read-only directory containing the pinned daily HDF5 oracle files.",
+)
+@click.option(
+    "--legacy-catalog",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=reference_catalog_path,
+    show_default="packaged pinned Phase 1 catalog",
+)
+@click.option(
+    "--legacy-code-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    help="Read-only quant_data checkout containing the hash-pinned FLEX consumer.",
+)
+@click.option(
+    "--phase11-production-contract",
+    is_flag=True,
+    help="Enforce the complete 891-common/26-fresh-date migration contract.",
+)
+@click.option(
+    "--consumer-batch-size",
+    type=click.IntRange(1, 256),
+    default=32,
+    show_default=True,
+    help="Bounded block size for pinned Torch consumer tensor comparisons.",
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="New atomic JSON report path outside the legacy root and Git tree.",
+)
+@click.option(
+    "--progress-interval-seconds",
+    type=click.FloatRange(min=0.001, max=300.0),
+    default=30.0,
+    show_default=True,
+)
+@click.pass_obj
+def reference_compare_experiment(
+    context: CliContext,
+    config_path: Path,
+    legacy_root: Path,
+    legacy_catalog: Path,
+    legacy_code_root: Path,
+    phase11_production_contract: bool,
+    consumer_batch_size: int,
+    output: Path,
+    progress_interval_seconds: float,
+) -> None:
+    """Compare an existing HDF5 Experiment with the pinned 891-date oracle."""
+
+    try:
+        locations = context.locations.require_complete()
+        config = _read_experiment_config(config_path)
+        pointer = plan_experiment(config).spec.pointer
+
+        def progress(payload: Mapping[str, Any]) -> None:
+            event = str(payload.get("event", "experiment_reference_comparison_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        report = compare_experiment_artifact(
+            locations,
+            ExperimentComparisonRequest(
+                experiment=pointer,
+                enforce_phase11_production=phase11_production_contract,
+                consumer_batch_size=consumer_batch_size,
+            ),
+            legacy_root=legacy_root,
+            catalog_path=legacy_catalog,
+            legacy_code_root=legacy_code_root,
+            source_revision=repository_source_revision(),
+            progress=progress if context.verbose else None,
+            progress_interval_seconds=progress_interval_seconds,
+        )
+        if not context.dry_run:
+            write_experiment_comparison_report(
+                output,
+                report,
+                legacy_root=legacy_root,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, ReferenceComparisonError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    summary = report["comparison"]["summary"]
+    _emit(
+        context,
+        "experiment_reference_comparison_result",
+        status=report["outcome"],
+        report_id=report["report_id"],
+        report_path=None if context.dry_run else output,
+        common_dates=summary["common_dates"],
+        fresh_only_dates=summary["fresh_only_dates"],
+        mismatch_dates=summary["mismatch_dates"],
+        dry_run=context.dry_run,
+        network_accessed=False,
+        artifacts_built=False,
+        filesystem_modified=not context.dry_run,
+    )
+    if report["outcome"] != "passed":
+        raise MaterialCliError(
+            "Experiment legacy comparison found unexplained discrepancies; Phase 11 is blocked",
             log_format=context.log_format,
         )
 
@@ -788,6 +1213,11 @@ def raw_download(
     _emit(
         context,
         "raw_result",
+        source=config.source,
+        source_generation=config.source_generation,
+        ticker=config.ticker,
+        start_date=config.start_date,
+        end_date=config.end_date,
         planned=result.planned,
         reused=result.reused,
         downloaded=result.downloaded,
@@ -1153,6 +1583,15 @@ def dataset_validate(
             deep_lineage=deep_lineage,
             progress=progress,
         )
+        validated_dataset = store.validate(pointer)
+        dataset_metadata = validated_dataset.manifest.get("metadata")
+        if not isinstance(dataset_metadata, Mapping):
+            raise ValueError("Dataset manifest metadata is malformed")
+        dataset_completion = json.loads(
+            (validated_dataset.path / "COMPLETE.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(dataset_completion, Mapping):
+            raise ValueError("Dataset completion marker is malformed")
     except LocationConfigurationError as exc:
         raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
     except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
@@ -1171,6 +1610,9 @@ def dataset_validate(
         artifact=pointer,
         path=store.path_for(pointer),
         identity=pointer.artifact_id,
+        manifest_sha256=dataset_completion.get("manifest_sha256"),
+        configuration_id=validated_dataset.manifest.get("configuration_id"),
+        source_revision=dataset_metadata.get("source_revision"),
         semantic=not integrity_only,
         deep_lineage=deep_lineage,
         network_accessed=False,
@@ -1178,6 +1620,416 @@ def dataset_validate(
         config=None if config is None else canonical_value(config),
         reuse_record=reuse_record,
         summary=None if summary is None else summary.as_dict(),
+    )
+
+
+@dataset.group("reference")
+def reference_dataset() -> None:
+    """Review and immutably designate the canonical internal reference Dataset."""
+
+
+@reference_dataset.command("review-template")
+@click.option(
+    "--role",
+    type=click.Choice(("code", "quantitative")),
+    required=True,
+    help="Independent review role represented by this attestation.",
+)
+@click.option("--reviewer", required=True, help="Reviewer or reviewing agent identity.")
+@click.option(
+    "--review-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Review date (YYYY-MM-DD).",
+)
+@click.option(
+    "--review-reference",
+    required=True,
+    help="Durable review report, commit, or task reference.",
+)
+@click.option("--dataset-name", required=True, help="Exact internal Dataset name.")
+@click.option(
+    "--dataset-artifact-id",
+    required=True,
+    help="Exact 64-hex internal Dataset artifact identity.",
+)
+@click.option(
+    "--daily-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Passed full-range daily comparison report.",
+)
+@click.option(
+    "--experiment-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Passed full Experiment comparison report.",
+)
+@click.option(
+    "--evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Machine-checked Phase 11 evidence index reviewed by this reviewer.",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="New immutable review-attestation JSON path.",
+)
+@click.pass_obj
+def reference_dataset_review_template(
+    context: CliContext,
+    role: str,
+    reviewer: str,
+    review_date: datetime,
+    review_reference: str,
+    dataset_name: str,
+    dataset_artifact_id: str,
+    daily_report: Path,
+    experiment_report: Path,
+    evidence_index: Path,
+    output: Path,
+) -> None:
+    """Bind a completed independent review to the exact parity evidence."""
+
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        dataset_pointer = ArtifactPointer(
+            StorageClass.DATASET,
+            f"widb/internal/name-{dataset_name}",
+            dataset_artifact_id,
+        )
+        attestation = create_review_attestation(
+            store,
+            role=cast(Literal["code", "quantitative"], role),
+            reviewer=reviewer,
+            review_date=review_date.date(),
+            review_reference=review_reference,
+            dataset=dataset_pointer,
+            daily_report_path=daily_report,
+            experiment_report_path=experiment_report,
+            evidence_index_path=evidence_index,
+        )
+        if not context.dry_run:
+            try:
+                atomic_create_json(output, attestation)
+            except FileExistsError as exc:
+                raise ValueError(f"Review attestation already exists: {output}") from exc
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "canonical_reference_review_template",
+        status="planned" if context.dry_run else "written",
+        role=role,
+        dataset=dataset_pointer,
+        output=output,
+        attestation=attestation,
+        filesystem_modified=not context.dry_run,
+        network_accessed=False,
+    )
+
+
+@reference_dataset.command("promotion-template")
+@click.option("--name", required=True, help="Portable canonical-reference label.")
+@click.option("--dataset-name", required=True, help="Exact internal Dataset name.")
+@click.option(
+    "--dataset-artifact-id",
+    required=True,
+    help="Exact 64-hex internal Dataset artifact identity.",
+)
+@click.option(
+    "--daily-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--experiment-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--code-review",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--quantitative-review",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="New portable promotion configuration JSON path.",
+)
+@click.pass_obj
+def reference_dataset_promotion_template(
+    context: CliContext,
+    name: str,
+    dataset_name: str,
+    dataset_artifact_id: str,
+    daily_report: Path,
+    experiment_report: Path,
+    evidence_index: Path,
+    code_review: Path,
+    quantitative_review: Path,
+    output: Path,
+) -> None:
+    """Create a promotion request from exact Dataset, report, and review evidence."""
+
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        dataset_pointer = ArtifactPointer(
+            StorageClass.DATASET,
+            f"widb/internal/name-{dataset_name}",
+            dataset_artifact_id,
+        )
+        promotion = create_promotion_config(
+            store,
+            name=name,
+            dataset=dataset_pointer,
+            daily_report_path=daily_report,
+            experiment_report_path=experiment_report,
+            evidence_index_path=evidence_index,
+            code_review_path=code_review,
+            quantitative_review_path=quantitative_review,
+        )
+        document = {
+            "schema": PROMOTION_CONFIG_SCHEMA,
+            "promotion": promotion.to_document(),
+        }
+        if not context.dry_run:
+            try:
+                atomic_create_json(output, document)
+            except FileExistsError as exc:
+                raise ValueError(
+                    f"Promotion configuration already exists: {output}"
+                ) from exc
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "canonical_reference_promotion_template",
+        status="planned" if context.dry_run else "written",
+        dataset=dataset_pointer,
+        output=output,
+        configuration=document,
+        filesystem_modified=not context.dry_run,
+        network_accessed=False,
+    )
+
+
+@reference_dataset.command("promote")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Strict portable promotion configuration.",
+)
+@click.option(
+    "--daily-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Required with the other evidence paths only on a cache miss.",
+)
+@click.option(
+    "--experiment-report",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "--evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "--code-review",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "--quantitative-review",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only to reuse an existing complete designation.",
+)
+@click.pass_obj
+def reference_dataset_promote(
+    context: CliContext,
+    config_path: Path,
+    daily_report: Path | None,
+    experiment_report: Path | None,
+    evidence_index: Path | None,
+    code_review: Path | None,
+    quantitative_review: Path | None,
+    version_request: str,
+) -> None:
+    """Validate all gates and atomically publish the canonical designation."""
+
+    try:
+        locations = context.locations.require_complete()
+        config = _read_reference_promotion_config(config_path)
+
+        def progress(payload: Any) -> None:
+            event = str(payload.get("event", "canonical_reference_promotion_progress"))
+            _emit(
+                context,
+                event,
+                **{key: value for key, value in payload.items() if key != "event"},
+            )
+
+        with warnings.catch_warnings(record=True) as warning_records:
+            warnings.simplefilter("always")
+            result = promote_reference_dataset(
+                locations,
+                config,
+                daily_report_path=daily_report,
+                experiment_report_path=experiment_report,
+                evidence_index_path=evidence_index,
+                code_review_path=code_review,
+                quantitative_review_path=quantitative_review,
+                version_override="*" if version_request == "*" else None,
+                dry_run=context.dry_run,
+                progress=progress,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "canonical_reference_promotion_result",
+        status="planned" if result.dry_run else "passed",
+        artifact=result.artifact,
+        path=result.path,
+        identity=result.artifact.artifact_id,
+        built=result.built,
+        reused=result.reuse is not None,
+        reuse_record=None if result.reuse is None else result.reuse.as_log_record(),
+        validation=result.validation,
+        dry_run=result.dry_run,
+        network_accessed=False,
+    )
+
+
+@reference_dataset.command("validate")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Resolve a designation from its portable promotion configuration.",
+)
+@click.option("--name", help="Canonical-reference label for exact-ID validation.")
+@click.option("--artifact-id", help="Exact 64-hex designation identity.")
+@click.option(
+    "--version",
+    "version_request",
+    type=click.Choice(("current", "*")),
+    default="current",
+    show_default=True,
+    help="Use '*' only with --config to reuse across producer versions.",
+)
+@click.option(
+    "--deep-lineage",
+    is_flag=True,
+    help="Also reopen and validate the designated Dataset and Experiment.",
+)
+@click.pass_obj
+def reference_dataset_validate(
+    context: CliContext,
+    config_path: Path | None,
+    name: str | None,
+    artifact_id: str | None,
+    version_request: str,
+    deep_lineage: bool,
+) -> None:
+    """Validate a self-contained canonical designation without WRDS access."""
+
+    try:
+        locations = context.locations.require_complete()
+        store = ArtifactStore(locations)
+        warning_records: Sequence[warnings.WarningMessage] = ()
+        if config_path is not None:
+            if name is not None or artifact_id is not None:
+                raise ValueError("Use either --config or --name with --artifact-id, not both")
+            config = _read_reference_promotion_config(config_path)
+            plan = plan_reference_promotion(config)
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
+                reuse = store.resolve(
+                    plan.spec,
+                    version="*" if version_request == "*" else None,
+                )
+            warning_records = tuple(caught_warnings)
+            if reuse is None:
+                raise ValueError(
+                    "Requested canonical designation is absent; validation never builds it"
+                )
+            pointer = reuse.artifact.pointer
+            reuse_record: Any = reuse.as_log_record()
+        else:
+            if name is None or artifact_id is None:
+                raise ValueError("Provide --config or both --name and --artifact-id")
+            if version_request == "*":
+                raise ValueError("--version '*' requires --config; exact-ID validation is concrete")
+            pointer = ArtifactPointer(
+                StorageClass.DATASET,
+                f"sanos/canonical-reference/name-{name}",
+                artifact_id,
+            )
+            reuse_record = None
+        validation = validate_reference_promotion(
+            store,
+            pointer,
+            deep_lineage=deep_lineage,
+        )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    for warning_record in warning_records:
+        _emit(
+            context,
+            "warning",
+            category=warning_record.category.__name__,
+            message=str(warning_record.message),
+        )
+    _emit(
+        context,
+        "canonical_reference_validation_result",
+        status="passed",
+        artifact=pointer,
+        path=store.path_for(pointer),
+        identity=pointer.artifact_id,
+        deep_lineage=deep_lineage,
+        network_accessed=False,
+        filesystem_modified=False,
+        reuse_record=reuse_record,
+        validation=validation,
     )
 
 
@@ -1344,11 +2196,11 @@ def public_dataset_approval_template(
             license_sha256=hashlib.sha256(license_bytes).hexdigest(),
         )
         release = PublicReleaseConfig(projection=candidate.config, approval=approval)
-        if output.exists() or output.is_symlink():
-            raise ValueError(f"Release configuration already exists: {output}")
         if not context.dry_run:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(output, release.to_document())
+            try:
+                atomic_create_json(output, release.to_document())
+            except FileExistsError as exc:
+                raise ValueError(f"Release configuration already exists: {output}") from exc
     except LocationConfigurationError as exc:
         raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
     except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
@@ -1564,6 +2416,10 @@ def public_dataset_validate(
             deep_lineage=deep_lineage,
             progress=progress,
         )
+        public_artifact = store.validate(pointer)
+        public_manifest_sha256 = hashlib.sha256(
+            (public_artifact.path / "manifest.json").read_bytes()
+        ).hexdigest()
     except LocationConfigurationError as exc:
         raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
     except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
@@ -1587,6 +2443,7 @@ def public_dataset_validate(
         artifact=pointer,
         path=store.path_for(pointer),
         identity=pointer.artifact_id,
+        manifest_sha256=public_manifest_sha256,
         semantic=not integrity_only,
         deep_lineage=deep_lineage,
         network_accessed=False,
