@@ -4,9 +4,10 @@ Status: implementation in progress; Phases 0 through 9 are complete with dual
 review. Phase 10's offline prerequisites are complete, and Phase 11/12 offline
 production, packaging, and operator-readiness work passed final code and
 quantitative review on 2026-10-13.
-Public redistribution approval remains a separate human/legal action. The live
-pilot remains pending the owner-present 2FA and healthy daemon-backed resource
-gates. No live WRDS access has occurred.
+Public redistribution approval remains a separate human/legal action. The
+account-scoped attempt monitor is implemented and offline-tested; the live pilot
+remains pending exact-commit preflight evidence and a healthy daemon-backed
+resource gate. No live WRDS access has occurred.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -199,11 +200,13 @@ artifact identities. Deterministic configurations and transformations use
 
 ## WRDS safety contract
 
-No command opens WRDS implicitly.
+Only an explicit live Raw cache miss opens WRDS.
 
-- Interactive access asks whether the user is ready to complete 2FA and
-  defaults to no. Automation must supply `--confirm-2fa-ready`; an agent must
-  never infer that confirmation.
+- No interactive readiness prompt or special confirmation flag is required.
+  Every connection open is serialized by a persistent, account-scoped monitor.
+  It retains failed or interrupted attempts for 15 minutes and rejects a fourth
+  attempt in that rolling window before network access. A successful connection
+  clears the window; pre-network configuration failures do not consume it.
 - A single connection/authentication probe succeeds before fan-out begins.
 - The default is two WRDS connections. `--max-wrds-connections` is hard-limited
   to four; a value above four fails before opening a connection.
@@ -214,8 +217,9 @@ No command opens WRDS implicitly.
 - The foreground authentication probe either closes before fan-out or continues
   while consuming one of those four semaphore slots; it is never an uncounted
   fifth connection.
-- Authentication, permission, and 2FA failures are not retried. Confirmed
-  transient query failures get bounded exponential-backoff retries.
+- Authentication, permission, connection-limit, unknown, and 2FA failures are
+  not retried within a command. Confirmed transient query failures get bounded
+  exponential-backoff retry with no more than three total attempts.
 - `--dry-run`, `--cache-only`, offline tests, and validation of existing
   artifacts never open a connection.
 - Downloads use resumable, atomic partitions and report elapsed time,
@@ -341,8 +345,9 @@ Status: complete; offline verification and independent code and quantitative
 reviews passed on 2026-10-12. No live WRDS query was part of this phase's
 review. See `reviews/phase-4/`.
 
-- Implement the 2FA readiness gate, one-connection probe, global bounded lease,
-  retry classification, progress events, and resumable atomic writes.
+- Implement the one-connection probe, global bounded lease, retry
+  classification, progress events, and resumable atomic writes. The original
+  manual 2FA gate was superseded by the owner-approved account attempt monitor.
 - Keep raw extracts minimally transformed. Move filtering currently embedded in
   `collect_raw_day` into later daily stages while preserving the resulting
   processed outputs.
@@ -516,7 +521,8 @@ the code and quantitative reviewers. The operational pilot and its external
 evidence review are still pending; Phase 11 remains blocked.
 
 - Run `gpuctl resources --json` as required by host policy before material work.
-- Ask the user to confirm readiness for WRDS 2FA immediately before access.
+- Enforce the account-scoped connection-attempt monitor immediately before each
+  open; no manual readiness gate is required.
 - Download a tiny, representative matrix of normal, half-day, AM-settled,
   irregular, and historically troublesome dates with at most two connections.
 - Build those dates end-to-end and compare with the read-only reference outputs.
@@ -531,10 +537,10 @@ Offline contract status: the exact full-range comparator, Experiment tensor
 comparator, deterministic downstream-config finalizer, indexed evidence
 contract, canonical designation, and human runbook are implemented, tested, and
 independently approved. Live execution remains blocked by the Phase 10 pilot
-and immediate safety gates.
+and monitored safety gates.
 
-- After a new explicit 2FA-readiness confirmation, download every required raw
-  partition fresh. Do not read old raw/intermediate data as an input.
+- Through the connection-attempt monitor, download every required raw partition
+  fresh. Do not read old raw/intermediate data as an input.
 - Resume safely across interruptions, never exceeding four WRDS connections;
   default to two unless pilot evidence justifies more.
 - Build daily intermediates, publish the internal dataset, materialize and audit
@@ -567,8 +573,8 @@ implemented and passed final dual review. Project licensing and the
   environment.
 
 Acceptance: a user following only repository documentation can reproduce all
-non-credentialed operations and knows exactly when interactive WRDS 2FA is
-required.
+non-credentialed operations and understands the WRDS credential, attempt-monitor,
+and recovery behavior.
 
 ## Initial compatibility decision register
 

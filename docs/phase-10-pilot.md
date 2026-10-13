@@ -85,25 +85,17 @@ set -e
 test "$cache_status" -eq 4
 ```
 
-## 3. Human readiness gate and sole live request
+## 3. Attempt monitor and sole live request
 
-Stop here until the repository owner is present and explicitly confirms both:
+Configure and permission-check `.pgpass` using the terminal-only procedure in
+[wrds-runbook.md](wrds-runbook.md). The live command is fail-closed and never
+asks for a username or password. No interactive confirmation or special CLI flag
+is required. The host-local account monitor serializes connection opens and
+blocks a fourth failed or interrupted attempt in a rolling 15-minute window;
+any successful connection resets the window. It cannot observe non-SANOS
+clients.
 
-1. they are ready to complete WRDS 2FA immediately; and
-2. the same WRDS account has no notebook, remote host, scheduled process, or
-   other client active.
-
-Before that confirmation, configure and permission-check `.pgpass` using the
-terminal-only procedure in [wrds-runbook.md](wrds-runbook.md). The live command
-is fail-closed: never type credentials into it or into its persistent log. A
-credential or 2FA failure ends the attempt and requires a fresh readiness
-confirmation; do not retry it automatically.
-
-Do not infer readiness from an earlier conversation. The host-wide SANOS lease
-cannot see external clients. Authentication, 2FA, permission, connection-limit
-or unknown failures are not retried automatically.
-
-After that confirmation, repeat the resource gate immediately before access:
+Repeat the resource gate immediately before access:
 
 ```bash
 gpuctl resources --json | tee "$PILOT_EVIDENCE/resources-pre-live.json"
@@ -118,14 +110,14 @@ env -u WRDS_OFF sanos -v --root "$PILOT_ROOT" --log-format json \
   raw download --source optionmetrics --ticker SPX \
   --start-date 2024-12-23 --end-date 2025-01-16 \
   --refresh --source-generation "$PILOT_GENERATION" \
-  --max-wrds-connections 2 --retry-attempts 1 --confirm-2fa-ready \
+  --max-wrds-connections 2 --retry-attempts 1 \
   2>&1 | tee "$PILOT_EVIDENCE/raw-live.jsonl"
 ```
 
 On an authentication, 2FA, permission, connection-limit, unknown, or resource
 error, stop. Preserve completed immutable artifacts and the redacted log. Do
-not repeatedly re-enter credentials or relaunch without a new immediate
-readiness confirmation.
+not repeatedly re-enter credentials or relaunch. Fix the prerequisite and obey
+the monitor's reported cooldown; never delete its state to force another try.
 
 ## 4. Offline validation and restart proof
 
@@ -152,8 +144,8 @@ env WRDS_OFF=1 sanos -v --root "$PILOT_ROOT" --log-format json \
 
 Both commands must report 68 reused, zero downloaded/missing, and
 `network_accessed=false`. If the live command was interrupted, resume the same
-generation only after another immediate 2FA-readiness confirmation; validated
-completed partitions are reused and only misses may be queried.
+generation with the identical command; validated completed partitions are
+reused, only misses may be queried, and the connection monitor still applies.
 
 Never tamper with the durable pilot root to test corruption. The automated
 offline suite performs copied-tree checksum-tamper and partial-failure restart

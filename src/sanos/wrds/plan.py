@@ -59,7 +59,7 @@ class RawPartition:
         return "boundary" in self.roles
 
 
-@version("1.0", dependencies=[RawTable])
+@version("1.1", dependencies=[RawTable])
 @dataclass(frozen=True, slots=True)
 class RawDownloadConfig:
     """Content and operational inputs for one raw download request."""
@@ -95,8 +95,8 @@ class RawDownloadConfig:
             raise ValueError("max_connections must lie in [1, 4]")
         if isinstance(self.retry_attempts, bool) or not isinstance(self.retry_attempts, int):
             raise TypeError("retry_attempts must be an integer")
-        if not 1 <= self.retry_attempts <= 5:
-            raise ValueError("retry_attempts must lie in [1, 5]")
+        if not 1 <= self.retry_attempts <= 3:
+            raise ValueError("retry_attempts must lie in [1, 3]")
         if (
             isinstance(self.retry_base_seconds, bool)
             or not isinstance(self.retry_base_seconds, int | float)

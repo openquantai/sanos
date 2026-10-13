@@ -254,16 +254,23 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 
 - Raw download commands must support explicit source/ticker/date selection,
   cache-only validation, resumability, and an explicit refresh option.
-- Before any command opens a WRDS connection, require an interactive
-  confirmation that the user is ready to complete 2FA; non-interactive callers
-  must pass an explicit equivalent flag. A dry run or cache-only validation
-  must never open a WRDS connection.
+- A live Raw cache miss may open WRDS without an interactive confirmation or
+  special CLI flag. Guard every connection open with a persistent,
+  account-scoped, cross-process attempt monitor: serialize opens, retain failed
+  or interrupted attempts for 15 minutes, and reject a fourth attempt in that
+  rolling window before network access. A successful connection clears the
+  account's failure window. Never persist a username or credential. A dry run
+  or cache-only validation must never read credentials, create monitor state,
+  or open a WRDS connection.
 - Bound WRDS access to at most four concurrent connections across SANOS
   processes on the host, use a more conservative default, and do not retry
   authentication or 2FA failures automatically. Reject a requested limit above
   four before connecting. Use an account-scoped semaphore independent of the
   configurable data roots, and close the authentication probe before fan-out or
   count it as one of the four slots.
+- Permit at most three total attempts for a recognized transient query. Do not
+  retry authentication, 2FA, permission, connection-limit, or unknown failures
+  inside a command.
 - Dataset commands must accept a checked-in configuration, support restart after
   interruption, validate completeness before publication, and print the final
   dataset identity and path.

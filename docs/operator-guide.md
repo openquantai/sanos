@@ -50,10 +50,12 @@ configuration.
 
 1. Run `sanos --dry-run --log-format json raw download ...`. Review the exact
    vendor tables, sessions, cache misses, and boundary dependencies.
-2. Be physically ready for WRDS 2FA, ensure no other client uses the account,
-   and check `gpuctl resources --json`. Only then run the same Raw command with
-   `--confirm-2fa-ready`. The default is two connections and the hard maximum is
-   four. Authentication and 2FA failures are never retried.
+2. Check `gpuctl resources --json`, then run the same Raw command. No manual
+   confirmation flag is required. The default is two connections and the hard
+   maximum is four. Connection opens are serialized by an account-scoped
+   monitor; a fourth failed or interrupted attempt within 15 minutes is blocked
+   before network access. Authentication and 2FA failures are never retried
+   within a command, and transient queries have at most three total attempts.
 3. Disable network access with `WRDS_OFF=1` and rerun Raw with `--cache-only`.
 4. Build daily Intermediate frames with `sanos intermediate build`. Processing
    remains one Polars frame per day through `fitted-day`.
@@ -111,8 +113,9 @@ JSON Lines until EOF and branch on `event` and the process exit status.
 |---|---|
 | A root is unresolved | Set `QUANT_DATA_ROOT`, all four class variables, or a documented local TOML; confirm with `config show`. |
 | Import for WRDS or HDF5 is missing | Install `.[operator]`, or the exact `.[wrds,experiment]` combination. |
-| `WRDS_OFF` blocks a download | This is intentional. Keep it set for all non-Raw work; unset it only for an owner-confirmed live Raw command. |
-| Authentication or 2FA fails | SANOS fails closed without prompting. Do not retry automatically or enter credentials into a logged command. Close competing clients, update the standard `.pgpass` entry from a private terminal if needed, wait for the account state to settle, and obtain a new immediate 2FA-readiness confirmation. |
+| `WRDS_OFF` blocks a download | This is intentional. Keep it set for all non-Raw work; unset it only for a deliberate live Raw command. |
+| Authentication or 2FA fails | SANOS fails closed without prompting and records the failed connection attempt. Do not loop the command or enter credentials into a logged command. Close competing clients and update `.pgpass` from a private terminal if needed. The account-scoped monitor reports the remaining cooldown and blocks a fourth failed or interrupted attempt within 15 minutes. |
+| WRDS attempt monitor is busy | Another SANOS process is opening a connection. Let that attempt finish; do not start parallel login attempts. |
 | WRDS lease is unavailable | Inspect the reported account-scoped lease and running clients. Never delete a live lease or raise the aggregate limit above four. |
 | Artifact checksum or manifest fails | Preserve the artifact and log. Immutable outputs are not repaired in place; rebuild only under a new valid identity after diagnosis. |
 | A no-arbitrage/SANOS solver day fails | Preserve its daily journal and inputs. It is a blocking data/numerical discrepancy, not permission to drop the day. |

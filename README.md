@@ -14,7 +14,7 @@ dataset will be the canonical reference dataset.
 
 Phases 0 through 9 are complete with code and quantitative review. Phase 10's
 offline safety prerequisites and Phase 11's frozen offline production tooling
-are implemented; the owner-present live pilot is still pending. The daily
+are implemented; the monitored live pilot is still pending. The daily
 no-arbitrage, filtering, compatibility-DLV and smooth-SANOS stages are available
 through the CLI, together with output-first internal Dataset build and
 validation commands. CD-020's all-valid-day failure is preserved for parity;
@@ -82,10 +82,11 @@ sanos --root /path/to/quant-data --dry-run raw download \
   --start-date 2022-01-03 --end-date 2025-08-29
 ```
 
-Do not pass `--confirm-2fa-ready` until you are actually ready for an immediate
-live WRDS authentication. See the runbook for cache-only validation, live
-downloads, immutable refresh generations, structured logs, and connection
-safety.
+A live cache miss needs no confirmation flag. SANOS serializes connection opens
+through an account-scoped monitor, records failed or interrupted attempts for
+15 minutes, and blocks a fourth attempt before network access. See the runbook
+for cache-only validation, live downloads, immutable refresh generations,
+structured logs, and connection safety.
 
 ## Offline daily intermediates
 

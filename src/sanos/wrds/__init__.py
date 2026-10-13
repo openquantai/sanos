@@ -13,7 +13,6 @@ from sanos.wrds.download import (
     RawCacheMissError,
     RawDownloadError,
     RawDownloadResult,
-    WrdsNetworkAuthorizationError,
     download_raw,
     normalize_raw_frame,
     raw_artifact_request,
@@ -21,6 +20,13 @@ from sanos.wrds.download import (
     raw_content_producer_version,
 )
 from sanos.wrds.lease import WrdsConnectionLease, WrdsLeaseUnavailableError
+from sanos.wrds.monitor import (
+    WrdsAttemptLimitError,
+    WrdsAttemptMonitorBusyError,
+    WrdsAttemptMonitorError,
+    WrdsAttemptMonitorStateError,
+    WrdsConnectionAttemptMonitor,
+)
 from sanos.wrds.plan import (
     ALL_RAW_TABLES,
     RawDownloadConfig,
@@ -45,7 +51,11 @@ __all__ = [
     "WrdsCredentials",
     "WrdsError",
     "WrdsLeaseUnavailableError",
-    "WrdsNetworkAuthorizationError",
+    "WrdsAttemptLimitError",
+    "WrdsAttemptMonitorBusyError",
+    "WrdsAttemptMonitorError",
+    "WrdsAttemptMonitorStateError",
+    "WrdsConnectionAttemptMonitor",
     "WrdsQueryError",
     "download_raw",
     "normalize_raw_frame",

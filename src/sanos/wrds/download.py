@@ -40,6 +40,7 @@ from sanos.wrds.client import (
     inspect_optionmetrics,
 )
 from sanos.wrds.lease import WrdsConnectionLease
+from sanos.wrds.monitor import WrdsConnectionAttemptMonitor
 from sanos.wrds.plan import RawDownloadConfig, RawPartition, RawTable, plan_raw_partitions
 from sanos.wrds.source import (
     RawQuery,
@@ -58,10 +59,6 @@ class RawDownloadError(RuntimeError):
 
 class RawCacheMissError(RawDownloadError):
     """Raised when cache-only validation finds missing partitions."""
-
-
-class WrdsNetworkAuthorizationError(RawDownloadError):
-    """Raised when a live miss has not received immediate 2FA confirmation."""
 
 
 RawProgress = Callable[[Mapping[str, Any]], None]
@@ -425,6 +422,7 @@ def _read_security_artifact(artifact: ValidatedArtifact, ticker: str) -> int:
     return security_secid(frame, ticker)
 
 
+@version("1.0", dependencies=[classify_wrds_failure])
 def _open_connection(
     factory: ConnectionFactory,
     credentials: WrdsCredentials,
@@ -442,6 +440,7 @@ def _open_connection(
         raise WrdsQueryError("WRDS connection failed and was not retried") from exc
 
 
+@version("1.0", dependencies=[classify_wrds_failure, inspect_optionmetrics])
 def _inspect_optionmetrics_guarded(connection: Any) -> Any:
     try:
         return inspect_optionmetrics(connection)
@@ -456,6 +455,7 @@ def _inspect_optionmetrics_guarded(connection: Any) -> Any:
         raise WrdsQueryError("WRDS OptionMetrics catalog probe failed and was not retried") from exc
 
 
+@version("1.0", dependencies=[close_connection])
 def _close_without_masking(connection: Any, primary: BaseException | None) -> None:
     try:
         close_connection(connection)
@@ -463,6 +463,71 @@ def _close_without_masking(connection: Any, primary: BaseException | None) -> No
         if primary is None:
             raise WrdsQueryError("WRDS connection close failed") from close_error
         primary.add_note(f"WRDS connection close also failed: {close_error}")
+
+
+@version(
+    "1.0",
+    dependencies=[
+        WrdsConnectionAttemptMonitor,
+        _close_without_masking,
+        _open_connection,
+        canonical_value,
+    ],
+)
+def _open_connection_monitored(
+    factory: ConnectionFactory,
+    credentials: WrdsCredentials,
+    *,
+    monitor_root: Path | None,
+    emit: RawProgress,
+) -> Any:
+    monitor = WrdsConnectionAttemptMonitor(credentials.username, root=monitor_root)
+    connection: Any | None = None
+    try:
+        with monitor:
+            try:
+                emit(
+                    canonical_value(
+                        {
+                            "event": "wrds_connection_attempt",
+                            "failed_attempts_in_window": (
+                                monitor.failed_attempts_before_reservation
+                            ),
+                            "remaining_attempts_after_reservation": (
+                                monitor.remaining_attempts_after_reservation
+                            ),
+                            "failure_window_seconds": monitor.FAILURE_WINDOW_SECONDS,
+                        }
+                    )
+                )
+            except BaseException:
+                monitor.cancel()
+                raise
+            try:
+                connection = _open_connection(factory, credentials)
+            except WrdsConfigurationError:
+                monitor.cancel()
+                raise
+            monitor.succeed()
+    except BaseException as exc:
+        if connection is not None:
+            _close_without_masking(connection, exc)
+        raise
+    if connection is None:
+        raise AssertionError("WRDS monitor completed without an open connection")
+    try:
+        emit(
+            canonical_value(
+                {
+                    "event": "wrds_connection_succeeded",
+                    "failure_window_reset": True,
+                }
+            )
+        )
+    except BaseException as exc:
+        _close_without_masking(connection, exc)
+        raise
+    return connection
 
 
 def _partition_label(partition: RawPartition) -> str:
@@ -496,7 +561,9 @@ def raw_content_producer_version() -> str:
     dependencies=[
         RawDownloadConfig,
         RawDownloadResult,
+        WrdsConnectionAttemptMonitor,
         WrdsConnectionLease,
+        _open_connection_monitored,
         build_raw_query,
         execute_query_with_retry,
         inspect_optionmetrics,
@@ -516,7 +583,6 @@ def download_raw(
     cache_only: bool = False,
     refresh: bool = False,
     version_override: str | None = None,
-    authorize_network: Callable[[], None] | None = None,
     progress: RawProgress | None = None,
     connection_factory: ConnectionFactory = default_connection_factory,
     environment: Mapping[str, str] | None = None,
@@ -630,11 +696,6 @@ def download_raw(
             f"Cache-only validation found {len(missing)} missing raw partition(s): "
             f"{labels}{suffix}"
         )
-    if authorize_network is None:
-        raise WrdsNetworkAuthorizationError(
-            "A live raw cache miss requires immediate WRDS 2FA readiness confirmation"
-        )
-    authorize_network()
     credentials = WrdsCredentials.from_environment(environment)
 
     started = monotonic()
@@ -642,6 +703,10 @@ def download_raw(
     completed = len(resolved)
     downloaded = 0
     failures = 0
+
+    def emit_thread_safe(payload: Mapping[str, Any]) -> None:
+        with progress_lock:
+            emit(payload)
 
     def report(request: RawArtifactRequest, artifact: ValidatedArtifact) -> None:
         nonlocal completed, downloaded
@@ -732,7 +797,12 @@ def download_raw(
         try:
             connection = with_heartbeat(
                 "authentication_probe",
-                lambda: _open_connection(connection_factory, credentials),
+                lambda: _open_connection_monitored(
+                    connection_factory,
+                    credentials,
+                    monitor_root=lease_root,
+                    emit=emit_thread_safe,
+                ),
             )
             catalog = with_heartbeat(
                 "optionmetrics_catalog_probe",
@@ -803,7 +873,12 @@ def download_raw(
                 try:
                     worker_connection = with_heartbeat(
                         "worker_connection",
-                        lambda: _open_connection(connection_factory, credentials),
+                        lambda: _open_connection_monitored(
+                            connection_factory,
+                            credentials,
+                            monitor_root=lease_root,
+                            emit=emit_thread_safe,
+                        ),
                     )
                     for request in group:
                         query = build_raw_query(request.partition, catalog, secid=secid)
@@ -876,7 +951,6 @@ __all__ = [
     "RawCacheMissError",
     "RawDownloadError",
     "RawDownloadResult",
-    "WrdsNetworkAuthorizationError",
     "download_raw",
     "normalize_raw_frame",
     "raw_artifact_request",

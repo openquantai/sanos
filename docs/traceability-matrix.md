@@ -15,8 +15,8 @@ are under `reviews/program/`; earlier design blockers in phase reviews are
 historical unless they are also listed in the compatibility decision register.
 
 No live WRDS pilot or fresh 2022--2025 production build has run. Those remain
-gated by immediate owner-present 2FA readiness, the account-concurrency check,
-and a daemon-backed all-OK resource result. The separately identified
+guarded by the account-scoped connection-attempt monitor, the account-concurrency
+check, and a daemon-backed all-OK resource result. The separately identified
 Direct-200 neural training producer remains deferred experiment work; it is not
 part of the daily-front HDF5 parity gate and does not define the SANOS Dataset.
 
@@ -35,7 +35,7 @@ Actions mean:
 
 | Order | Legacy symbol | Standalone disposition | Contract to preserve |
 |---:|---|---|---|
-| 1 | `dysanos.download.download` | replace with `sanos raw/intermediate/dataset` CLI | date planning and visible progress; replace implicit cache miss/network behavior with an explicit 2FA-gated raw command |
+| 1 | `dysanos.download.download` | replace with `sanos raw/intermediate/dataset` CLI | date planning and visible progress; replace implicit cache miss/network behavior with a fail-closed, account-monitored raw command |
 | 2 | `dysanos.flex.market.load_market_day` | copy/adapt into dataset selection | non-binding upstream 100,000 cap, upstream NMS `[-100,100]`, smoothness 0.25, then exact downstream horizon/NMS selection |
 | 3 | `dysanos.market.smooth_interpolated_market` | copy/adapt into daily fit stage | normalized input requirement, separate real call/put books, AF masks, smooth SANOS payload and diagnostics |
 | 4 | `widb.options_filter.filter_options_day` | copy/adapt to Polars daily stage | exact filter order, stable sorting/tie behavior, normalization and cap semantics |

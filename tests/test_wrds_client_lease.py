@@ -72,15 +72,22 @@ def test_query_retry_is_limited_to_recognized_transients() -> None:
     with pytest.raises(WrdsAuthenticationError, match="not retried"):
         execute_query_with_retry(
             authentication_failure,
-            attempts=5,
+            attempts=3,
             base_seconds=0.0,
         )
     assert auth_attempts == 1
 
+    with pytest.raises(ValueError, match=r"\[1, 3\]"):
+        execute_query_with_retry(
+            lambda: "unreachable",
+            attempts=4,
+            base_seconds=0.0,
+        )
+
     with pytest.raises(WrdsQueryError, match="permanent_query"):
         execute_query_with_retry(
             lambda: (_ for _ in ()).throw(RuntimeError("invalid SQL")),
-            attempts=5,
+            attempts=3,
             base_seconds=0.0,
         )
 
@@ -188,7 +195,27 @@ def test_default_connection_factory_uses_pgpass_compatible_url(
 
 
 def test_default_connection_factory_has_resolved_version() -> None:
-    assert str(default_connection_factory.version).startswith("1.2")
+    assert str(default_connection_factory.version).startswith("1.3")
+
+
+def test_default_connection_factory_treats_missing_driver_as_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    _install_connection_fakes(
+        monkeypatch,
+        calls,
+        connect=ModuleNotFoundError("No module named 'psycopg2'; secret-value"),
+    )
+
+    with pytest.raises(WrdsConfigurationError) as caught:
+        default_connection_factory("private-account")
+
+    rendered = f"{caught.value!r} {caught.value}"
+    assert "private-account" not in rendered
+    assert "secret-value" not in rendered
+    assert caught.value.__cause__ is None
+    assert "engine_dispose" in calls
 
 
 def test_default_connection_factory_never_prompts_or_leaks_authentication_details(

@@ -582,33 +582,16 @@ def test_raw_download_dry_run_is_structured_and_never_connects(tmp_path: Path) -
     assert not root.exists()
 
 
-def test_noninteractive_raw_miss_requires_explicit_2fa_confirmation(
-    tmp_path: Path,
-) -> None:
+def test_raw_download_has_no_manual_2fa_gate_and_caps_query_attempts() -> None:
     result = CliRunner().invoke(
         main,
-        [
-            "--root",
-            str(tmp_path / "data"),
-            "--log-format",
-            "json",
-            "raw",
-            "download",
-            "--ticker",
-            "SPX",
-            "--start-date",
-            "2024-01-03",
-            "--end-date",
-            "2024-01-03",
-        ],
-        env={"WRDS_USERNAME": "must-not-connect"},
+        ["raw", "download", "--help"],
     )
 
-    assert result.exit_code == 4
-    payloads = [json.loads(line) for line in result.output.splitlines()]
-    assert payloads[0]["event"] == "raw_plan"
-    assert payloads[-1]["event"] == "error"
-    assert "--confirm-2fa-ready" in payloads[-1]["message"]
+    assert result.exit_code == 0, result.output
+    assert "--confirm-2fa-ready" not in result.output
+    assert "--retry-attempts INTEGER RANGE" in result.output
+    assert "1<=x<=3" in result.output
 
 
 def test_raw_connection_limit_above_four_is_rejected_by_click(tmp_path: Path) -> None:
@@ -631,6 +614,28 @@ def test_raw_connection_limit_above_four_is_rejected_by_click(tmp_path: Path) ->
     )
     assert result.exit_code == 2
     assert "range 1<=x<=4" in result.output
+
+
+def test_raw_query_attempt_limit_above_three_is_rejected_by_click(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        main,
+        [
+            "--root",
+            str(tmp_path / "data"),
+            "raw",
+            "download",
+            "--ticker",
+            "SPX",
+            "--start-date",
+            "2024-01-03",
+            "--end-date",
+            "2024-01-03",
+            "--retry-attempts",
+            "4",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "range 1<=x<=3" in result.output
 
 
 def test_click_usage_errors_are_structured_when_json_is_requested() -> None:

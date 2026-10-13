@@ -261,7 +261,7 @@ def _connect_wrds_using_libpq_credentials(
 
 
 @version(
-    "1.2",
+    "1.3",
     dependencies=[
         _NonInteractiveWrdsConnection,
         _connect_wrds_using_libpq_credentials,
@@ -298,6 +298,10 @@ def default_connection_factory(username: str) -> WrdsConnection:
         _connect_wrds_using_libpq_credentials(connection, username, sqlalchemy)
     except WrdsConfigurationError:
         raise
+    except ImportError:
+        raise WrdsConfigurationError(
+            "The optional WRDS dependencies are not installed; install sanos[wrds]"
+        ) from None
     except Exception as exc:
         kind = classify_wrds_failure(exc)
         if kind is WrdsFailureKind.AUTHENTICATION:
@@ -338,7 +342,7 @@ def inspect_optionmetrics(connection: WrdsConnection) -> OptionMetricsCatalog:
     return choose_optionmetrics_catalog(list(libraries), tables)
 
 
-@version("1.0", dependencies=[WrdsFailureKind, classify_wrds_failure])
+@version("1.1", dependencies=[WrdsFailureKind, classify_wrds_failure])
 def execute_query_with_retry[T](
     operation: Callable[[], T],
     *,
@@ -348,8 +352,8 @@ def execute_query_with_retry[T](
 ) -> T:
     """Retry only recognized transient query failures with bounded backoff."""
 
-    if not 1 <= attempts <= 5:
-        raise ValueError("WRDS query attempts must lie in [1, 5]")
+    if not 1 <= attempts <= 3:
+        raise ValueError("WRDS query attempts must lie in [1, 3]")
     if base_seconds < 0.0:
         raise ValueError("WRDS retry base seconds cannot be negative")
     for attempt in range(1, attempts + 1):
@@ -370,6 +374,7 @@ def execute_query_with_retry[T](
     raise AssertionError("unreachable")
 
 
+@version("1.0")
 def close_connection(connection: WrdsConnection) -> None:
     """Close a connection without masking the primary query failure."""
 

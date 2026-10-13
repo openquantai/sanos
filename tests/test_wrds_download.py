@@ -23,7 +23,6 @@ from sanos.wrds import (
     WrdsAuthenticationError,
     WrdsConfigurationError,
     WrdsCredentials,
-    WrdsNetworkAuthorizationError,
     WrdsQueryError,
     download_raw,
     normalize_raw_frame,
@@ -243,28 +242,21 @@ def test_catalog_probe_preserves_typed_wrds_failures(error: Exception) -> None:
     assert caught.value is error
 
 
-def test_dry_run_and_cache_only_never_authorize_connect_or_create_roots(
+def test_dry_run_and_cache_only_never_connect_or_create_roots(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    called = False
-
-    def forbidden() -> None:
-        nonlocal called
-        called = True
-        raise AssertionError("network authorization must not run")
 
     dry = download_raw(
         store,
         _config(),
         dry_run=True,
-        authorize_network=forbidden,
         environment={},
         connection_factory=lambda username: (_ for _ in ()).throw(AssertionError(username)),
+        lease_root=tmp_path / "leases",
     )
     assert dry.missing == 8
     assert dry.network_accessed is False
-    assert not called
     assert not (tmp_path / "raw").exists()
 
     with pytest.raises(RawCacheMissError, match="8 missing"):
@@ -272,10 +264,10 @@ def test_dry_run_and_cache_only_never_authorize_connect_or_create_roots(
             store,
             _config(),
             cache_only=True,
-            authorize_network=forbidden,
             environment={},
+            lease_root=tmp_path / "leases",
         )
-    assert not called
+    assert not (tmp_path / "leases").exists()
 
 
 def test_empty_dated_vendor_result_is_accepted_for_durable_publication() -> None:
@@ -335,7 +327,6 @@ def test_empty_dated_vendor_result_is_published_and_reusable(tmp_path: Path) -> 
     result = download_raw(
         store,
         config,
-        authorize_network=lambda: None,
         connection_factory=state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
@@ -360,24 +351,17 @@ def test_live_download_is_guarded_bounded_documented_and_output_first(
 ) -> None:
     store = _store(tmp_path)
     state = _FakeWrdsState()
-    authorization_calls = 0
     events: list[dict[str, Any]] = []
-
-    def authorize() -> None:
-        nonlocal authorization_calls
-        authorization_calls += 1
 
     result = download_raw(
         store,
         _config(),
-        authorize_network=authorize,
         progress=lambda payload: events.append(dict(payload)),
         connection_factory=state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
     )
 
-    assert authorization_calls == 1
     assert result.planned == result.downloaded == 8
     assert result.reused == result.missing == 0
     assert result.network_accessed is True
@@ -386,6 +370,13 @@ def test_live_download_is_guarded_bounded_documented_and_output_first(
     assert events[0]["event"] == "raw_plan"
     assert events[0]["boundary_partitions"] == 3
     assert events[-1]["event"] == "raw_download_complete"
+    attempt_events = [event for event in events if event["event"] == "wrds_connection_attempt"]
+    success_events = [
+        event for event in events if event["event"] == "wrds_connection_succeeded"
+    ]
+    assert len(attempt_events) == len(success_events) == 3
+    assert all(event["failed_attempts_in_window"] == 0 for event in attempt_events)
+    assert all(event["remaining_attempts_after_reservation"] == 2 for event in attempt_events)
 
     option_artifact = next(
         artifact
@@ -410,7 +401,6 @@ def test_live_download_is_guarded_bounded_documented_and_output_first(
         _config(),
         environment={},
         connection_factory=forbidden_factory,
-        authorize_network=lambda: (_ for _ in ()).throw(AssertionError("authorization")),
         lease_root=tmp_path / "leases",
     )
     assert reused.reused == 8
@@ -453,7 +443,6 @@ def test_security_publication_race_uses_the_winning_secid_downstream(
             download_raw(
                 store,
                 config,
-                authorize_network=lambda: None,
                 connection_factory=state.factory,
                 environment={"WRDS_USERNAME": "test-account"},
                 lease_root=tmp_path / "leases",
@@ -482,11 +471,15 @@ def test_security_publication_race_uses_the_winning_secid_downstream(
     assert all(f"secid = {winning_secid}" in sql for sql in downstream_sql)
 
 
-def test_live_miss_requires_immediate_authorization_before_credentials(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(WrdsNetworkAuthorizationError, match="2FA"):
-        download_raw(_store(tmp_path), _config(), environment={})
+def test_live_miss_reads_credentials_without_a_manual_readiness_gate(tmp_path: Path) -> None:
+    with pytest.raises(WrdsConfigurationError, match="WRDS_USERNAME"):
+        download_raw(
+            _store(tmp_path),
+            _config(),
+            environment={},
+            lease_root=tmp_path / "leases",
+        )
+    assert not (tmp_path / "leases").exists()
 
 
 def test_refresh_resumes_generation_and_never_replaces_it(tmp_path: Path) -> None:
@@ -496,7 +489,6 @@ def test_refresh_resumes_generation_and_never_replaces_it(tmp_path: Path) -> Non
     first = download_raw(
         store,
         first_config,
-        authorize_network=lambda: None,
         connection_factory=first_state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
@@ -507,7 +499,6 @@ def test_refresh_resumes_generation_and_never_replaces_it(tmp_path: Path) -> Non
         store,
         first_config,
         refresh=True,
-        authorize_network=lambda: (_ for _ in ()).throw(AssertionError("authorization")),
         connection_factory=lambda username: (_ for _ in ()).throw(
             AssertionError(username)
         ),
@@ -522,7 +513,6 @@ def test_refresh_resumes_generation_and_never_replaces_it(tmp_path: Path) -> Non
         store,
         _config(generation="2026-10-12-refresh-2"),
         refresh=True,
-        authorize_network=lambda: None,
         connection_factory=second_state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
@@ -564,7 +554,6 @@ def test_partial_raw_failure_resumes_only_missing_partitions(
             store,
             config,
             refresh=True,
-            authorize_network=lambda: None,
             connection_factory=failing_state.factory,
             environment={"WRDS_USERNAME": "test-account"},
             lease_root=tmp_path / "leases",
@@ -582,7 +571,6 @@ def test_partial_raw_failure_resumes_only_missing_partitions(
         store,
         config,
         refresh=True,
-        authorize_network=lambda: None,
         connection_factory=resumed_state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
@@ -605,7 +593,6 @@ def test_raw_cache_only_verbose_emits_provenance_and_rejects_tamper(
     result = download_raw(
         store,
         _config(),
-        authorize_network=lambda: None,
         connection_factory=state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
@@ -669,7 +656,9 @@ def test_raw_cache_only_verbose_emits_provenance_and_rejects_tamper(
     rejected_records = [json.loads(line) for line in rejected.output.splitlines()]
     assert rejected_records[-1]["event"] == "error"
     assert "checksum" in rejected_records[-1]["message"].lower()
-    assert all(record["event"] != "wrds_2fa_confirmed" for record in rejected_records)
+    assert all(
+        record["event"] != "wrds_connection_attempt" for record in rejected_records
+    )
 
 
 def test_wildcard_reuse_can_never_build_raw_data(tmp_path: Path) -> None:
@@ -695,7 +684,6 @@ def test_table_subset_downloads_only_security_and_requested_table(tmp_path: Path
     result = download_raw(
         _store(tmp_path),
         config,
-        authorize_network=lambda: None,
         connection_factory=state.factory,
         environment={"WRDS_USERNAME": "test-account"},
         lease_root=tmp_path / "leases",
@@ -718,7 +706,6 @@ def test_blocking_queries_emit_progress_heartbeats(tmp_path: Path) -> None:
     download_raw(
         _store(tmp_path),
         config,
-        authorize_network=lambda: None,
         progress=lambda payload: events.append(dict(payload)),
         connection_factory=state.factory,
         environment={"WRDS_USERNAME": "test-account"},
@@ -736,7 +723,9 @@ def test_raw_producer_version_closes_over_content_and_safety_contracts() -> None
 
     for dependency in (
         "RawDownloadConfig",
+        "WrdsConnectionAttemptMonitor",
         "WrdsConnectionLease",
+        "_open_connection_monitored",
         "_publish_raw_partition",
         "_write_parquet_durable",
         "build_raw_query",
@@ -758,3 +747,4 @@ def test_raw_producer_version_closes_over_content_and_safety_contracts() -> None
     assert "_safe_ticker_label" in content
     assert "_date_literal" in content
     assert "WrdsConnectionLease" not in content
+    assert "WrdsConnectionAttemptMonitor" not in content

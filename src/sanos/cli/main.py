@@ -100,6 +100,7 @@ from sanos.wrds import (
     RawDownloadConfig,
     RawDownloadError,
     RawTable,
+    WrdsAttemptMonitorError,
     WrdsError,
     WrdsLeaseUnavailableError,
     download_raw,
@@ -1114,15 +1115,10 @@ def raw() -> None:
 )
 @click.option(
     "--retry-attempts",
-    type=click.IntRange(1, 5),
+    type=click.IntRange(1, 3),
     default=3,
     show_default=True,
-    help="Attempts for recognized transient queries; authentication is never retried.",
-)
-@click.option(
-    "--confirm-2fa-ready",
-    is_flag=True,
-    help="Required for non-interactive live access; confirms immediate WRDS 2FA readiness.",
+    help="Total attempts for recognized transient queries; the maximum is three.",
 )
 @click.pass_obj
 def raw_download(
@@ -1138,7 +1134,6 @@ def raw_download(
     version_request: str,
     max_wrds_connections: int,
     retry_attempts: int,
-    confirm_2fa_ready: bool,
 ) -> None:
     """Plan, validate, or download durable raw OptionMetrics partitions."""
 
@@ -1155,25 +1150,6 @@ def raw_download(
             retry_attempts=retry_attempts,
         )
 
-        def authorize_network() -> None:
-            if confirm_2fa_ready:
-                _emit(context, "wrds_2fa_confirmed", interactive=False)
-                return
-            if not sys.stdin.isatty():
-                raise MaterialCliError(
-                    "Live WRDS access from a non-interactive caller requires --confirm-2fa-ready",
-                    log_format=context.log_format,
-                )
-            if not click.confirm(
-                "A raw cache miss requires WRDS. Are you ready to complete 2FA now?",
-                default=False,
-            ):
-                raise MaterialCliError(
-                    "WRDS access cancelled before connecting",
-                    log_format=context.log_format,
-                )
-            _emit(context, "wrds_2fa_confirmed", interactive=True)
-
         def progress(payload: Any) -> None:
             event = str(payload["event"])
             fields = {key: value for key, value in payload.items() if key != "event"}
@@ -1186,7 +1162,6 @@ def raw_download(
             cache_only=cache_only,
             refresh=refresh,
             version_override="*" if version_request == "*" else None,
-            authorize_network=authorize_network,
             progress=progress,
         )
         if context.verbose:
@@ -1204,6 +1179,7 @@ def raw_download(
         ArtifactError,
         RawDownloadError,
         WrdsError,
+        WrdsAttemptMonitorError,
         WrdsLeaseUnavailableError,
         ValueError,
     ) as exc:

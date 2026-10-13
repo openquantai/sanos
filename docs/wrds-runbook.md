@@ -4,10 +4,9 @@ The first live extraction must follow the stricter
 [Phase 10 guarded pilot](phase-10-pilot.md). The generic commands below do not
 replace its fresh-generation, evidence, comparison, or review gates.
 
-The guarded raw OptionMetrics layer is implemented. It has been exercised only
-with offline connection fakes so far; no live WRDS query has been made from this
-repository. A live pilot needs a separate, immediate confirmation that the user
-is ready to complete 2FA.
+The guarded raw OptionMetrics layer is implemented. A live cache miss does not
+require an interactive confirmation or special flag. Connection opens are
+serialized and rate-limited by the account-scoped monitor described below.
 
 ## Install and configure
 
@@ -93,8 +92,7 @@ version; it cannot build a miss.
 
 ## Perform a live download
 
-An interactive terminal asks whether you are ready for WRDS 2FA immediately
-before the first connection. The default answer is no:
+A live miss connects directly through the standard credential setup:
 
 ```bash
 sanos -v raw download \
@@ -102,24 +100,26 @@ sanos -v raw download \
   --start-date 2024-01-03 --end-date 2024-01-03
 ```
 
-Only a non-interactive operator who is genuinely ready for immediate 2FA should
-pass the explicit equivalent:
-
-```bash
-sanos --log-format json raw download \
-  --source optionmetrics --ticker SPX \
-  --start-date 2024-01-03 --end-date 2024-01-03 \
-  --confirm-2fa-ready
-```
-
 The command first opens one leased authentication/catalog probe, then closes it
 before fan-out. The default fan-out is two connections. Both the CLI and Python
 configuration reject a requested limit above four before connecting, and a
 host-wide account-keyed four-slot lease enforces that limit across SANOS
-processes. Authentication, 2FA, connection-limit, and permission failures are
-never retried; only recognized transient query failures receive bounded retry.
-If authentication fails, stop the command and update `.pgpass` from a private
-terminal before obtaining a fresh immediate 2FA-readiness confirmation.
+processes.
+
+Every connection open also passes through a host-local, account-scoped monitor.
+It serializes opens across SANOS processes and stores only the hashed account key
+and timestamps. A failed or interrupted open remains in a rolling 15-minute
+window; the fourth such attempt is rejected before network access and the error
+reports when the oldest failure expires. Any successful connection clears that
+window. An incompatible local dependency or other pre-network configuration
+failure does not consume an attempt. Do not delete or edit monitor state to work
+around the limit.
+
+Authentication, 2FA, connection-limit, permission, and unknown failures are
+never retried within a command. Only recognized transient query failures are
+retried, with at most three total query attempts. If authentication fails,
+inspect the error and update `.pgpass` from a private terminal rather than
+looping the command.
 
 Progress is flushed as partitions finish and at least every five minutes while
 a connection or query is blocked. JSON mode emits one object per line with

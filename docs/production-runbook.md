@@ -7,9 +7,9 @@ Dataset, or Experiment artifact. The legacy 891-date HDF5 collection and
 hash-pinned `quant_data` code are read-only comparison oracles.
 
 Do not start until the guarded Phase 10 pilot has passed code and quantitative
-review. WRDS access is permitted only while the repository owner is present and
-has just confirmed immediate 2FA readiness and that no other client is using
-the account.
+review. WRDS connection opens are governed by the host-local account-scoped
+monitor: they are serialized, and a fourth failed or interrupted attempt in a
+rolling 15-minute window is blocked before network access.
 
 ## 1. Freeze paths and source state
 
@@ -92,18 +92,16 @@ set -e
 test "$cache_status" -eq 4
 ```
 
-## 3. Immediate 2FA gate and fresh Raw download
+## 3. Monitored fresh Raw download
 
-Stop here. The owner must now confirm immediate WRDS 2FA readiness and the
-absence of any other process, notebook, host, or scheduled job using the same
-account. An earlier confirmation does not satisfy this gate. Then repeat the
-resource check and require every result to be `OK`:
+Repeat the resource check and require every result to be `OK`:
 
 The standard `.pgpass` entry must already have been configured and
 permission-checked using [wrds-runbook.md](wrds-runbook.md). The live command is
-fail-closed and must never ask for a username or password. If credentials or 2FA
-are rejected, stop; update `.pgpass` only from a private terminal and obtain a
-new immediate-readiness confirmation before another attempt.
+fail-closed and must never ask for a username or password. No confirmation flag
+is required. If credentials or 2FA are rejected, stop and update `.pgpass` only
+from a private terminal. The attempt monitor blocks a fourth failure in 15
+minutes; do not edit its state or loop the command.
 
 ```bash
 gpuctl resources --json | tee "$PRODUCTION_EVIDENCE/resources-pre-live.json"
@@ -116,14 +114,14 @@ env -u WRDS_OFF sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   raw download --source optionmetrics --ticker SPX \
   --start-date 2022-01-03 --end-date 2025-08-29 \
   --source-generation default-v1 \
-  --max-wrds-connections 2 --retry-attempts 1 --confirm-2fa-ready \
+  --max-wrds-connections 2 --retry-attempts 1 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/raw-live.jsonl"
 ```
 
 Do not retry authentication, 2FA, permission, connection-limit, or unknown
-failures. Preserve completed immutable partitions and wait for a new immediate
-readiness confirmation. An identical command later reuses validated partitions
-and queries only misses.
+failures. Preserve completed immutable partitions and correct the cause before
+the next monitor-permitted attempt. An identical command later reuses validated
+partitions and queries only misses.
 
 Disable WRDS and validate the completed Raw set:
 
@@ -372,10 +370,10 @@ canonical designation are output-first. After an interruption, retain the same
 `PRODUCTION_RUN_ID`, root, `default-v1` source generation, finalized configs,
 and command arguments, verify the resource gate, and repeat the interrupted
 command. Complete outputs are validated and reused. If a live Raw retry is
-still required, stop for a new immediate owner 2FA confirmation; never infer it
-from the earlier attempt. Do not delete a restart workspace, edit a config, or
-choose a new generation merely to bypass a failure. Preserve every attempt log
-in the evidence directory and give it a distinct suffix when needed.
+still required, correct the cause and wait for the account monitor to permit the
+next attempt. Do not delete monitor state, delete a restart workspace, edit a
+config, or choose a new generation merely to bypass a failure. Preserve every
+attempt log in the evidence directory and give it a distinct suffix when needed.
 
 ## 9. Evidence retention and safe cleanup
 
