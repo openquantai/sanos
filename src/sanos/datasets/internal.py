@@ -43,6 +43,8 @@ from sanos.widb.bad import bad_data_policy, bad_day_reason
 from sanos.widb.build import (
     DailyArtifactPlan,
     IntermediateBuildRequest,
+    _daily_namespace,
+    _surface_artifact_configuration,
     build_intermediates,
     enriched_day_producer_version,
     filtered_day_producer_version,
@@ -52,7 +54,13 @@ from sanos.widb.build import (
     plan_daily_artifacts,
     read_daily_frame,
 )
-from sanos.widb.calendar import DAYS_PER_YEAR, count_business_days_between, half_days, is_half_day
+from sanos.widb.calendar import (
+    DAYS_PER_YEAR,
+    business_dates,
+    count_business_days_between,
+    half_days,
+    is_half_day,
+)
 from sanos.widb.daily import (
     _black_implied,
     _black_values,
@@ -68,6 +76,7 @@ from sanos.widb.surface import (
     _canonical_discrete_dlv_densities,
     _canonical_discrete_dlv_squares,
     _discrete_dlv_grid,
+    _is_discrete_dlv_solver_event,
     _validate_discrete_dlv_projection,
     apply_options_filter,
     discrete_dlv_pricer,
@@ -78,12 +87,13 @@ from sanos.widb.surface import (
 from sanos.wrds import raw_content_producer_version
 
 RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
-INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v4"
+INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v5"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
-LINEAGE_SCHEMA = "sanos-internal-lineage-v1"
+LINEAGE_SCHEMA = "sanos-internal-lineage-v2"
 VALIDATION_SCHEMA = "sanos-internal-validation-v6"
 DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v4"
 LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v4"
+REVIEWED_FITTED_REUSE_POLICY = "phase-11-reviewed-fitted-reuse-v1"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _PARTITION_PATH = re.compile(
@@ -206,7 +216,7 @@ def _fail(message: str) -> None:
 
 
 @version("1.0")
-def _sha256_file(path: Path) -> str:
+def _dataset_sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -259,12 +269,16 @@ class _TerminalSolverEvidence:
     terminal_solver_call: _SolverCall
 
 
-@version("1.0", dependencies=[_SolverCall])
+@version("1.1", dependencies=[_SolverCall])
 def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
     """Parse and validate the exact diagnostic event and fallback grammar."""
 
     expiry_stages = {"expiry_soft", "expiry_hard"}
-    allowed_stages = expiry_stages | {"surface", "discrete_dlv_surface"}
+    allowed_stages = expiry_stages | {
+        "surface",
+        "discrete_dlv_strict",
+        "discrete_dlv_l1",
+    }
     successful = {"optimal", "optimal_inaccurate"}
     retry_triggers = {"solver_error", "invalid_solution", "user_limit"}
     base_fields = {
@@ -365,7 +379,7 @@ def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
     return calls
 
 
-@version("5.0", dependencies=[_solver_calls, _TerminalSolverEvidence])
+@version("5.1", dependencies=[_solver_calls, _TerminalSolverEvidence])
 def _terminal_solver_events(
     value: Mapping[str, Any],
     label: str,
@@ -385,15 +399,30 @@ def _terminal_solver_events(
 
     if expected_expiry_indices is None:
         calls = _solver_calls(events, label)
-        if len(calls) != 1 or calls[0].stage != "discrete_dlv_surface":
-            _fail(f"{label} diagnostics does not contain one discrete-DLV solve")
-        if calls[0].used_fallback or calls[0].terminal_status not in successful:
-            _fail(f"{label} diagnostics discrete-DLV solve did not succeed directly")
+        fit_mode = value.get("fit_mode")
+        strict_path = (
+            fit_mode == "strict_feasible"
+            and len(calls) == 1
+            and calls[0].stage == "discrete_dlv_strict"
+            and calls[0].terminal_status in successful
+        )
+        l1_path = (
+            fit_mode == "uniform_l1_fallback"
+            and len(calls) == 2
+            and calls[0].stage == "discrete_dlv_strict"
+            and calls[0].terminal_status in {"infeasible", "infeasible_inaccurate"}
+            and calls[1].stage == "discrete_dlv_l1"
+            and calls[1].terminal_status in successful
+        )
+        if not strict_path and not l1_path:
+            _fail(f"{label} diagnostics has an invalid discrete-DLV solver path")
+        if any(call.used_fallback for call in calls):
+            _fail(f"{label} diagnostics discrete-DLV solve used a solver fallback")
         if retained_expiry_indices is not None:
             _fail(f"{label} diagnostics received unexpected retained expiry indices")
         return _TerminalSolverEvidence(
             relaxed_support=frozenset(),
-            terminal_solver_call=calls[0],
+            terminal_solver_call=calls[-1],
         )
 
     if retained_expiry_indices is None:
@@ -519,6 +548,40 @@ def _terminal_solver_events(
         relaxed_support=frozenset(relaxed_support),
         terminal_solver_call=surface_calls[0],
     )
+
+
+@version("1.0", dependencies=[_is_discrete_dlv_solver_event])
+def _normalize_discrete_dlv_diagnostics(
+    value: Mapping[str, Any],
+    label: str,
+) -> tuple[dict[str, Any], bool]:
+    """Normalize the one accepted pre-policy strict diagnostics envelope."""
+
+    schema = value.get("schema")
+    if schema == "sanos-discrete-dlv-projection-diagnostics-v4":
+        return dict(value), False
+    if schema != "sanos-discrete-dlv-projection-diagnostics-v3":
+        _fail(f"{label} diagnostics schema is unsupported")
+    if "fit_mode" in value or "fit_quality" in value:
+        _fail(f"{label} legacy diagnostics contains post-policy fields")
+    events = value.get("solver_events")
+    if (
+        not isinstance(events, list)
+        or len(events) != 1
+        or not _is_discrete_dlv_solver_event(
+            events[0],
+            stage="discrete_dlv_surface",
+            statuses=frozenset({"optimal", "optimal_inaccurate"}),
+        )
+    ):
+        _fail(f"{label} legacy diagnostics has an invalid strict solver event")
+    normalized = dict(value)
+    normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v4"
+    normalized["fit_mode"] = "strict_feasible"
+    normalized["solver_events"] = [
+        {**cast(Mapping[str, Any], events[0]), "stage": "discrete_dlv_strict"}
+    ]
+    return normalized, True
 
 
 @version("1.0")
@@ -1806,13 +1869,14 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "4.3",
+    "4.7",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
         _reason_counts,
         _expected_solver_expiry_indices,
         _terminal_solver_events,
+        _normalize_discrete_dlv_diagnostics,
         _max_abs,
         _validate_pricer_state,
         _validate_calendar_residual,
@@ -1851,6 +1915,7 @@ def validate_fitted_partition(
     trading_date: date,
     typed_empty_reason: str | None,
     expected_raw_options_artifact_id: str | None = None,
+    accepted_stage_version_sha256: str | None = None,
 ) -> PartitionStatistics:
     """Recompute population, unit, mask, state, and solver invariants for one day."""
 
@@ -2046,8 +2111,18 @@ def validate_fitted_partition(
     for column, expected in expected_ids.items():
         if frame.get_column(column).unique().to_list() != [expected]:
             _fail(f"{trading_date}: {column} does not match canonical configuration")
-    if frame.get_column("stage_version").unique().to_list() != [str(fit_smooth_sanos.version)]:
-        _fail(f"{trading_date}: stage_version is not the terminal fitted-stage version")
+    stage_versions = frame.get_column("stage_version").unique().to_list()
+    current_stage_version = [str(fit_smooth_sanos.version)]
+    if stage_versions != current_stage_version:
+        accepted = (
+            len(stage_versions) == 1
+            and isinstance(stage_versions[0], str)
+            and accepted_stage_version_sha256 is not None
+            and hashlib.sha256(stage_versions[0].encode("utf-8")).hexdigest()
+            == accepted_stage_version_sha256
+        )
+        if not accepted:
+            _fail(f"{trading_date}: stage_version is not an accepted fitted-stage version")
     if frame.get_column("raw_options_artifact_id").unique().to_list() != [
         expected_raw_options_artifact_id
     ]:
@@ -2118,6 +2193,17 @@ def validate_fitted_partition(
     filter_diagnostics = _canonical_object(filter_text, "filter diagnostics")
     smooth = _canonical_object(smooth_text, "smooth diagnostics")
     dlv_diagnostics = _canonical_object(dlv_text, "discrete-DLV diagnostics")
+    normalized_dlv_diagnostics, legacy_dlv_diagnostics = (
+        _normalize_discrete_dlv_diagnostics(
+            dlv_diagnostics,
+            "discrete-DLV",
+        )
+    )
+    if legacy_dlv_diagnostics and accepted_stage_version_sha256 is None:
+        _fail(
+            f"{trading_date}: legacy discrete-DLV diagnostics require exact "
+            "reviewed-source authorization"
+        )
     no_arb_solver_indices = _expected_solver_expiry_indices(
         frame,
         np.ones(frame.height, dtype=bool),
@@ -2165,7 +2251,7 @@ def validate_fitted_partition(
         )
         smooth_relaxed_support = smooth_solver_evidence.relaxed_support
         _terminal_solver_events(
-            dlv_diagnostics,
+            normalized_dlv_diagnostics,
             "discrete-DLV",
             expected_expiry_indices=None,
         )
@@ -2403,8 +2489,8 @@ def validate_fitted_partition(
         _fail(f"{trading_date}: smooth diagnostic selected count is inconsistent")
     if np.any(selected):
         if (
-            dlv_diagnostics.get("schema")
-            != "sanos-discrete-dlv-projection-diagnostics-v3"
+            normalized_dlv_diagnostics.get("schema")
+            != "sanos-discrete-dlv-projection-diagnostics-v4"
             or dlv_diagnostics.get("outcome") != "completed"
             or dlv_diagnostics.get("source") != "smooth_sanos_surface"
             or dlv_diagnostics.get("inner_nodes") != config.surface.discrete_dlv.inner_nodes
@@ -2447,7 +2533,7 @@ def validate_fitted_partition(
     ):
         _fail(f"{trading_date}: zero-selected day lacks explicit smooth outcome")
     elif dlv_diagnostics != {
-        "schema": "sanos-discrete-dlv-projection-diagnostics-v3",
+        "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
         "outcome": "no_smooth_state",
         "source": "smooth_sanos_surface",
     }:
@@ -2703,8 +2789,12 @@ def validate_fitted_partition(
             fitted_calls=stored_fitted,
             listed_strikes=listed_strikes,
             dlv_squares=stored_dlvs,
-            solver_events=[dict(value) for value in dlv_diagnostics["solver_events"]],
+            solver_events=[
+                dict(value)
+                for value in normalized_dlv_diagnostics["solver_events"]
+            ],
             solver_warnings=[str(value) for value in dlv_diagnostics["solver_warnings"]],
+            fit_mode=str(normalized_dlv_diagnostics["fit_mode"]),
             stabilization={
                 "density_max_abs": float(
                     dlv_diagnostics["stabilization_density_max_abs"]
@@ -2737,7 +2827,23 @@ def validate_fitted_partition(
             ),
             config=config.surface.discrete_dlv,
         )
-        if canonical_json(revalidated_dlv_diagnostics) != dlv_text:
+        expected_dlv_diagnostics = dict(revalidated_dlv_diagnostics)
+        if legacy_dlv_diagnostics:
+            expected_dlv_diagnostics.pop("fit_mode")
+            expected_dlv_diagnostics.pop("fit_quality")
+            expected_dlv_diagnostics["schema"] = (
+                "sanos-discrete-dlv-projection-diagnostics-v3"
+            )
+            expected_dlv_diagnostics["solver_events"] = [
+                {
+                    **cast(
+                        Mapping[str, Any],
+                        expected_dlv_diagnostics["solver_events"][0],
+                    ),
+                    "stage": "discrete_dlv_surface",
+                }
+            ]
+        if canonical_json(expected_dlv_diagnostics) != dlv_text:
             _fail(f"{trading_date}: stored DLV diagnostics differ from strict recomputation")
         dlv_projection_call_error = float(
             cast(Mapping[str, Any], revalidated_dlv_diagnostics["projection_call"])[
@@ -3907,7 +4013,7 @@ def _source_revision() -> str:
     return revision
 
 
-@version("1.0", dependencies=[_sha256_file])
+@version("1.0", dependencies=[_dataset_sha256_file])
 def _raw_artifact_records(
     store: ArtifactStore,
     plan: InternalDatasetPlan,
@@ -3926,7 +4032,9 @@ def _raw_artifact_records(
                 "ticker": configuration.get("ticker"),
                 "observation_date": configuration.get("observation_date"),
                 "source_generation": artifact.manifest["source_generation"],
-                "manifest_sha256": _sha256_file(artifact.path / "manifest.json"),
+                "manifest_sha256": _dataset_sha256_file(
+                    artifact.path / "manifest.json"
+                ),
                 "payloads": artifact.manifest["files"],
             }
         )
@@ -4071,6 +4179,98 @@ def _partition_record_statistics(record: Mapping[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], canonical_value(value))
 
 
+@version(
+    "1.1",
+    dependencies=[
+        _pointer_from_value,
+        "_required_reviewed_fitted_sources",
+        "_reviewed_fitted_sources",
+        canonical_value,
+    ],
+)
+def _validated_reviewed_fitted_records(
+    value: Any,
+    *,
+    config: InternalDatasetConfig,
+    chain_fitted: tuple[ArtifactPointer, ...],
+    partitions: tuple[Mapping[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Validate permanent evidence for exact historical fits accepted without rerun."""
+
+    if not isinstance(value, list):
+        _fail("Dataset reviewed fitted evidence must be a list")
+    expected_fields = {
+        "policy",
+        "trading_date",
+        "artifact",
+        "configuration_id",
+        "data_sha256",
+        "manifest_sha256",
+        "producer_version",
+        "stage_version_sha256",
+        "diagnostics_schema",
+    }
+    approved = _reviewed_fitted_sources()
+    required = _required_reviewed_fitted_sources(config)
+    partition_by_date = {
+        str(record.get("trading_date")): (index, record)
+        for index, record in enumerate(partitions)
+    }
+    normalized: list[dict[str, Any]] = []
+    observed_dates: list[str] = []
+    for index, record in enumerate(value):
+        if not isinstance(record, Mapping) or set(record) != expected_fields:
+            _fail(f"Reviewed fitted record {index} has missing or unexpected fields")
+        if record.get("policy") != REVIEWED_FITTED_REUSE_POLICY:
+            _fail(f"Reviewed fitted record {index} has the wrong policy")
+        trading_date = record.get("trading_date")
+        if not isinstance(trading_date, str) or trading_date not in partition_by_date:
+            _fail(f"Reviewed fitted record {index} has an unknown trading date")
+        source_index, partition = partition_by_date[trading_date]
+        pointer = _pointer_from_value(
+            record.get("artifact"),
+            f"reviewed fitted record {index} artifact",
+        )
+        if pointer.storage_class is not StorageClass.INTERMEDIATE:
+            _fail(f"Reviewed fitted record {index} is not an Intermediate artifact")
+        if pointer != chain_fitted[source_index] or pointer != _pointer_from_value(
+            partition.get("fitted_artifact"),
+            f"reviewed fitted record {index} partition artifact",
+        ):
+            _fail(f"Reviewed fitted record {index} differs from Dataset lineage")
+        expected = approved.get(pointer.artifact_id)
+        producer_version = record.get("producer_version")
+        if expected is None or not isinstance(producer_version, str) or not producer_version:
+            _fail(f"Reviewed fitted record {index} is not in the exact approved set")
+        observed = (
+            pointer.namespace,
+            record.get("configuration_id"),
+            record.get("data_sha256"),
+            record.get("manifest_sha256"),
+            hashlib.sha256(producer_version.encode("utf-8")).hexdigest(),
+            record.get("stage_version_sha256"),
+            record.get("diagnostics_schema"),
+        )
+        if observed != expected:
+            _fail(f"Reviewed fitted record {index} fingerprint differs from policy")
+        if record.get("data_sha256") != partition.get(
+            "fitted_source_sha256"
+        ) or record.get("manifest_sha256") != partition.get("fitted_manifest_sha256"):
+            _fail(f"Reviewed fitted record {index} checksum differs from partition evidence")
+        observed_dates.append(trading_date)
+        normalized.append(cast(dict[str, Any], canonical_value(record)))
+    if observed_dates != sorted(set(observed_dates)):
+        _fail("Reviewed fitted records must have unique increasing trading dates")
+    recorded_ids = {
+        _pointer_from_value(record["artifact"], "reviewed fitted artifact").artifact_id
+        for record in normalized
+    }
+    required_ids = {artifact_id for artifact_id, _ in required.values()}
+    if recorded_ids != required_ids:
+        _fail("Dataset reviewed fitted evidence is incomplete")
+    return tuple(normalized)
+
+
 @version("1.0", dependencies=[half_days])
 def _scheduled_exclusions(config: InternalDatasetConfig) -> tuple[dict[str, Any], ...]:
     if config.include_half_days:
@@ -4082,12 +4282,13 @@ def _scheduled_exclusions(config: InternalDatasetConfig) -> tuple[dict[str, Any]
 
 
 @version(
-    "3.0",
+    "3.2",
     dependencies=[
         _fail,
         _legacy_comparison_document,
         _open_validated_internal_dataset,
         _partition_record_statistics,
+        _validated_reviewed_fitted_records,
         _pointer_from_value,
         _read_json_file,
         validate_fitted_partition,
@@ -4095,7 +4296,7 @@ def _scheduled_exclusions(config: InternalDatasetConfig) -> tuple[dict[str, Any]
         _scheduled_exclusions,
         _safe_partition_ticker_label,
         _schema_document,
-        _sha256_file,
+        _dataset_sha256_file,
         bad_data_policy,
         canonical_sha256,
         canonical_value,
@@ -4142,7 +4343,13 @@ def validate_internal_dataset(
     if schema != _schema_document():
         _fail("schema.json differs from the current immutable Dataset schema contract")
     lineage = _read_json_file(validated.path / "lineage.json", "lineage.json")
-    if lineage.get("schema") != LINEAGE_SCHEMA:
+    if set(lineage) != {
+        "schema",
+        "raw_catalog",
+        "raw_mapping_digest",
+        "daily_chains",
+        "reviewed_fitted_artifacts",
+    } or lineage.get("schema") != LINEAGE_SCHEMA:
         _fail("Unsupported Dataset lineage schema")
     if lineage.get("raw_mapping_digest") != configuration.get("raw_mapping_digest"):
         _fail("Dataset lineage Raw mapping digest differs from configuration")
@@ -4214,6 +4421,15 @@ def validate_internal_dataset(
     expected_raw_pointers = tuple(
         sorted({pointer for roles in chain_raw_roles for pointer in roles.values()})
     )
+    reviewed_fitted_records = _validated_reviewed_fitted_records(
+        lineage.get("reviewed_fitted_artifacts"),
+        config=dataset.config,
+        chain_fitted=tuple(chain_fitted),
+        partitions=dataset.partitions,
+    )
+    reviewed_fitted_by_date = {
+        str(record["trading_date"]): record for record in reviewed_fitted_records
+    }
     metadata = validated.manifest.get("metadata")
     if not isinstance(metadata, Mapping):
         _fail("Dataset manifest metadata is malformed")
@@ -4227,6 +4443,7 @@ def validate_internal_dataset(
         "raw_mapping_digest",
         "raw_artifacts",
         "fitted_artifacts",
+        "reviewed_fitted_artifacts",
         "planned_date_count",
         "partition_count",
         "populated_date_count",
@@ -4270,6 +4487,10 @@ def validate_internal_dataset(
         _pointer_from_value(value, "metadata fitted artifact") for value in fitted_metadata
     ) != tuple(chain_fitted):
         _fail("Dataset manifest fitted identities differ from daily lineage")
+    if metadata.get("reviewed_fitted_artifacts") != canonical_value(
+        reviewed_fitted_records
+    ):
+        _fail("Dataset manifest reviewed fitted evidence differs from lineage")
     expected_exclusions = canonical_value(_scheduled_exclusions(dataset.config))
     if metadata.get("scheduled_exclusions") != expected_exclusions:
         _fail("Dataset manifest scheduled exclusions differ from configuration")
@@ -4331,7 +4552,7 @@ def validate_internal_dataset(
             if raw_pointer.storage_class is not StorageClass.RAW:
                 _fail("Raw catalog contains a non-Raw artifact record")
             raw_artifact = store.validate(raw_pointer)
-            if record.get("manifest_sha256") != _sha256_file(
+            if record.get("manifest_sha256") != _dataset_sha256_file(
                 raw_artifact.path / "manifest.json"
             ) or record.get("payloads") != raw_artifact.manifest.get("files"):
                 _fail("Raw catalog record checksum evidence differs from retained Raw")
@@ -4452,7 +4673,7 @@ def validate_internal_dataset(
         if match.group(2) != str(expected_date.year) or match.group(3) != expected_date.isoformat():
             _fail(f"{expected_date}: partition path date is inconsistent")
         path = validated.path / PurePosixPath(relative)
-        if record.get("sha256") != _sha256_file(path):
+        if record.get("sha256") != _dataset_sha256_file(path):
             _fail(f"{expected_date}: partition catalog checksum is inconsistent")
         if record.get("fitted_source_sha256") != record.get("sha256"):
             _fail(f"{expected_date}: source/copy checksum evidence differs")
@@ -4468,11 +4689,11 @@ def validate_internal_dataset(
             _fail(f"{expected_date}: partition and lineage fitted pointers differ")
         if deep_lineage:
             source_artifact = store.validate(fitted_pointer)
-            if record.get("fitted_manifest_sha256") != _sha256_file(
+            if record.get("fitted_manifest_sha256") != _dataset_sha256_file(
                 source_artifact.path / "manifest.json"
             ):
                 _fail(f"{expected_date}: fitted manifest checksum evidence differs")
-            if record.get("fitted_source_sha256") != _sha256_file(
+            if record.get("fitted_source_sha256") != _dataset_sha256_file(
                 source_artifact.path / "data.parquet"
             ):
                 _fail(f"{expected_date}: fitted source checksum evidence differs")
@@ -4486,6 +4707,12 @@ def validate_internal_dataset(
             trading_date=expected_date,
             typed_empty_reason=typed_reason,
             expected_raw_options_artifact_id=chain_raw_roles[index]["options"].artifact_id,
+            accepted_stage_version_sha256=cast(
+                str | None,
+                reviewed_fitted_by_date.get(expected_date.isoformat(), {}).get(
+                    "stage_version_sha256"
+                ),
+            ),
         )
         if record.get("typed_empty") is not frame.is_empty():
             _fail(f"{expected_date}: typed-empty flag differs from partition contents")
@@ -4547,7 +4774,7 @@ def validate_internal_dataset(
         "legacy-comparison.json",
     )
     expected_evidence = {
-        name: _sha256_file(validated.path / name) for name in evidence_names
+        name: _dataset_sha256_file(validated.path / name) for name in evidence_names
     }
     if evidence != expected_evidence:
         _fail("Dataset manifest evidence checksums differ from immutable payloads")
@@ -4590,8 +4817,11 @@ def validate_internal_dataset(
     return summary
 
 
-@version("1.0")
-def _daily_chain_record(item: DailyArtifactPlan) -> dict[str, Any]:
+@version("1.1")
+def _daily_chain_record(
+    item: DailyArtifactPlan,
+    fitted_artifact: ArtifactPointer,
+) -> dict[str, Any]:
     return {
         "trading_date": item.trading_date,
         "raw_roles": {
@@ -4606,7 +4836,7 @@ def _daily_chain_record(item: DailyArtifactPlan) -> dict[str, Any]:
         "enriched": item.enriched.pointer,
         "no_arb": item.no_arb.pointer,
         "filtered": item.filtered.pointer,
-        "fitted": item.fitted.pointer,
+        "fitted": fitted_artifact,
     }
 
 
@@ -4630,28 +4860,226 @@ def _emit_progress(
         progress(cast(dict[str, Any], canonical_value({"event": event, **fields})))
 
 
+@version(REVIEWED_FITTED_REUSE_POLICY)
+def _reviewed_fitted_sources() -> Mapping[
+    str,
+    tuple[str, str, str, str, str, str, str],
+]:
+    """Return the exact four successful fitted artifacts approved for direct reuse."""
+
+    return {
+        "5fdea7a911b5b1d4a2b906af4cccc13c379a31af1908423686e6a005cf93c71a": (
+            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-03",
+            "c18844fd1554e67b4139e8342e4f4681347e439fb045cbe0cd4b28ce84576006",
+            "b61da4495dbafe6eeaa0ec30dc7d74a284b6856201de0a92284f18411d3b9c24",
+            "b74b6e60de08482ea15179232ee1bf61c7d67e0e2c5200530734b1111dbdb87a",
+            "4c60bda01bf08d420e177fcf8c442ffc2c9abb3c2cc17706da92f6f9b83617dc",
+            "4d5a60de1e7e3854cba3cb79bb9c1a577fc43b0e67625c41b82ccfad8de96e58",
+            "sanos-discrete-dlv-projection-diagnostics-v3",
+        ),
+        "6476ea2f0f6be0cfb6ab222836e8646e06055a6c6a29c9e3c1b69c5cef5210ed": (
+            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-04",
+            "a6712c10971d47582a3b10fefd697653618652e330f2f392e9d5cc8eb557e240",
+            "d08fd496df53396e27473b93790cd7ed00b5d08db9433014fab39718a33cb36c",
+            "40d1d192f32e8200485836703ae17bb965cebb5517829836507b4c9db1d37b9d",
+            "4c60bda01bf08d420e177fcf8c442ffc2c9abb3c2cc17706da92f6f9b83617dc",
+            "4d5a60de1e7e3854cba3cb79bb9c1a577fc43b0e67625c41b82ccfad8de96e58",
+            "sanos-discrete-dlv-projection-diagnostics-v3",
+        ),
+        "3d7c01c0e8469cb84ce3cbb44e8c8cea0156e5cdbb96721572769466639a9b9f": (
+            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-05",
+            "845c1d44d36c8983f4807d1a4d224144b56930d6cb915b5d13192b2f0adcf1c6",
+            "9ab701935445825e9b254792a09736a320ba8ede59fe39ad81f97e8a12cf1f98",
+            "96d515f5d025a7a54482d0e7e93fe2a5d5cc09ec9707e8ec19468add9672cefc",
+            "7ece560f8ead8b4dd787a3238836f525b40b24c1784d628f2512693e2f29b723",
+            "1a538df170f006a143771face285d78dd7fb1b049eb16e273e6f5c61cc0d11d2",
+            "sanos-discrete-dlv-projection-diagnostics-v4",
+        ),
+        "63f6e0ab4da2c4917b49cee658e60787d38f22cfb55825436b7e2ef6e956f940": (
+            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-06",
+            "f923117e790cdf7b934d41bd0569bd2fa69ee8f7d083dd8cadc0697fd0f2c147",
+            "ab57ab30d71e9d0e84fab478bd892eb6b3424bd11fdcd0c5b14f1933dbef2012",
+            "81dcdc264d96ac117f016dcb46a4f937761f6f9266a8c711725be8ae80fe3059",
+            "7ece560f8ead8b4dd787a3238836f525b40b24c1784d628f2512693e2f29b723",
+            "1a538df170f006a143771face285d78dd7fb1b049eb16e273e6f5c61cc0d11d2",
+            "sanos-discrete-dlv-projection-diagnostics-v4",
+        ),
+    }
+
+
 @version(
     "1.0",
-    dependencies=[read_daily_frame, validate_fitted_partition, _emit_progress],
+    dependencies=[
+        InternalDatasetConfig,
+        _daily_namespace,
+        _reviewed_fitted_sources,
+        _surface_artifact_configuration,
+        business_dates,
+        canonical_sha256,
+    ],
+)
+def _required_reviewed_fitted_sources(
+    config: InternalDatasetConfig,
+) -> dict[
+    date,
+    tuple[str, tuple[str, str, str, str, str, str, str]],
+]:
+    """Derive mandatory reviewed sources from config, dates, and the pinned policy."""
+
+    approved = _reviewed_fitted_sources()
+    required: dict[
+        date,
+        tuple[str, tuple[str, str, str, str, str, str, str]],
+    ] = {}
+    dates = business_dates(
+        config.start_date,
+        config.end_date,
+        exclude_half_days=not config.include_half_days,
+    )
+    for trading_date in dates:
+        namespace = _daily_namespace("fitted-day", config.ticker, trading_date)
+        configuration_id = canonical_sha256(
+            _surface_artifact_configuration(
+                "fitted-day",
+                config.ticker,
+                trading_date,
+                config.surface,
+            )
+        )
+        matches = [
+            (artifact_id, fingerprint)
+            for artifact_id, fingerprint in approved.items()
+            if fingerprint[:2] == (namespace, configuration_id)
+        ]
+        if len(matches) > 1:
+            _fail(f"{trading_date}: reviewed fitted source policy is ambiguous")
+        if matches:
+            required[trading_date] = matches[0]
+    return required
+
+
+@version(
+    "1.1",
+    dependencies=[
+        ArtifactPointer,
+        ArtifactStore,
+        InternalDatasetConfig,
+        InternalDatasetPlan,
+        _canonical_object,
+        _required_reviewed_fitted_sources,
+        _reviewed_fitted_sources,
+        _dataset_sha256_file,
+        read_daily_frame,
+    ],
+)
+def _validated_reviewed_fitted_sources(
+    store: ArtifactStore,
+    config: InternalDatasetConfig,
+    plan: InternalDatasetPlan,
+) -> dict[date, ValidatedArtifact]:
+    """Resolve exact accepted fits without republishing them under a new identity."""
+
+    reviewed: dict[date, ValidatedArtifact] = {}
+    required_sources = _required_reviewed_fitted_sources(config)
+    for item in plan.daily_artifacts:
+        required = required_sources.get(item.trading_date)
+        if required is None:
+            continue
+        artifact_id, expected_fingerprint = required
+        pointer = ArtifactPointer(
+            item.fitted.storage_class,
+            item.fitted.namespace,
+            artifact_id,
+        )
+        if not store.path_for(pointer).exists():
+            _fail(
+                f"{item.trading_date}: exact reviewed fitted source is missing; "
+                "the accepted successful fit must not be silently recomputed"
+            )
+        source = store.validate(
+            pointer,
+            expected=item.fitted,
+            ignore_producer_version=True,
+            deep=True,
+        )
+        source_frame = read_daily_frame(
+            store,
+            source,
+            schema=FITTED_SCHEMA,
+            ticker=str(item.fitted.configuration["ticker"]),
+            trading_date=item.trading_date,
+        )
+        if source_frame.is_empty():
+            _fail(f"{item.trading_date}: reviewed fitted source is unexpectedly empty")
+        source_data_sha256 = next(
+            str(record["sha256"])
+            for record in source.manifest["files"]
+            if record["path"] == "data.parquet"
+        )
+        source_manifest_sha256 = _dataset_sha256_file(
+            source.path / "manifest.json"
+        )
+        stage_versions = source_frame.get_column("stage_version").unique().to_list()
+        diagnostics_texts = source_frame.get_column(
+            "discrete_dlv_diagnostics_json"
+        ).unique().to_list()
+        if len(stage_versions) != 1 or not isinstance(stage_versions[0], str):
+            _fail(f"{item.trading_date}: reviewed fitted source has invalid stage version")
+        if len(diagnostics_texts) != 1 or not isinstance(diagnostics_texts[0], str):
+            _fail(f"{item.trading_date}: reviewed fitted source has invalid diagnostics")
+        diagnostics = _canonical_object(
+            diagnostics_texts[0],
+            f"{item.trading_date} reviewed discrete-DLV diagnostics",
+        )
+        observed_fingerprint = (
+            source.pointer.namespace,
+            str(source.manifest["configuration_id"]),
+            source_data_sha256,
+            source_manifest_sha256,
+            hashlib.sha256(str(source.manifest["producer_version"]).encode("utf-8")).hexdigest(),
+            hashlib.sha256(stage_versions[0].encode("utf-8")).hexdigest(),
+            str(diagnostics.get("schema")),
+        )
+        if observed_fingerprint != expected_fingerprint:
+            _fail(f"{item.trading_date}: reviewed fitted source fingerprint changed")
+        reviewed[item.trading_date] = source
+    return reviewed
+
+
+@version(
+    "1.1",
+    dependencies=[
+        _reviewed_fitted_sources,
+        _dataset_sha256_file,
+        canonical_value,
+        read_daily_frame,
+        validate_fitted_partition,
+        _emit_progress,
+    ],
 )
 def _validate_fitted_sources(
     store: ArtifactStore,
     config: InternalDatasetConfig,
     plan: InternalDatasetPlan,
     *,
+    reviewed_sources: Mapping[date, ValidatedArtifact],
     progress: Callable[[Mapping[str, Any]], None] | None,
     progress_interval_seconds: float,
 ) -> tuple[
     tuple[ValidatedArtifact, ...],
     tuple[PartitionStatistics, ...],
+    tuple[dict[str, Any], ...],
 ]:
     artifacts: list[ValidatedArtifact] = []
     statistics: list[PartitionStatistics] = []
+    reviewed_records: list[dict[str, Any]] = []
     started = time.monotonic()
     last_progress = started
     total = len(plan.daily_artifacts)
     for completed, item in enumerate(plan.daily_artifacts, start=1):
-        artifact = store.validate(item.fitted.pointer, expected=item.fitted, deep=True)
+        artifact = reviewed_sources.get(item.trading_date)
+        if artifact is None:
+            artifact = store.validate(item.fitted.pointer, expected=item.fitted, deep=True)
         metadata = artifact.manifest.get("metadata")
         if not isinstance(metadata, Mapping):
             _fail(f"{item.trading_date}: fitted artifact metadata is malformed")
@@ -4671,9 +5099,55 @@ def _validate_fitted_sources(
             trading_date=item.trading_date,
             typed_empty_reason=typed_reason,
             expected_raw_options_artifact_id=item.raw.options.artifact_id,
+            accepted_stage_version_sha256=(
+                cast(
+                    str,
+                    _reviewed_fitted_sources()[artifact.pointer.artifact_id][5],
+                )
+                if item.trading_date in reviewed_sources
+                else None
+            ),
         )
         artifacts.append(artifact)
         statistics.append(item_statistics)
+        if item.trading_date in reviewed_sources:
+            data_sha256 = next(
+                str(record["sha256"])
+                for record in artifact.manifest["files"]
+                if record["path"] == "data.parquet"
+            )
+            stage_version = frame.get_column("stage_version").unique().to_list()
+            diagnostics_text = frame.get_column(
+                "discrete_dlv_diagnostics_json"
+            ).unique().to_list()
+            if len(stage_version) != 1 or len(diagnostics_text) != 1:
+                _fail(f"{item.trading_date}: reviewed fitted provenance is not unique")
+            diagnostics = _canonical_object(
+                str(diagnostics_text[0]),
+                f"{item.trading_date} reviewed discrete-DLV diagnostics",
+            )
+            reviewed_records.append(
+                cast(
+                    dict[str, Any],
+                    canonical_value(
+                        {
+                            "policy": REVIEWED_FITTED_REUSE_POLICY,
+                            "trading_date": item.trading_date,
+                            "artifact": artifact.pointer,
+                            "configuration_id": artifact.manifest["configuration_id"],
+                            "data_sha256": data_sha256,
+                            "manifest_sha256": _dataset_sha256_file(
+                                artifact.path / "manifest.json"
+                            ),
+                            "producer_version": artifact.manifest["producer_version"],
+                            "stage_version_sha256": hashlib.sha256(
+                                str(stage_version[0]).encode("utf-8")
+                            ).hexdigest(),
+                            "diagnostics_schema": diagnostics.get("schema"),
+                        }
+                    ),
+                )
+            )
         now = time.monotonic()
         if completed == total or now - last_progress >= progress_interval_seconds:
             elapsed = now - started
@@ -4695,11 +5169,11 @@ def _validate_fitted_sources(
     catalog_raw = set(plan.raw_catalog_spec.upstream)
     if planned_raw != catalog_raw:
         _fail("Validated fitted chains do not close to exactly the planned Raw catalog")
-    return tuple(artifacts), tuple(statistics)
+    return tuple(artifacts), tuple(statistics), tuple(reviewed_records)
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         _scheduled_exclusions,
         aggregate_statistics,
@@ -4710,7 +5184,7 @@ def _validate_fitted_sources(
         _schema_document,
         _legacy_comparison_document,
         _sha256_bytes,
-        _sha256_file,
+        _dataset_sha256_file,
         validate_fitted_partition,
     ],
 )
@@ -4720,6 +5194,7 @@ def _publish_internal_dataset(
     plan: InternalDatasetPlan,
     fitted_artifacts: tuple[ValidatedArtifact, ...],
     statistics: tuple[PartitionStatistics, ...],
+    reviewed_fitted_artifacts: tuple[dict[str, Any], ...],
     *,
     source_revision: str,
     progress: Callable[[Mapping[str, Any]], None] | None,
@@ -4742,7 +5217,7 @@ def _publish_internal_dataset(
     ):
         source_path = artifact.path / "data.parquet"
         relative = _partition_relative_path(config.ticker, item.trading_date)
-        source_checksum = _sha256_file(source_path)
+        source_checksum = _dataset_sha256_file(source_path)
         partitions.append(
             {
                 "trading_date": item.trading_date,
@@ -4751,7 +5226,9 @@ def _publish_internal_dataset(
                 "sha256": source_checksum,
                 "byte_size": source_path.stat().st_size,
                 "fitted_artifact": artifact.pointer,
-                "fitted_manifest_sha256": _sha256_file(artifact.path / "manifest.json"),
+                "fitted_manifest_sha256": _dataset_sha256_file(
+                    artifact.path / "manifest.json"
+                ),
                 "fitted_source_sha256": source_checksum,
                 "typed_empty": item_statistics.typed_empty,
                 "typed_empty_reason": item_statistics.typed_empty_reason,
@@ -4767,7 +5244,15 @@ def _publish_internal_dataset(
         "schema": LINEAGE_SCHEMA,
         "raw_catalog": plan.raw_catalog_spec.pointer,
         "raw_mapping_digest": plan.raw_mapping_digest,
-        "daily_chains": tuple(_daily_chain_record(item) for item in plan.daily_artifacts),
+        "daily_chains": tuple(
+            _daily_chain_record(item, artifact.pointer)
+            for item, artifact in zip(
+                plan.daily_artifacts,
+                fitted_artifacts,
+                strict=True,
+            )
+        ),
+        "reviewed_fitted_artifacts": reviewed_fitted_artifacts,
     }
     validation_document = {
         "schema": VALIDATION_SCHEMA,
@@ -4800,6 +5285,7 @@ def _publish_internal_dataset(
         "raw_mapping_digest": plan.raw_mapping_digest,
         "raw_artifacts": plan.raw_catalog_spec.upstream,
         "fitted_artifacts": tuple(artifact.pointer for artifact in fitted_artifacts),
+        "reviewed_fitted_artifacts": reviewed_fitted_artifacts,
         "planned_date_count": len(plan.expected_dates),
         "partition_count": len(partitions),
         "populated_date_count": summary.populated_dates,
@@ -4823,6 +5309,9 @@ def _publish_internal_dataset(
         "evidence_checksums": evidence_checksums,
     }
     builder = store.writer(plan.dataset_spec, metadata=metadata)
+    reviewed_by_date = {
+        str(record["trading_date"]): record for record in reviewed_fitted_artifacts
+    }
     try:
         with builder as staging:
             for relative, payload in documents.items():
@@ -4837,7 +5326,7 @@ def _publish_internal_dataset(
                 copied = staging.copy_file(
                     str(record["path"]), artifact.path / "data.parquet"
                 )
-                if _sha256_file(copied) != record["sha256"]:
+                if _dataset_sha256_file(copied) != record["sha256"]:
                     _fail(f"{item.trading_date}: copied partition checksum changed")
                 copied_frame = pl.read_parquet(copied, hive_partitioning=False)
                 validate_fitted_partition(
@@ -4846,6 +5335,12 @@ def _publish_internal_dataset(
                     trading_date=item.trading_date,
                     typed_empty_reason=cast(str | None, record["typed_empty_reason"]),
                     expected_raw_options_artifact_id=item.raw.options.artifact_id,
+                    accepted_stage_version_sha256=cast(
+                        str | None,
+                        reviewed_by_date.get(item.trading_date.isoformat(), {}).get(
+                            "stage_version_sha256"
+                        ),
+                    ),
                 )
                 now = time.monotonic()
                 if completed == total or now - last_progress >= progress_interval_seconds:
@@ -4868,11 +5363,12 @@ def _publish_internal_dataset(
 
 
 @version(
-    "1.0",
+    "1.2",
     dependencies=[
         InternalDatasetBuildResult,
         plan_internal_dataset,
         build_intermediates,
+        _validated_reviewed_fitted_sources,
         publish_raw_lineage_catalog,
         _validate_fitted_sources,
         _publish_internal_dataset,
@@ -4942,10 +5438,15 @@ def build_internal_dataset(
     )
     daily_summary: DailyRunSummary | None = None
     try:
-        if options.require_existing_intermediates:
-            for item in plan.daily_artifacts:
-                store.validate(item.fitted.pointer, expected=item.fitted)
-        else:
+        reviewed_sources = _validated_reviewed_fitted_sources(store, config, plan)
+        if reviewed_sources:
+            journal.emit(
+                "reviewed_fitted_artifacts_reused",
+                plan_id=plan.plan_id,
+                completed=len(reviewed_sources),
+                total=len(plan.expected_dates),
+            )
+        if not options.require_existing_intermediates:
             daily_result = build_intermediates(
                 locations,
                 IntermediateBuildRequest(
@@ -4962,12 +5463,17 @@ def build_internal_dataset(
                 config.daily,
                 config.surface,
                 progress=progress,
+                _completion_overrides={
+                    trading_date: artifact.pointer
+                    for trading_date, artifact in reviewed_sources.items()
+                },
             )
             daily_summary = daily_result.summary
-        fitted_artifacts, statistics = _validate_fitted_sources(
+        fitted_artifacts, statistics, reviewed_records = _validate_fitted_sources(
             store,
             config,
             plan,
+            reviewed_sources=reviewed_sources,
             progress=progress,
             progress_interval_seconds=options.progress_interval_seconds,
         )
@@ -4981,6 +5487,7 @@ def build_internal_dataset(
             plan,
             fitted_artifacts,
             statistics,
+            reviewed_records,
             source_revision=source_revision,
             progress=progress,
             progress_interval_seconds=options.progress_interval_seconds,

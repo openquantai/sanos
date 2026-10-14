@@ -314,13 +314,13 @@ def test_new_nested_journal_fsyncs_its_containing_directory(
     import sanos.pipeline.runner as runner_module
 
     calls: list[Path] = []
-    original = runner_module._fsync_directory
+    original = runner_module._journal_fsync_directory
 
     def record(path: Path) -> None:
         calls.append(path)
         original(path)
 
-    monkeypatch.setattr(runner_module, "_fsync_directory", record)
+    monkeypatch.setattr(runner_module, "_journal_fsync_directory", record)
     path = tmp_path / "nested" / "journal" / "run.jsonl"
     RunJournal(path).emit("started")
     assert path.parent in calls

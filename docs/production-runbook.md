@@ -418,6 +418,17 @@ missing artifact.
 
 ## Restart rule
 
+Daily fitted outputs are immutable and output-first. Keep every completed,
+validated fitted-day artifact when resuming a range; do not numerically refit a
+successful earlier date because a later date failed or used the discrete-DLV
+L1 branch. The normal exact-version lookup reuses it automatically. If the
+reviewed diagnostics/event hardening changed producer identity, the internal
+Dataset build uses only the four exact, fingerprint-pinned Phase 11 artifacts
+documented in CD-023. It keeps their original identities, skips their work
+units, validates their complete fitted state, and records their full acceptance
+evidence in the permanent Dataset. It does not transform or republish them.
+`--version '*'` remains reuse-only and is not this reviewed-source mechanism.
+
 Raw partitions, daily stages, Datasets, public candidates, Experiments, and the
 canonical designation are output-first. After an interruption, retain the same
 `PRODUCTION_RUN_ID`, root, `default-v1` source generation, finalized configs,

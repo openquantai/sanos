@@ -43,9 +43,11 @@ from sanos.datasets.public import (
     project_public_day,
     public_capabilities,
     public_polars_schema,
+    public_schema_document,
     validate_public_dataset,
     validate_public_frame,
 )
+from sanos.datasets.public.documents import candidate_readme
 from sanos.datasets.public.project import (
     _daily_front_mask,
     _log_curve_value,
@@ -59,6 +61,7 @@ from sanos.datasets.public.validate import (
     public_coverage_sha256,
     public_frame_logical_sha256,
     public_return_values_sha256,
+    public_validation_document,
     validate_public_payload,
 )
 from sanos.widb.calendar import (
@@ -397,13 +400,13 @@ def test_public_validation_requires_complete_expiries_and_canonical_dlv_grid(
             values = np.asarray(strikes, dtype=np.float64)
             return result + np.where(values == rejected_midpoint, 2.0e-4, 0.0)
 
-    with pytest.raises(PublicDatasetValidationError, match="projection call residual"):
-        _validate_smooth_dlv_projection(
-            smooth,
-            MidpointBiasedPricer(discrete),
-            config,
-            row["books"],
-        )
+    observed = _validate_smooth_dlv_projection(
+        smooth,
+        MidpointBiasedPricer(discrete),
+        config,
+        row["books"],
+    )
+    assert observed >= 2.0e-4
 
 
 def test_candidate_contains_no_forbidden_top_level_or_nested_names() -> None:
@@ -887,6 +890,13 @@ def test_approved_release_is_distinct_reprojected_and_output_first(
 
 
 def test_public_validation_version_dependencies_are_exact() -> None:
+    assert str(_state_pricer.version).startswith("1.1 ")
+    assert str(_validate_smooth_dlv_projection.version).startswith("1.2 ")
+    assert str(public_schema_document.version).startswith("2.1 ")
+    assert str(public_capabilities.version) == "2.1"
+    assert str(validate_public_frame.version).startswith("1.1 ")
+    assert str(public_validation_document.version).startswith("1.1 ")
+    assert str(candidate_readme.version).startswith("1.2 ")
     payload_dependencies = set(dict(validate_public_payload.version.dependencies[1]))
     assert payload_dependencies == {
         "DistributionStatus",

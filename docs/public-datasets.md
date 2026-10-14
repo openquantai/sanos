@@ -48,7 +48,8 @@ Normal validation is shallow with respect to lineage. It checks the candidate's
 own checksums, exact payload allowlist, deterministic documents, exact recursive
 Parquet schema, finite values, identity-owned coverage, model geometry, density
 normalization, corrected generic Float64 DLV inverse, canonical stored-DLV
-reconstruction, off-grid SANOS/DLV pricing, retained-expiry in-domain smooth-to-DLV projection error,
+reconstruction, off-grid SANOS/DLV pricing, measured retained-expiry in-domain
+smooth-to-DLV projection error,
 smooth-SANOS-derived ATM volatility, normalized books, exact NMS bounds,
 capability declarations, and
 the persisted ordered-return and complete logical-content digests. It runs with
@@ -122,8 +123,8 @@ no stored per-book fitted price or implied volatility.
 It supports normalized SANOS/DLV pricing and dynamics, model ATM volatility,
 daily-front normalized books, and spot-one spread experiments. It does not
 claim that smooth SANOS and the finite-DLV projection agree away from retained
-expiries. At retained expiries, equivalence is validated only inside inclusive
-NMS `[-3,2]` with maximum normalized-call error `1e-4`. It does not
+expiries. At retained expiries, approximation error is measured and reported
+inside inclusive NMS `[-3,2]`, without a maximum-error guarantee. It does not
 claim exact vendor-book reconstruction, quote-containment replay, liquidity
 models, absolute-dollar tick effects, expiry-fit-mode pricing, or contract
 replay.

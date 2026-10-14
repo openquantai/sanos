@@ -7,7 +7,7 @@ from cdxcore.version import version
 from sanos.datasets.public.config import PublicProjectionConfig, PublicReleaseConfig
 
 
-@version("1.1", dependencies=[PublicProjectionConfig])
+@version("1.2", dependencies=[PublicProjectionConfig])
 def candidate_readme(config: PublicProjectionConfig, artifact_id: str) -> str:
     """Return the exact candidate README payload."""
 
@@ -23,8 +23,9 @@ date. It supports normalized smooth-SANOS and discrete-DLV pricing, derived
 model ATM volatility, forward-adjusted return dynamics, and normalized spread
 experiments. See `schema.json` and `capabilities.json` for exact units and
 limitations. The finite DLV state is the stored canonical projection of smooth
-SANOS. Projection equivalence is validated only at retained expiries within
-inclusive NMS [-3,2], not at arbitrary times.
+SANOS. Its approximation error is measured at retained expiries within
+inclusive NMS [-3,2] and reported in `validation.json`; no maximum-error or
+arbitrary-time equivalence guarantee is made.
 
 It intentionally excludes absolute spot/forward/strike/price levels, raw
 bids/asks/mids, identifiers, symbols, vendor Greeks/IVs, volume, open interest,

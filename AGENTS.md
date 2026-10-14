@@ -239,6 +239,26 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   dataset must never be silently reconstructed or replaced under the same
   identity.
 
+## Finite-DLV fit and restart policy
+
+- Fit the bounded discrete-DLV projection with the configured call-price and
+  conditioned-IV bands first. Retry without only those fit-quality bands if and
+  only if the authenticated HiGHS result is `infeasible` or
+  `infeasible_inaccurate`.
+- The fallback keeps the identical support, density, martingale, calendar, and
+  DLV-bound constraints and uses the uniform-L1 objective. A timeout, solver
+  error, unbounded status, malformed event, or structural validation failure is
+  fatal and never authorizes a relaxed solve.
+- Treat a successfully published fitted-day artifact as immutable completed
+  work. A resumed range skips it; failure or fallback on another date does not
+  authorize refitting it.
+- Never relabel historical fitted bytes as though the current fitter produced
+  them. Any explicitly reviewed historical fit retained for Dataset assembly
+  keeps its original artifact identity and must be pinned by exact artifact,
+  data, manifest, producer-version, stage-version, configuration, and
+  diagnostics-schema fingerprints. Preserve that acceptance evidence in the
+  self-contained Dataset after Intermediate cleanup.
+
 ## CLI requirements
 
 - Provide one installed `sanos` command, also invocable as `python -m sanos`.

@@ -27,7 +27,7 @@ _INTERRUPT_KILL_SECONDS = 1.0
 
 
 @version("1.0")
-def _fsync_directory(path: Path) -> None:
+def _journal_fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -35,7 +35,7 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-@version("1.0", dependencies=[_fsync_directory])
+@version("1.0", dependencies=[_journal_fsync_directory])
 def _ensure_journal_parent(path: Path) -> None:
     """Create and durably link journal parents without accepting symlinks."""
 
@@ -51,7 +51,7 @@ def _ensure_journal_parent(path: Path) -> None:
         raise ValueError(f"Run journal parent is unsafe: {current}")
     for directory in reversed(missing):
         directory.mkdir()
-        _fsync_directory(directory.parent)
+        _journal_fsync_directory(directory.parent)
     current = parent
     while current != current.parent:
         if current.is_symlink() or not current.is_dir():
@@ -253,7 +253,12 @@ def plan_daily_dates(
 
 @version(
     "1.0",
-    dependencies=[canonical_json, canonical_value, _ensure_journal_parent, _fsync_directory],
+    dependencies=[
+        canonical_json,
+        canonical_value,
+        _ensure_journal_parent,
+        _journal_fsync_directory,
+    ],
 )
 class RunJournal:
     """Durable append-only JSONL journal written by the parent process."""
@@ -389,7 +394,7 @@ class RunJournal:
             finally:
                 os.close(descriptor)
             if not journal_existed:
-                _fsync_directory(self.path.parent)
+                _journal_fsync_directory(self.path.parent)
             self._sequence = next_sequence
             self._known_size += len(encoded)
         return record

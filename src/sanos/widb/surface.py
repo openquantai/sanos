@@ -826,8 +826,92 @@ def _stabilize_discrete_dlv_state(
     }
 
 
+@version("1.0")
+def _is_discrete_dlv_solver_event(
+    event: object,
+    *,
+    stage: str,
+    statuses: frozenset[str],
+) -> bool:
+    """Authenticate one primary HiGHS event from the discrete-DLV solve."""
+
+    fields = {
+        "stage",
+        "solver",
+        "algorithm",
+        "status",
+        "is_fallback",
+        "for_expiry",
+        "objective",
+    }
+    if not isinstance(event, Mapping) or set(event) != fields:
+        return False
+    status = event.get("status")
+    objective = event.get("objective")
+    successful = status in {"optimal", "optimal_inaccurate"}
+    valid_objective = (
+        not isinstance(objective, bool)
+        and isinstance(objective, (int, float))
+        and math.isfinite(float(objective))
+        if successful
+        else objective is None
+    )
+    return (
+        event.get("stage") == stage
+        and event.get("solver") == "HIGHS"
+        and event.get("algorithm") == "simplex"
+        and isinstance(status, str)
+        and status in statuses
+        and event.get("is_fallback") is False
+        and event.get("for_expiry") is False
+        and valid_objective
+    )
+
+
+@version("1.0", dependencies=[_is_discrete_dlv_solver_event])
+def _strict_dlv_fit_is_infeasible(solver_events: list[dict[str, object]]) -> bool:
+    """Return whether HiGHS reported the one retry-eligible strict outcome."""
+
+    return len(solver_events) == 1 and _is_discrete_dlv_solver_event(
+        solver_events[0],
+        stage="discrete_dlv_strict",
+        statuses=frozenset({"infeasible", "infeasible_inaccurate"}),
+    )
+
+
+@version("1.0", dependencies=[_is_discrete_dlv_solver_event])
+def _discrete_dlv_solver_path_is_valid(
+    solver_events: list[dict[str, object]],
+    fit_mode: str,
+) -> bool:
+    """Validate the closed strict-or-L1 discrete-DLV solver grammar."""
+
+    successful = frozenset({"optimal", "optimal_inaccurate"})
+    if fit_mode == "strict_feasible":
+        return len(solver_events) == 1 and _is_discrete_dlv_solver_event(
+            solver_events[0],
+            stage="discrete_dlv_strict",
+            statuses=successful,
+        )
+    if fit_mode == "uniform_l1_fallback":
+        return (
+            len(solver_events) == 2
+            and _is_discrete_dlv_solver_event(
+                solver_events[0],
+                stage="discrete_dlv_strict",
+                statuses=frozenset({"infeasible", "infeasible_inaccurate"}),
+            )
+            and _is_discrete_dlv_solver_event(
+                solver_events[1],
+                stage="discrete_dlv_l1",
+                statuses=successful,
+            )
+        )
+    return False
+
+
 @version(
-    "1.6",
+    "1.8",
     dependencies=[
         SanosPricer,
         DiscreteDlvConfig,
@@ -838,6 +922,7 @@ def _stabilize_discrete_dlv_state(
         _error_metrics,
         _projection_fit_price_bounds,
         _projection_target_band_metrics,
+        _discrete_dlv_solver_path_is_valid,
         _validate_dlv_bounds,
     ],
 )
@@ -854,6 +939,7 @@ def _validate_discrete_dlv_projection(
     dlv_squares: list[np.ndarray[Any, Any]],
     solver_events: list[dict[str, object]],
     solver_warnings: list[str],
+    fit_mode: str,
     stabilization: Mapping[str, float],
     pre_state_metrics: Mapping[str, float | int],
     config: DiscreteDlvConfig,
@@ -889,9 +975,11 @@ def _validate_discrete_dlv_projection(
         for value in stabilization.values()
     ):
         raise DailyDataError("Discrete-DLV stabilization diagnostics are invalid")
-    statuses = [str(event.get("status")) for event in solver_events]
-    if not statuses or statuses[-1] not in {"optimal", "optimal_inaccurate"}:
-        raise DailyDataError(f"Discrete-DLV solver did not terminate successfully: {statuses}")
+    if not _discrete_dlv_solver_path_is_valid(solver_events, fit_mode):
+        raise DailyDataError(
+            "Discrete-DLV solver path is invalid: "
+            f"fit_mode={fit_mode!r}, events={solver_events!r}"
+        )
 
     fit_price_bounds, fit_price_band_contract = _projection_fit_price_bounds(
         smooth=smooth,
@@ -1216,13 +1304,37 @@ def _validate_discrete_dlv_projection(
         np.asarray(canonical_call_inverse_errors)
     )
     generic_inverse_call_metrics = _error_metrics(np.asarray(generic_call_inverse_errors))
-    failures = {
+    structural_failures = {
         "stabilization_density": (
             stabilization["density_max_abs"] > tolerance.density_inverse_max_abs
         ),
         "stabilization_dlv": (
             stabilization["dlv_max_abs"] > tolerance.dlv_fixed_point_max_abs
         ),
+        "density_mass": density_mass_error > tolerance.density_mass_abs,
+        "density_moment": density_moment_error > tolerance.density_moment_abs,
+        "density_floor": (
+            float(post_state_metrics["density_floor_shortfall"])
+            > config.solver_kkt_tolerance
+        ),
+        "canonical_density_inverse": (
+            canonical_density_inverse_error > tolerance.density_inverse_max_abs
+        ),
+        "generic_density_inverse": (
+            generic_density_inverse_error > tolerance.density_inverse_max_abs
+        ),
+        "canonical_call_inverse": (
+            canonical_inverse_call_metrics["max"] > tolerance.call_inverse_max_abs
+        ),
+        "generic_call_inverse": (
+            generic_inverse_call_metrics["max"] > tolerance.call_inverse_max_abs
+        ),
+        "canonical_dlv_fixed_point": (
+            canonical_fixed_point_error > tolerance.dlv_fixed_point_max_abs
+        ),
+        "singular_nodes": singular_count != 0,
+    }
+    fit_quality_failures = {
         "pre_stabilization_fit_cap": (
             stabilization["pre_target_call_max_abs"]
             > config.fit_call_max_abs + config.solver_kkt_tolerance
@@ -1247,28 +1359,6 @@ def _validate_discrete_dlv_projection(
             stabilization["post_target_band_max_violation"]
             > config.solver_kkt_tolerance
         ),
-        "density_mass": density_mass_error > tolerance.density_mass_abs,
-        "density_moment": density_moment_error > tolerance.density_moment_abs,
-        "density_floor": (
-            float(post_state_metrics["density_floor_shortfall"])
-            > config.solver_kkt_tolerance
-        ),
-        "canonical_density_inverse": (
-            canonical_density_inverse_error > tolerance.density_inverse_max_abs
-        ),
-        "generic_density_inverse": (
-            generic_density_inverse_error > tolerance.density_inverse_max_abs
-        ),
-        "canonical_call_inverse": (
-            canonical_inverse_call_metrics["max"] > tolerance.call_inverse_max_abs
-        ),
-        "generic_call_inverse": (
-            generic_inverse_call_metrics["max"] > tolerance.call_inverse_max_abs
-        ),
-        "canonical_dlv_fixed_point": (
-            canonical_fixed_point_error > tolerance.dlv_fixed_point_max_abs
-        ),
-        "singular_nodes": singular_count != 0,
         "projection_call": projection_metrics["max"] > tolerance.projection_call_max_abs,
         "atm_iv": atm_metrics["max"] > tolerance.atm_annual_iv_max_abs,
         "conditioned_iv_max": (
@@ -1278,15 +1368,38 @@ def _validate_discrete_dlv_projection(
             iv_metrics["p99"] > tolerance.conditioned_annual_iv_p99_abs
         ),
     }
-    rejected = sorted(name for name, failed in failures.items() if failed)
+    rejected = sorted(name for name, failed in structural_failures.items() if failed)
     if rejected:
         raise DailyDataError(
             "Discrete-DLV projection failed strict validation: " + ", ".join(rejected)
         )
+    fit_quality_rejections = sorted(
+        name for name, failed in fit_quality_failures.items() if failed
+    )
+    if fit_mode == "strict_feasible" and any(
+        fit_quality_failures[name]
+        for name in (
+            "pre_stabilization_fit_cap",
+            "post_stabilization_fit_cap",
+            "pre_stabilization_target_iv",
+            "post_stabilization_target_iv",
+            "pre_stabilization_target_band",
+            "post_stabilization_target_band",
+        )
+    ):
+        raise DailyDataError(
+            "Strict discrete-DLV fit violated its feasibility bands: "
+            + ", ".join(fit_quality_rejections)
+        )
     return {
-        "schema": "sanos-discrete-dlv-projection-diagnostics-v3",
+        "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
         "outcome": "completed",
         "source": "smooth_sanos_surface",
+        "fit_mode": fit_mode,
+        "fit_quality": {
+            "accepted": not fit_quality_rejections,
+            "failures": fit_quality_rejections,
+        },
         "objective_weighting": config.objective_weighting,
         "fit_call_max_abs": config.fit_call_max_abs,
         "target_fit_price_band": {
@@ -1379,7 +1492,7 @@ def _validate_discrete_dlv_projection(
 
 
 @version(
-    "1.5",
+    "1.7",
     dependencies=[
         SanosFitter,
         SanosPricer,
@@ -1388,6 +1501,7 @@ def _validate_discrete_dlv_projection(
         _discrete_dlv_grid,
         _projection_fit_price_bounds,
         _projection_target_band_metrics,
+        _strict_dlv_fit_is_infeasible,
         _stabilize_discrete_dlv_state,
         _validate_discrete_dlv_projection,
         _float_column,
@@ -1404,7 +1518,7 @@ def _fit_discrete_dlv_projection(
     selected_positions: list[np.ndarray[Any, Any]],
     config: DiscreteDlvConfig,
 ) -> list[pl.Series]:
-    """Fit and strictly validate a finite DLV representation of smooth SANOS."""
+    """Fit a finite DLV representation, relaxing only infeasible fit bands."""
 
     if smooth_pricer.mstrikes is None or smooth_pricer.mdensities is None:
         raise DailyDataError("Smooth SANOS returned no common-surface state for DLV projection")
@@ -1444,36 +1558,57 @@ def _fit_discrete_dlv_projection(
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
-            discrete = SanosFitter(
-                smoothness=None,
-                timeout_seconds=config.solver_timeout_seconds,
-                min_dlv=config.min_dlv + config.constraint_dlv_buffer,
-                max_dlv=config.max_dlv - config.constraint_dlv_buffer,
-                min_density_vol=config.min_density_vol,
-                min_density_cap=config.min_density_cap,
-                density_mass_floor=config.density_mass_floor,
-                scale_dlv_constraints=True,
-                solver_kkt_tolerance=config.solver_kkt_tolerance,
-                max_abs_fit_error=config.fit_call_max_abs,
-                allow_solver_fallback=False,
-                _raise_on_eps=not config.allow_solver_epsilon_warnings,
-            )(
-                expiries=expiries,
-                strikes=[value for value in inner],
-                mids=[value for value in target_calls],
-                xstrikes=[value for value in supports],
-                weights=None,
-                fit_price_bounds=fit_price_bounds,
-                vols=atm_volatilities,
-                message_context=lambda: (
-                    f"{frame.get_column('ticker').item(0)} "
-                    f"{frame.get_column('trading_date').item(0)} discrete DLV projection"
-                ),
-                diagnostic_sink=lambda event: solver_events.append(
-                    {"stage": "discrete_dlv_surface", **dict(event)}
-                ),
-                verbose=Context.quiet,
-            )
+            def solve(*, stage: str, impose_fit_bounds: bool) -> SanosPricer:
+                return SanosFitter(
+                    smoothness=None,
+                    timeout_seconds=config.solver_timeout_seconds,
+                    min_dlv=config.min_dlv + config.constraint_dlv_buffer,
+                    max_dlv=config.max_dlv - config.constraint_dlv_buffer,
+                    min_density_vol=config.min_density_vol,
+                    min_density_cap=config.min_density_cap,
+                    density_mass_floor=config.density_mass_floor,
+                    scale_dlv_constraints=True,
+                    solver_kkt_tolerance=config.solver_kkt_tolerance,
+                    max_abs_fit_error=(
+                        config.fit_call_max_abs if impose_fit_bounds else None
+                    ),
+                    allow_solver_fallback=False,
+                    _raise_on_eps=not config.allow_solver_epsilon_warnings,
+                )(
+                    expiries=expiries,
+                    strikes=[value for value in inner],
+                    mids=[value for value in target_calls],
+                    xstrikes=[value for value in supports],
+                    weights=None,
+                    fit_price_bounds=(fit_price_bounds if impose_fit_bounds else None),
+                    vols=atm_volatilities,
+                    message_context=lambda: (
+                        f"{frame.get_column('ticker').item(0)} "
+                        f"{frame.get_column('trading_date').item(0)} "
+                        f"discrete DLV projection ({stage})"
+                    ),
+                    diagnostic_sink=lambda event: solver_events.append(
+                        {"stage": stage, **dict(event)}
+                    ),
+                    verbose=Context.quiet,
+                )
+
+            fit_mode = "strict_feasible"
+            strict_start = len(solver_events)
+            try:
+                discrete = solve(
+                    stage="discrete_dlv_strict",
+                    impose_fit_bounds=True,
+                )
+            except RuntimeError:
+                strict_events = solver_events[strict_start:]
+                if not _strict_dlv_fit_is_infeasible(strict_events):
+                    raise
+                fit_mode = "uniform_l1_fallback"
+                discrete = solve(
+                    stage="discrete_dlv_l1",
+                    impose_fit_bounds=False,
+                )
             pre_stabilization_fitted_calls = np.asarray(
                 discrete(expiries[:, None], inner),
                 dtype=np.float64,
@@ -1548,6 +1683,7 @@ def _fit_discrete_dlv_projection(
         dlv_squares=dlv_squares,
         solver_events=solver_events,
         solver_warnings=solver_warnings,
+        fit_mode=fit_mode,
         stabilization=stabilization,
         pre_state_metrics=pre_state_metrics,
         config=config,
@@ -1606,7 +1742,7 @@ def _fit_discrete_dlv_projection(
     ]
 
 
-@version("1.1", dependencies=[DiscreteDlvConfig, canonical_json, canonical_sha256])
+@version("1.2", dependencies=[DiscreteDlvConfig, canonical_json, canonical_sha256])
 def _empty_discrete_dlv_columns(
     count: int,
     *,
@@ -1619,7 +1755,7 @@ def _empty_discrete_dlv_columns(
     null_lists: list[list[float] | None] = [None] * count
     diagnostics = canonical_json(
         {
-            "schema": "sanos-discrete-dlv-projection-diagnostics-v3",
+            "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
             "outcome": outcome,
             "source": "smooth_sanos_surface",
         }
@@ -2161,7 +2297,7 @@ def _finish_empty_smooth(
 
 
 @version(
-    "2.2",
+    "2.3",
     dependencies=[
         _canonical_fitted_rows,
         _fitted_only_schema,

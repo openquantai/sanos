@@ -348,7 +348,7 @@ def _canonical_dlv_supports(
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         PublicProjectionConfig,
         SanosPricer,
@@ -416,8 +416,6 @@ def _validate_smooth_dlv_projection(
             )
         )
         maximum = max(maximum, error)
-    if maximum > 1.0e-4:
-        _fail(f"Public smooth-to-DLV projection call residual is {maximum}")
     return maximum
 
 
@@ -547,7 +545,7 @@ def _validate_coverage_evidence(
 
 
 @version(
-    "1.0",
+    "1.1",
     dependencies=[
         PublicDatasetValidationSummary,
         PublicProjectionConfig,
@@ -756,7 +754,7 @@ def validate_public_frame(
 
 
 @version(
-    "1.0",
+    "1.1",
     dependencies=[
         PublicDatasetValidationSummary,
         public_coverage_sha256,

@@ -365,7 +365,8 @@ both accepted it. Only `approved` may alter reference behavior.
 
 ## CD-023 — Canonical reference DLV projection
 
-- **Status:** approved on 2026-10-13 for the fresh SANOS reference Dataset.
+- **Status:** approved on 2026-10-13 and amended by the owner on 2026-10-14
+  for the fresh SANOS reference Dataset.
 - **Evidence:** neither the legacy daily payload nor the sparse initial
   no-arbitrage surface provides the required finite, independently usable DLV
   state. A deterministic projection of the completed smooth SANOS surface is
@@ -381,14 +382,20 @@ both accepted it. Only `approved` may alter reference behavior.
   positive geometric box coefficient and corresponding squared-volatility
   bound, and solve this projection with HiGHS
   primal, dual, and KKT tolerances of `1e-10`; other SANOS/no-arbitrage solves
-  retain their established solver settings. Impose a `9e-5` maximum absolute
-  error at the 200 fitted call nodes, leaving headroom inside the independent
-  `1e-4` union-grid acceptance gate. At a target node with source Black vega
-  divided by `sqrt(T)` greater than or equal to `0.05`, intersect that price cap
-  with the exact Black-call band corresponding to source annual implied
-  volatility plus/minus `0.005` (flooring the lower volatility at zero), inset
-  by the `1e-10` solver tolerance. These additional constraints remain linear
-  in fitted prices and do not change the uniform L1 objective.
+  retain their established solver settings. First impose a `9e-5` maximum
+  absolute error at the 200 fitted call nodes. At a target node with source
+  Black vega divided by `sqrt(T)` greater than or equal to `0.05`, intersect
+  that price cap with the exact Black-call band corresponding to source annual
+  implied volatility plus/minus `0.005` (flooring the lower volatility at
+  zero), inset by the `1e-10` solver tolerance. These additional constraints
+  remain linear in fitted prices and do not change the uniform L1 objective.
+  If and only if HiGHS reports this strict fit as `infeasible` or
+  `infeasible_inaccurate`, solve again with the same grid, density, martingale,
+  calendar and `[0.01,3]` DLV constraints but without the hard call/IV bands.
+  The second solve returns the legacy-style uniform-L1 closest fit. Do not
+  relax on a timeout, solver error, unbounded status, or structural validation
+  failure. Persist the authenticated solver path, terminal mode, achieved
+  call/IV errors, and failed preferred-quality thresholds.
   Use a dedicated `1e-8` probability-mass floor and solve against DLV bounds
   inset by `1e-5` volatility units, so finite-precision inverse decoding does
   not amplify vanishing tail masses across the published `[0.01,3]` bounds.
@@ -406,15 +413,42 @@ both accepted it. Only `approved` may alter reference behavior.
   both canonical and generic-consumer density/call inverse errors are at most
   `1e-12`; canonical DLV fixed-point error is at most `1e-9`; the mixed
   Float64-decode/canonical-re-encode residual is conditioning evidence only;
-  no singular node; normalized-call projection error at most `1e-4`;
-  ATM annual-IV error at most `1e-4`; and source-vega-conditioned annual-IV
-  error has maximum `5e-3` and deterministic p99 `1e-3`. A `1e-9` absolute
-  squared-DLV bound allowance accommodates solver-scale residuals, records
-  signed shortfall/excess and saturation counts, and never clips values.
-- **Capability boundary:** smooth-to-DLV equivalence is asserted only at the
-  retained expiries and inside inclusive source-smooth NMS `[-3,2]`.
-  Out-of-domain differences are report-only. Arbitrary-time equivalence is not
-  advertised.
+  and there is no singular node. A `1e-9` absolute squared-DLV bound allowance
+  accommodates solver-scale residuals, records signed shortfall/excess and
+  saturation counts, and never clips values. Normalized-call projection error
+  `1e-4`, ATM annual-IV error `1e-4`, source-vega-conditioned annual-IV maximum
+  `5e-3`, and its deterministic p99 `1e-3` are preferred fit-quality thresholds.
+  The fitted-node call cap and conditioned fitted-node IV band are guaranteed
+  by their hard constraints for a strict fit. Union-grid, ATM, source, and p99
+  metrics are measured diagnostics in both modes and are non-fatal for a
+  structurally valid L1 fallback.
+- **Amendment evidence:** the first full-history dates outside the pilot,
+  2022-01-05 and 2022-01-06, had no solution satisfying the hard fit bands at
+  `max_dlv=3`, while the same structural LP without those bands solved
+  optimally. The resulting maximum normalized-call errors were
+  `0.001283104773738608` and `0.0007400801110121202`; conditioned annual-IV
+  maxima were `0.018330167962417432` and `0.011299154853833426`. Both outputs
+  passed the density, martingale, DLV-bound, inverse and serialization gates.
+- **Resume/reuse policy:** fitted-day artifacts are immutable, date-local
+  results. A completed artifact that passed the policy in force when it was
+  written is not refitted merely because a later date takes the L1 branch or a
+  run is resumed. Exact producer versions remain the default. Phase 11 has one
+  deliberately narrow exception: only the four exact artifacts
+  `5fdea7a911b5b1d4a2b906af4cccc13c379a31af1908423686e6a005cf93c71a`,
+  `6476ea2f0f6be0cfb6ab222836e8646e06055a6c6a29c9e3c1b69c5cef5210ed`,
+  `3d7c01c0e8469cb84ce3cbb44e8c8cea0156e5cdbb96721572769466639a9b9f`,
+  and `63f6e0ab4da2c4917b49cee658e60787d38f22cfb55825436b7e2ef6e956f940`
+  are accepted without a numerical rerun. The allowlist additionally pins each
+  data and manifest checksum, configuration identity, producer-version hash,
+  stage-version hash, namespace, and diagnostics schema. Dataset assembly uses
+  each original artifact identity directly and preserves this evidence in the
+  permanent Dataset; it never republishes the bytes under the current fitter's
+  identity. A missing, ambiguous, malformed, or fingerprint-mismatched approved
+  artifact fails closed. All other missing dates are built normally.
+- **Capability boundary:** smooth-to-DLV approximation error is measured only
+  at the retained expiries and inside inclusive source-smooth NMS `[-3,2]`.
+  Out-of-domain differences are report-only. No maximum-error or arbitrary-time
+  equivalence guarantee is made.
 
 ## CD-024 — Initial fitted-price Black round-trip tolerance
 

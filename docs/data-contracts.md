@@ -241,12 +241,14 @@ inclusive source-smooth NMS `[-3,2]`, one exact ATM node, support boundaries at
 0.5 times the lower and 1.5 times the upper inner strike, and a uniform price
 objective. One deterministic anchor row per retained expiry stores its state.
 Its DLV rows are geometry-and-bound-scaled and use the configured `1e-10`
-strict-solver feasibility target plus a `9e-5` fitted-node call-error cap. At
-source target nodes with Black vega divided by `sqrt(T)` at least `0.05`, the
-fit also obeys the exact Black-price band for an annual-IV move of at most
-`0.005`, inclusive, with the lower volatility floored at zero and the band
-inset by the solver tolerance. These hard linear bounds leave the uniform L1
-objective unchanged. A `1e-8` support-mass floor and `1e-5` solver-only inset
+strict-solver feasibility target. The first solve imposes a `9e-5` fitted-node
+call-error cap and, where source Black vega divided by `sqrt(T)` is at least
+`0.05`, the exact Black-price band for an annual-IV move of at most `0.005`.
+If HiGHS reports that strict problem as `infeasible` or
+`infeasible_inaccurate`, a second solve removes only
+those fit-quality bands and returns the uniform-L1 closest fit. The solver mode
+and every breached fit-quality threshold are persisted as diagnostics. A
+`1e-8` support-mass floor and `1e-5` solver-only inset
 from each DLV bound keep the persisted inverse well-conditioned without
 post-fit clipping. Canonical DLV serialization and stabilization use wider
 NumPy precision but persist Float64; validation separately proves the ordinary
@@ -350,9 +352,9 @@ deep validation additionally reprojects from the internal source to prove the
 private-input CD-004 and CD-009 calculations.
 
 Capability flags may advertise normalized SANOS/DLV dynamics and normalized
-spread experiments. Smooth-to-DLV equivalence is claimed only at retained
-expiries on the inclusive `[-3,2]` NMS projection domain, with maximum absolute
-normalized-call error `1e-4`; arbitrary-time equivalence is not claimed. They
+spread experiments. Smooth-to-DLV approximation error is measured and reported
+only at retained expiries on the inclusive `[-3,2]` NMS projection domain; no
+maximum-error or arbitrary-time equivalence guarantee is made. They
 explicitly do not advertise vendor-book
 reconstruction, quote-containment replay, liquidity models, absolute-dollar
 tick effects or contract-level trading replay. Public validation runs all

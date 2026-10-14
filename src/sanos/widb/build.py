@@ -704,6 +704,7 @@ def publish_daily_frame(
     return builder.artifact
 
 
+@version("1.0", dependencies=[StorageLocations])
 def _locations_from_payload(payload: Mapping[str, Any]) -> StorageLocations:
     roots = payload["locations"]
     if not isinstance(roots, Mapping):
@@ -716,6 +717,7 @@ def _locations_from_payload(payload: Mapping[str, Any]) -> StorageLocations:
     )
 
 
+@version("1.0", dependencies=[DailyWidbConfig])
 def _config_from_payload(payload: Mapping[str, Any]) -> DailyWidbConfig:
     value = payload["daily_config"]
     if not isinstance(value, Mapping):
@@ -723,6 +725,7 @@ def _config_from_payload(payload: Mapping[str, Any]) -> DailyWidbConfig:
     return DailyWidbConfig.from_mapping(value)
 
 
+@version("1.0", dependencies=[DailySurfaceConfig])
 def _surface_config_from_payload(payload: Mapping[str, Any]) -> DailySurfaceConfig:
     value = payload.get("surface_config", {})
     if not isinstance(value, Mapping):
@@ -730,6 +733,7 @@ def _surface_config_from_payload(payload: Mapping[str, Any]) -> DailySurfaceConf
     return DailySurfaceConfig.from_mapping(value)
 
 
+@version("1.0", dependencies=[DailyWorkItem, RawPartition, RawTable])
 def _actual_ticker(item: DailyWorkItem) -> str:
     payload = item.payload
     if not isinstance(payload, Mapping):
@@ -740,6 +744,23 @@ def _actual_ticker(item: DailyWorkItem) -> str:
     return RawPartition(RawTable.SECURITY, ticker, None).ticker
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        ArtifactStore,
+        DailyArtifactPlan,
+        DailySurfaceConfig,
+        DailyWidbConfig,
+        DailyWorkItem,
+        RawDayPointers,
+        _actual_ticker,
+        _config_from_payload,
+        _locations_from_payload,
+        _surface_config_from_payload,
+        plan_daily_artifact,
+    ],
+)
 def _specs_from_item(
     item: DailyWorkItem,
 ) -> tuple[
@@ -782,6 +803,7 @@ def _specs_from_item(
     )
 
 
+@version("1.0", dependencies=[ArtifactSpec, DailyWorkItem])
 def _target_spec(
     item: DailyWorkItem,
     paired: ArtifactSpec,
@@ -800,6 +822,15 @@ def _target_spec(
     return by_stage[item.stage]
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactPointer,
+        DailyWorkItem,
+        _specs_from_item,
+        _target_spec,
+    ],
+)
 def probe_daily_target(item: DailyWorkItem) -> ArtifactPointer | None:
     """Shallowly resolve the requested terminal artifact without reading upstreams."""
 
@@ -812,6 +843,10 @@ def probe_daily_target(item: DailyWorkItem) -> ArtifactPointer | None:
     return None if reuse is None else reuse.artifact.pointer
 
 
+@version(
+    "1.0",
+    dependencies=[ArtifactPointer, ArtifactStore, ValidatedArtifact],
+)
 def _validated_raw(store: ArtifactStore, pointer: ArtifactPointer) -> ValidatedArtifact:
     try:
         return store.validate(pointer)
@@ -821,6 +856,21 @@ def _validated_raw(store: ArtifactStore, pointer: ArtifactPointer) -> ValidatedA
         ) from exc
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        ArtifactStore,
+        DailyProvenance,
+        DailyRawInputs,
+        DailyWidbConfig,
+        RawDayPointers,
+        ValidatedArtifact,
+        _validated_raw,
+        pair_daily_frame,
+        publish_daily_frame,
+    ],
+)
 def _build_paired(
     store: ArtifactStore,
     config: DailyWidbConfig,
@@ -869,6 +919,20 @@ def _build_paired(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        ArtifactStore,
+        DailyWidbConfig,
+        RawDayPointers,
+        ValidatedArtifact,
+        _build_paired,
+        enrich_daily_frame,
+        publish_daily_frame,
+        read_daily_frame,
+    ],
+)
 def _build_enriched(
     store: ArtifactStore,
     daily_config: DailyWidbConfig,
@@ -907,6 +971,21 @@ def _build_enriched(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        ArtifactStore,
+        DailySurfaceConfig,
+        DailyWidbConfig,
+        RawDayPointers,
+        ValidatedArtifact,
+        _build_enriched,
+        fit_initial_no_arbitrage,
+        publish_daily_frame,
+        read_daily_frame,
+    ],
+)
 def _build_no_arb(
     store: ArtifactStore,
     daily_config: DailyWidbConfig,
@@ -948,6 +1027,21 @@ def _build_no_arb(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        ArtifactStore,
+        DailySurfaceConfig,
+        DailyWidbConfig,
+        RawDayPointers,
+        ValidatedArtifact,
+        _build_no_arb,
+        apply_options_filter,
+        publish_daily_frame,
+        read_daily_frame,
+    ],
+)
 def _build_filtered(
     store: ArtifactStore,
     daily_config: DailyWidbConfig,
@@ -992,6 +1086,21 @@ def _build_filtered(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactSpec,
+        ArtifactStore,
+        DailySurfaceConfig,
+        DailyWidbConfig,
+        RawDayPointers,
+        ValidatedArtifact,
+        _build_filtered,
+        fit_smooth_sanos,
+        publish_daily_frame,
+        read_daily_frame,
+    ],
+)
 def _build_fitted(
     store: ArtifactStore,
     daily_config: DailyWidbConfig,
@@ -1038,6 +1147,20 @@ def _build_fitted(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactPointer,
+        DailyWorkItem,
+        _build_enriched,
+        _build_filtered,
+        _build_fitted,
+        _build_no_arb,
+        _build_paired,
+        _specs_from_item,
+        _target_spec,
+    ],
+)
 def build_daily_target(item: DailyWorkItem) -> ArtifactPointer:
     """Spawn-safe worker that recursively builds one terminal daily stage."""
 
@@ -1192,6 +1315,25 @@ def plan_intermediate_build(
     )
 
 
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactPointer,
+        ArtifactStore,
+        DailySurfaceConfig,
+        DailyWidbConfig,
+        IntermediateBuildRequest,
+        IntermediateBuildResult,
+        StorageLocations,
+        _locations_from_payload,
+        _specs_from_item,
+        _target_spec,
+        build_daily_target,
+        plan_intermediate_build,
+        probe_daily_target,
+        run_daily_plan,
+    ],
+)
 def build_intermediates(
     locations: StorageLocations,
     request: IntermediateBuildRequest,
@@ -1200,6 +1342,7 @@ def build_intermediates(
     *,
     dry_run: bool = False,
     progress: Callable[[Mapping[str, Any]], None] | None = None,
+    _completion_overrides: Mapping[date, ArtifactPointer] | None = None,
 ) -> IntermediateBuildResult:
     """Inspect or execute a restartable output-first daily build."""
 
@@ -1209,11 +1352,25 @@ def build_intermediates(
     reuses: list[ReuseResult] = []
     resolved_by_key: dict[str, ArtifactPointer] = {}
     raw_dependencies: list[RawDayPointers] = []
+    completion_overrides = {} if _completion_overrides is None else _completion_overrides
+    unexpected_override_dates = set(completion_overrides) - {
+        item.trading_date for item in plan.items
+    }
+    if unexpected_override_dates:
+        raise ValueError(
+            "Completion overrides contain dates outside the intermediate plan: "
+            + ", ".join(item.isoformat() for item in sorted(unexpected_override_dates))
+        )
     for item in plan.items:
         _, _, _, raw, paired, enriched, no_arb, filtered, fitted = _specs_from_item(item)
         raw_dependencies.append(raw)
         target = _target_spec(item, paired, enriched, no_arb, filtered, fitted)
         expected.append(target.pointer)
+        override = completion_overrides.get(item.trading_date)
+        if override is not None:
+            existing.append(override)
+            resolved_by_key[item.key] = override
+            continue
         payload = item.payload
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -1239,11 +1396,15 @@ def build_intermediates(
             dry_run=True,
         )
     journal = locations.intermediate / ".runs" / "widb" / f"{plan.plan_id}.jsonl"
+    def completion_probe(item: DailyWorkItem) -> ArtifactPointer | None:
+        override = completion_overrides.get(item.trading_date)
+        return override if override is not None else probe_daily_target(item)
+
     summary = run_daily_plan(
         plan,
         build_daily_target,
         journal_path=journal,
-        is_complete=probe_daily_target,
+        is_complete=completion_probe,
         progress=progress,
     )
     results = dict(summary.results)

@@ -47,7 +47,8 @@ sanos --root /path/to/quant-data dataset validate \
 It checks the artifact manifest and all checksums, then recomputes the daily
 schema, population, masks, units, density/moment, no-arbitrage, canonical and
 ordinary-Float64 SANOS/DLV round trips, smooth-to-DLV projection calls and
-conditioned implied volatilities, fitted-price bands, diagnostics, calendar,
+conditioned implied volatilities, strict/L1 solver mode, fitted-price-band
+diagnostics, calendar,
 and quote-containment invariants from the copied Dataset partitions. It does not visit upstream
 storage and never rebuilds a missing Dataset.
 
@@ -99,7 +100,9 @@ The Dataset also contains:
 - `schema.json`: exact field/dtype contract and normalization notes;
 - `partitions.json`: ordered date paths, source/copy checksums, fitted pointers,
   typed-empty evidence, and recomputed populations;
-- `lineage.json`: every daily stage pointer and date/role Raw mapping;
+- `lineage.json`: every daily stage pointer and date/role Raw mapping, plus the
+  exact fingerprint and acceptance policy for any reviewed fitted artifact
+  reused without a numerical rerun;
 - `validation.json`: aggregate populations and invariant residual maxima; and
 - `legacy-comparison.json`: explicit migration-oracle status. The full guarded
   comparison is completed during the fresh production acceptance run.
@@ -108,6 +111,14 @@ The sole direct Dataset upstream is a rebuildable Raw-lineage-catalog
 Intermediate. Its direct upstream tuple is the exact deduplicated Raw closure;
 its configuration also commits to the date/role mapping so deduplication cannot
 erase current-versus-previous spot roles.
+
+The Phase 11 continuation directly reuses four completed, checksum-pinned
+fitted-day artifacts for 2022-01-03 through 2022-01-06. They keep their
+original immutable identities; SANOS neither rewrites their diagnostics nor
+publishes them under a current-fit identity. `lineage.json`, the Dataset
+manifest, and each partition record preserve their artifact, data, manifest,
+producer, stage, configuration, and diagnostic-schema evidence. Shallow
+validation therefore remains complete after those Intermediates are removed.
 
 ## Coverage policy
 

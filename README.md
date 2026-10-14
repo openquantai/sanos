@@ -126,7 +126,11 @@ The available terminal stages are `paired-day`, `enriched-day`, `no-arb-day`,
 `filtered-day`, and `fitted-day`. The final frame retains rejected rows with
 eligibility/reason fields and stores the pre-filter no-arbitrage audit state,
 the post-filter smooth 0.25 SANOS state, and a separately fitted 200-inner-node
-finite-DLV projection of that smooth state as typed list columns.
+finite-DLV projection of that smooth state as typed list columns. The DLV fit
+tries the strict call/IV bands first and, only when HiGHS reports the strict
+problem as `infeasible` or `infeasible_inaccurate`,
+returns the same max-DLV-3 model's uniform-L1 closest fit with explicit quality
+diagnostics.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

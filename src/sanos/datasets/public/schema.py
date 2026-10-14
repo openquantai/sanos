@@ -8,9 +8,9 @@ import polars as pl
 from cdxcore.version import version
 
 PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-daily-v2"
-PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v2"
-PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v2"
-PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v3"
+PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v3"
+PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v3"
+PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v4"
 
 EXPIRY_DTYPE: Final = pl.Struct(
     [
@@ -85,7 +85,7 @@ def public_polars_schema() -> pl.Schema:
     )
 
 
-@version("2.0", dependencies=[public_polars_schema])
+@version("2.1", dependencies=[public_polars_schema])
 def public_schema_document() -> dict[str, Any]:
     """Return the human- and machine-readable immutable schema contract."""
 
@@ -173,13 +173,13 @@ def public_schema_document() -> dict[str, Any]:
             "dlv_projection_scope": (
                 "retained expiries and inclusive normalized-moneyness domain [-3,2]"
             ),
-            "dlv_projection_call_max_abs": 1.0e-4,
+            "dlv_projection_fit_quality": "measured, not guaranteed",
             "arbitrary_time_smooth_dlv_equivalence": False,
         },
     }
 
 
-@version("2.0")
+@version("2.1")
 def public_capabilities() -> dict[str, bool | str]:
     """Return the closed advertised capability and non-capability object."""
 
@@ -190,6 +190,7 @@ def public_capabilities() -> dict[str, bool | str]:
             "normalized_smooth_sanos_pricing": True,
             "normalized_discrete_dlv_pricing": True,
             "discrete_dlv_projection_scope": "retained-expiries-inclusive-nms-[-3,2]",
+            "discrete_dlv_projection_fit_quality": "measured-not-guaranteed",
             "arbitrary_time_smooth_dlv_equivalence": False,
             "model_atm_implied_volatility": True,
             "daily_front_normalized_books": True,
