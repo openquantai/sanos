@@ -551,7 +551,7 @@ class ArbFreePricer(PrettyObject):
 
 
 @version(
-    "0.51",
+    "0.53",
     dependencies=[
         ArbFreePricer,
         SanosLPSolver,
@@ -855,6 +855,21 @@ class MkArbFree:
                     msg += " " + ext
                 return msg
 
+            def emit_expiry_decision(
+                *,
+                retained: bool,
+                support_attempt: int | None,
+            ) -> None:
+                if self._solver_diagnostic_sink is not None:
+                    self._solver_diagnostic_sink(
+                        {
+                            "stage": "expiry_decision",
+                            "input_expiry_index": t,
+                            "retained": retained,
+                            "support_attempt": support_attempt,
+                        }
+                    )
+
             verbose.write(lambda: f"\r{local_message()}: Generating extended strikes... ", end="")
 
             # strikes
@@ -917,6 +932,10 @@ class MkArbFree:
                 mask_t=mask_t,
                 xstrikes_t=xstrikes_t,
                 force_linear=r.expiry_linear,
+                diagnostic_context={
+                    "input_expiry_index": t,
+                    "expiry_attempt": 1,
+                },
                 message_context=local_message,
                 verbose=verbose,
             )
@@ -928,6 +947,7 @@ class MkArbFree:
                 (fit_t >= bid_t - self._eps_price) & (fit_t <= ask_t + self._eps_price) & mask_t
             )
             fit_mask_live = fit_mask[mask_t]
+            support_attempt = 1
 
             if not np.all(fit_mask_live):
                 if np.sum(fit_mask_live) < len(fit_mask_live) // 2:
@@ -936,6 +956,7 @@ class MkArbFree:
                             f"\r{local_message()}: skipping expiry since we cannot fit an arbitrage-free mid within bid/ask spread for more than half of the strikes."
                         )
                     )
+                    emit_expiry_decision(retained=False, support_attempt=None)
                     continue
 
                 if self._remove_no_arb_strikes:
@@ -954,6 +975,10 @@ class MkArbFree:
                         mask_t=fit_mask,
                         xstrikes_t=xstrikes_R_t,
                         force_linear=r.expiry_linear,
+                        diagnostic_context={
+                            "input_expiry_index": t,
+                            "expiry_attempt": 2,
+                        },
                         message_context=local_message,
                         verbose=verbose,
                     )
@@ -973,6 +998,7 @@ class MkArbFree:
                         xstrikes_t = xstrikes_R_t
                         p_t = pR_t
                         fit_t = fitR_t
+                        support_attempt = 2
                     else:
                         verbose.write(
                             lambda: (
@@ -994,6 +1020,11 @@ class MkArbFree:
 
             assert xstrikes_t.shape == p_t.shape, (
                 f"Internal error: {local_message()}Shape of xstrikes {xstrikes_t.shape} does not match shape of density {p_t.shape}"
+            )
+
+            emit_expiry_decision(
+                retained=True,
+                support_attempt=support_attempt,
             )
 
             # store result
@@ -1168,6 +1199,7 @@ class MkArbFree:
         force_linear: bool = False,
         hard_fit: bool = False,
         diagnostic_stage: str = "surface",
+        diagnostic_context: dict[str, object] | None = None,
         message_context: callable | str | None = None,
         verbose: Context = Context.quiet,
     ):
@@ -1385,7 +1417,11 @@ class MkArbFree:
                     None
                     if self._solver_diagnostic_sink is None
                     else lambda payload: self._solver_diagnostic_sink(
-                        {"stage": diagnostic_stage, **dict(payload)}
+                        {
+                            **({} if diagnostic_context is None else diagnostic_context),
+                            "stage": diagnostic_stage,
+                            **dict(payload),
+                        }
                     )
                 ),
                 verbose=verbose,
@@ -1484,6 +1520,7 @@ class MkArbFree:
         mask_t: np.ndarray | None,
         xstrikes_t: np.ndarray,
         force_linear: bool = False,
+        diagnostic_context: dict[str, object] | None = None,
         message_context: str | callable | None = None,
         verbose: Context = Context.all,
         end: str = "\n",
@@ -1577,6 +1614,7 @@ class MkArbFree:
             hard_fit=False,
             force_linear=force_linear,
             diagnostic_stage="expiry_soft",
+            diagnostic_context=diagnostic_context,
             message_context=lambda: message(False),
             verbose=Context.quiet,
         )
@@ -1611,6 +1649,7 @@ class MkArbFree:
             hard_fit=True,
             force_linear=force_linear,
             diagnostic_stage="expiry_hard",
+            diagnostic_context=diagnostic_context,
             message_context=lambda: message(False),
             verbose=verbose,
         )

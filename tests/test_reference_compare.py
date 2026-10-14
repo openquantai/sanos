@@ -128,7 +128,10 @@ def _legacy_payload(frame: pl.DataFrame) -> dict[str, object]:
         "fits1": [
             group.get_column("smooth_expiry_fit_price").to_numpy() for group in retained
         ],
-        "fitsX": [group.get_column("smooth_call_mid").to_numpy() for group in retained],
+        "fitsX": [
+            group.get_column("smooth_surface_fit_price").to_numpy()
+            for group in retained
+        ],
         "xstrikes": [
             _constant(group, "smooth_expiry_model_strikes", np.float32)
             for group in retained

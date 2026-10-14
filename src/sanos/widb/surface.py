@@ -96,7 +96,7 @@ def _filter_only_schema() -> dict[str, pl.DataType]:
     }
 
 
-@version("widb-fitted-day-v2")
+@version("widb-fitted-day-v3")
 def _fitted_only_schema() -> dict[str, pl.DataType]:
     return {
         "pure_market_call_bid": pl.Float32,
@@ -110,6 +110,7 @@ def _fitted_only_schema() -> dict[str, pl.DataType]:
         "smoothness": pl.Float64,
         "smooth_input_expiry_index": pl.Int32,
         "smooth_expiry_fit_price": pl.Float64,
+        "smooth_surface_fit_price": pl.Float64,
         "smooth_call_mid": pl.Float64,
         "smooth_put_mid": pl.Float64,
         "smooth_mid_available": pl.Boolean,
@@ -2090,9 +2091,17 @@ def apply_options_filter(
     return result.cast(FILTERED_SCHEMA, strict=True)
 
 
+@version("1.0")
+def _canonical_fitted_rows(frame: pl.DataFrame) -> pl.DataFrame:
+    """Order fitted rows by the immutable daily key used by every consumer."""
+
+    return frame.sort("expiry_id", "normalized_strike", maintain_order=True)
+
+
 @version(
-    "1.1",
+    "1.3",
     dependencies=[
+        _canonical_fitted_rows,
         _nullable_float32,
         _nullable_float64,
         _empty_discrete_dlv_columns,
@@ -2122,6 +2131,7 @@ def _finish_empty_smooth(
         pl.lit(smoothness).alias("smoothness"),
         pl.lit(None, dtype=pl.Int32).alias("smooth_input_expiry_index"),
         pl.lit(None, dtype=pl.Float64).alias("smooth_expiry_fit_price"),
+        pl.lit(None, dtype=pl.Float64).alias("smooth_surface_fit_price"),
         _nullable_float64("smooth_call_mid", nan),
         _nullable_float64("smooth_put_mid", nan),
         pl.Series("smooth_mid_available", false),
@@ -2147,12 +2157,13 @@ def _finish_empty_smooth(
         ),
         pl.lit(str(fit_smooth_sanos.version)).alias("stage_version"),
     ).select(*FITTED_SCHEMA)
-    return result.cast(FITTED_SCHEMA, strict=True)
+    return _canonical_fitted_rows(result.cast(FITTED_SCHEMA, strict=True))
 
 
 @version(
-    "2.0",
+    "2.2",
     dependencies=[
+        _canonical_fitted_rows,
         _fitted_only_schema,
         _make_no_arb_fitter,
         _empty_surface_frame,
@@ -2254,6 +2265,8 @@ def fit_smooth_sanos(
         )
         if not len(pricer.expiries):
             raise DailyDataError("Smooth SANOS dropped every selected expiry")
+        if pricer.fitsX is None:
+            raise DailyDataError("Smooth SANOS did not produce fitted surface prices")
         fit_result = pricer.compute_market_fit(
             expiries=expiries,
             strikes=strikes,
@@ -2274,6 +2287,7 @@ def fit_smooth_sanos(
     smooth_mask = np.zeros(count, dtype=bool)
     smooth_input_index = np.full(count, -1, dtype=np.int32)
     expiry_fit = np.full(count, np.nan, dtype=np.float64)
+    surface_fit = np.full(count, np.nan, dtype=np.float64)
     call_mid = np.full(count, np.nan, dtype=np.float64)
     fit_error = np.full(count, np.nan, dtype=np.float64)
     variances = np.full(count, np.nan, dtype=np.float64)
@@ -2291,6 +2305,7 @@ def fit_smooth_sanos(
         smooth_mask[rows] = np.asarray(pricer.masks[output_index], dtype=bool)
         smooth_input_index[rows] = source_index
         expiry_fit[rows] = np.asarray(pricer.fits1[output_index], dtype=np.float64)
+        surface_fit[rows] = np.asarray(pricer.fitsX[output_index], dtype=np.float64)
         variances[rows] = float(pricer.variances[output_index])
         state = _state_lists(pricer, output_index)
         for row in rows:
@@ -2376,6 +2391,7 @@ def fit_smooth_sanos(
             dtype=pl.Int32,
         ),
         _nullable_float64("smooth_expiry_fit_price", expiry_fit),
+        _nullable_float64("smooth_surface_fit_price", surface_fit),
         _nullable_float64("smooth_call_mid", call_mid),
         _nullable_float64("smooth_put_mid", put_mid),
         pl.Series("smooth_mid_available", available),
@@ -2397,7 +2413,7 @@ def fit_smooth_sanos(
         *dlv_columns,
         pl.lit(str(fit_smooth_sanos.version)).alias("stage_version"),
     ).select(*FITTED_SCHEMA)
-    return result.cast(FITTED_SCHEMA, strict=True)
+    return _canonical_fitted_rows(result.cast(FITTED_SCHEMA, strict=True))
 
 
 @version("1.0", dependencies=[SanosPricer])

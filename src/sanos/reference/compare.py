@@ -632,7 +632,7 @@ def _fresh_groups(frame: pl.DataFrame) -> tuple[pl.DataFrame, list[pl.DataFrame]
 
 
 @version(
-    "1.3",
+    "1.4",
     dependencies=[
         DailyLegacyComparisonTolerances,
         ArbFreePricer,
@@ -1045,7 +1045,7 @@ def compare_populated_day(
         ("bids", "pure_bid_price", "float32"),
         ("asks", "pure_ask_price", "float32"),
         ("fits1", "smooth_expiry_fit_price", "float64"),
-        ("fitsX", "smooth_call_mid", "float64"),
+        ("fitsX", "smooth_surface_fit_price", "float64"),
     )
     for legacy_name, fresh_name, dtype_name in state_fields:
         legacy_values = getattr(legacy_pricer, legacy_name)

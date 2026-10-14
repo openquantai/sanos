@@ -7,18 +7,21 @@ import sys
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import polars as pl
 import pytest
 from cdxcore.bs import bs
+from cdxcore.verbose import Context
 
 import sanos.datasets.internal as internal_dataset_module
 import sanos.widb.surface as surface_module
 from sanos.config import canonical_json, canonical_sha256
 from sanos.datasets import InternalDatasetConfig
 from sanos.datasets.internal import DatasetValidationError, validate_fitted_partition
+from sanos.model import MkArbFree
 from sanos.widb import (
     ENRICHED_SCHEMA,
     FILTERED_SCHEMA,
@@ -161,12 +164,18 @@ def _reference_filter(
     return cast(dict[str, Any], json.loads(completed.stdout))
 
 
-def _two_expiry_raw_inputs(*, first_is_am: bool = False) -> DailyRawInputs:
+def _two_expiry_raw_inputs(
+    *,
+    first_is_am: bool = False,
+    same_expiry_date: bool = False,
+) -> DailyRawInputs:
     trading_date = date(2024, 1, 3)
     spot = 100.0
+    second_expiry = date(2024, 1, 19) if same_expiry_date else date(2024, 2, 16)
+    second_volatility = 0.42 if same_expiry_date else 0.25
     expiry_specs = (
         (date(2024, 1, 19), 101.0, np.arange(90.0, 113.0, 2.0), 0.40),
-        (date(2024, 2, 16), 102.0, np.arange(88.0, 117.0, 2.0), 0.25),
+        (second_expiry, 102.0, np.arange(88.0, 117.0, 2.0), second_volatility),
     )
     rows: list[dict[str, object]] = []
     forwards: list[dict[str, object]] = []
@@ -323,8 +332,14 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
         "surface",
     }
     assert all(
+        set(event) >= {"input_expiry_index", "expiry_attempt"}
+        for event in diagnostics["solver_events"]
+        if event["stage"] in {"expiry_soft", "expiry_hard"}
+    )
+    assert all(
         event["status"] in {"optimal", "optimal_inaccurate"}
         for event in diagnostics["solver_events"]
+        if event["stage"] != "expiry_decision"
     )
     dlv_diagnostics = json.loads(
         fitted.get_column("discrete_dlv_diagnostics_json").item(0)
@@ -467,6 +482,12 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
             # The stable SanosPricer API promotes query arrays to Float64,
             # whereas the compatibility producer prices its persisted
             # Float32 query arrays directly.
+            atol=5.0e-8,
+        )
+        np.testing.assert_allclose(
+            observed,
+            expiry_rows.get_column("smooth_surface_fit_price").to_numpy(),
+            rtol=0.0,
             atol=5.0e-8,
         )
 
@@ -773,6 +794,12 @@ def test_initial_and_smooth_states_match_pinned_reference(
             atol=1.0e-12,
         )
         np.testing.assert_allclose(
+            observed.get_column("smooth_surface_fit_price").to_numpy(),
+            smooth_reference["fitsX"][source_index],
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
             observed.get_column("smooth_fit_error_half_spreads").to_numpy(),
             smooth_reference["fit"]["fit_errs"][source_index],
             rtol=0.0,
@@ -820,6 +847,592 @@ def test_two_expiry_fitted_frame_passes_dataset_quantitative_boundary(
     assert statistics.input_expiries == 2
     assert statistics.smooth_retained_expiries == 2
     assert statistics.residual_maxima["dlv_density_roundtrip"] <= 2.0e-14
+
+
+def _solver_event(
+    stage: str,
+    status: str,
+    *,
+    fallback: bool = False,
+    input_expiry_index: int | None = None,
+    expiry_attempt: int | None = None,
+    objective: float | None = None,
+) -> dict[str, object]:
+    event: dict[str, object] = {
+        "stage": stage,
+        "solver": "CLARABEL" if fallback else "HIGHS",
+        "algorithm": "simplex",
+        "status": status,
+        "is_fallback": fallback,
+        "for_expiry": stage.startswith("expiry_"),
+        "objective": (
+            1.25 if objective is None and status.startswith("optimal") else objective
+        ),
+    }
+    if stage.startswith("expiry_"):
+        event["input_expiry_index"] = input_expiry_index
+        event["expiry_attempt"] = expiry_attempt
+    return event
+
+
+def _expiry_decision(
+    input_expiry_index: int,
+    *,
+    retained: bool,
+    support_attempt: int | None,
+) -> dict[str, object]:
+    return {
+        "stage": "expiry_decision",
+        "input_expiry_index": input_expiry_index,
+        "retained": retained,
+        "support_attempt": support_attempt,
+    }
+
+
+def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
+    events = [
+        _solver_event(
+            "expiry_soft",
+            "user_limit",
+            input_expiry_index=0,
+            expiry_attempt=1,
+            objective=2.0,
+        ),
+        _solver_event(
+            "expiry_soft",
+            "optimal",
+            fallback=True,
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _solver_event(
+            "expiry_hard",
+            "solver_error",
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _solver_event(
+            "expiry_hard",
+            "infeasible_inaccurate",
+            fallback=True,
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _solver_event(
+            "expiry_soft",
+            "optimal_inaccurate",
+            input_expiry_index=0,
+            expiry_attempt=2,
+        ),
+        _expiry_decision(0, retained=True, support_attempt=2),
+        _solver_event("surface", "optimal"),
+    ]
+    internal_dataset_module._terminal_solver_events(
+        {"outcome": "completed", "solver_events": events},
+        "test",
+        expected_expiry_indices=(0,),
+        retained_expiry_indices=(0,),
+    )
+    internal_dataset_module._terminal_solver_events(
+        {
+            "outcome": "completed",
+            "solver_events": [_solver_event("discrete_dlv_surface", "optimal")],
+        },
+        "test DLV",
+        expected_expiry_indices=None,
+    )
+    dropped = [
+        _solver_event(
+            "expiry_soft",
+            "optimal",
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _solver_event(
+            "expiry_hard",
+            "infeasible",
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _expiry_decision(0, retained=False, support_attempt=None),
+        _solver_event("surface", "optimal"),
+    ]
+    assert (
+        internal_dataset_module._terminal_solver_events(
+            {"outcome": "completed", "solver_events": dropped},
+            "dropped test",
+            expected_expiry_indices=(0,),
+            retained_expiry_indices=(),
+        )
+        == frozenset()
+    )
+
+
+def test_support_mask_contract_allows_superset_only_after_second_hard_failure() -> None:
+    support = [0.7, 0.9, 1.0, 1.1, 1.3]
+    frame = pl.DataFrame(
+        {
+            "expiry_id": [202401191, 202401191, 202401191],
+            "normalized_strike": [0.9, 1.0, 1.1],
+            "smooth_fit_mask": [True, False, True],
+            "smooth_input_expiry_index": pl.Series([0, 0, 0], dtype=pl.Int32),
+            "smooth_expiry_model_strikes": [support, support, support],
+        }
+    )
+    internal_dataset_module._validate_support_mask_geometry(
+        frame,
+        mask_column="smooth_fit_mask",
+        state_index_column="smooth_input_expiry_index",
+        expiry_strikes_column="smooth_expiry_model_strikes",
+        allow_masked_support_superset=frozenset({0}),
+        label="test",
+    )
+    with pytest.raises(DatasetValidationError, match="exact retained expiry support"):
+        internal_dataset_module._validate_support_mask_geometry(
+            frame,
+            mask_column="smooth_fit_mask",
+            state_index_column="smooth_input_expiry_index",
+            expiry_strikes_column="smooth_expiry_model_strikes",
+            allow_masked_support_superset=frozenset(),
+            label="test",
+        )
+    exact = frame.with_columns(pl.lit(True).alias("smooth_fit_mask"))
+    with pytest.raises(DatasetValidationError, match="strict ordered subset"):
+        internal_dataset_module._validate_support_mask_geometry(
+            exact,
+            mask_column="smooth_fit_mask",
+            state_index_column="smooth_input_expiry_index",
+            expiry_strikes_column="smooth_expiry_model_strikes",
+            allow_masked_support_superset=frozenset({0}),
+            label="test",
+        )
+
+
+@pytest.mark.parametrize(
+    ("branch", "retained_indices", "relaxed_support"),
+    [
+        ("drop_after_hard_one", (1,), frozenset()),
+        ("hard_one_boundary_retained", (0, 1), frozenset()),
+        ("attempt_two_success", (0, 1), frozenset()),
+        ("attempt_two_boundary_retained", (0, 1), frozenset()),
+        ("attempt_two_hard_failure", (0, 1), frozenset({0})),
+    ],
+)
+def test_mkarbfree_hard_fit_branches_match_diagnostic_population_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    retained_indices: tuple[int, ...],
+    relaxed_support: frozenset[int],
+) -> None:
+    expiries = np.asarray([10.0 / 252.0, 20.0 / 252.0], dtype=np.float64)
+    strikes = [
+        np.asarray([0.8, 0.9, 1.0, 1.1, 1.2], dtype=np.float64)
+        for _ in expiries
+    ]
+    mids = [
+        np.asarray(bs.price(k=value, vol=0.25, sqrtT=np.sqrt(expiry)), dtype=np.float64)
+        for expiry, value in zip(expiries, strikes, strict=True)
+    ]
+    bids = [value - 0.01 for value in mids]
+    asks = [value + 0.01 for value in mids]
+    events: list[dict[str, object]] = []
+
+    def density(support: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
+        result = np.zeros(len(support), dtype=np.float64)
+        result[int(np.flatnonzero(support == 1.0)[0])] = 1.0
+        return result
+
+    def emit(
+        self: MkArbFree,
+        stage: str,
+        status: str,
+        context: dict[str, object] | None,
+    ) -> None:
+        if self._solver_diagnostic_sink is None:
+            return
+        self._solver_diagnostic_sink(
+            {
+                **_solver_event(
+                    stage,
+                    status,
+                    objective=None if status == "infeasible" else 1.0,
+                ),
+                **({} if context is None else context),
+            }
+        )
+
+    def scripted_surface(
+        self: MkArbFree,
+        *,
+        strikes: list[np.ndarray[Any, Any]],
+        bids: list[np.ndarray[Any, Any]],
+        asks: list[np.ndarray[Any, Any]],
+        masks: list[np.ndarray[Any, Any]] | None,
+        xstrikes: list[np.ndarray[Any, Any]],
+        diagnostic_stage: str = "surface",
+        diagnostic_context: dict[str, object] | None = None,
+        hard_fit: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        del masks, kwargs
+        if diagnostic_stage == "surface":
+            emit(self, diagnostic_stage, "optimal", diagnostic_context)
+            return SimpleNamespace(
+                fits=[0.5 * (bid + ask) for bid, ask in zip(bids, asks, strict=True)],
+                xdensities=[density(value) for value in xstrikes],
+            )
+        assert diagnostic_context is not None
+        input_index = int(diagnostic_context["input_expiry_index"])
+        attempt = int(diagnostic_context["expiry_attempt"])
+        if hard_fit:
+            emit(self, diagnostic_stage, "infeasible", diagnostic_context)
+            return None
+        emit(self, diagnostic_stage, "optimal", diagnostic_context)
+        fit = 0.5 * (bids[0] + asks[0])
+        if input_index == 1:
+            return SimpleNamespace(
+                fits=[fit],
+                xdensities=[density(xstrikes[0])],
+            )
+        if branch == "hard_one_boundary_retained":
+            outside = bids[0] - self._eps_price
+            inside: list[int] = []
+        else:
+            outside = fit + 0.1
+        if branch == "hard_one_boundary_retained":
+            pass
+        elif attempt == 1:
+            inside = [2] if branch == "drop_after_hard_one" else [1, 2, 3]
+        elif branch == "attempt_two_success":
+            inside = [0, 1, 2, 3, 4]
+        elif branch == "attempt_two_boundary_retained":
+            outside = bids[0] - self._eps_price
+            inside = []
+        else:
+            inside = [1, 2]
+        outside[inside] = fit[inside]
+        return SimpleNamespace(
+            fits=[outside],
+            xdensities=[density(xstrikes[0])],
+        )
+
+    monkeypatch.setattr(MkArbFree, "surface_densities", scripted_surface)
+    result = MkArbFree(
+        "surface",
+        min_strikes_per_expiry=3,
+        _solver_diagnostic_sink=lambda event: events.append(dict(event)),
+    )(
+        expiries,
+        strikes,
+        bids,
+        asks,
+        vols=0.25,
+        verbose=cast(Any, Context).quiet,
+    )
+    assert tuple(int(value) for value in result.input_index) == retained_indices
+    observed_relaxed = internal_dataset_module._terminal_solver_events(
+        {"outcome": "completed", "solver_events": events},
+        "scripted MkArbFree",
+        expected_expiry_indices=(0, 1),
+        retained_expiry_indices=retained_indices,
+    )
+    assert observed_relaxed == relaxed_support
+    if 0 not in retained_indices:
+        return
+    output_index = retained_indices.index(0)
+    interior = np.asarray(result.xstrikes[output_index])[1:-1]
+    masked = strikes[0][np.asarray(result.masks[output_index], dtype=bool)]
+    if branch in {"attempt_two_success", "attempt_two_boundary_retained"}:
+        np.testing.assert_array_equal(interior, masked)
+        np.testing.assert_array_equal(masked, strikes[0][[1, 2, 3]])
+    elif branch == "hard_one_boundary_retained":
+        np.testing.assert_array_equal(interior, masked)
+        np.testing.assert_array_equal(masked, strikes[0])
+    else:
+        assert len(interior) > len(masked)
+        np.testing.assert_array_equal(interior, strikes[0])
+        np.testing.assert_array_equal(masked, strikes[0][[1, 2, 3]])
+
+
+def test_solver_call_parser_rejects_malformed_sequences() -> None:
+    soft = _solver_event(
+        "expiry_soft",
+        "optimal",
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    unknown = dict(soft)
+    unknown["stage"] = "mystery"
+    wrong_bool = dict(soft)
+    wrong_bool["is_fallback"] = 0
+    success_without_objective = dict(soft)
+    success_without_objective["objective"] = None
+    orphan = _solver_event(
+        "expiry_soft",
+        "optimal",
+        fallback=True,
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    dangling = _solver_event(
+        "expiry_soft",
+        "solver_error",
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    trigger = _solver_event(
+        "expiry_soft",
+        "user_limit",
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    mismatched_fallback = _solver_event(
+        "expiry_soft",
+        "optimal",
+        fallback=True,
+        input_expiry_index=1,
+        expiry_attempt=1,
+    )
+    cases = [
+        ("unknown solver stage", [unknown]),
+        ("invalid boolean fields", [wrong_bool]),
+        ("success has no finite objective", [success_without_objective]),
+        ("orphan fallback event", [orphan]),
+        ("dangling fallback trigger", [dangling]),
+        ("mismatched fallback event", [trigger, mismatched_fallback]),
+    ]
+    for expected, events in cases:
+        with pytest.raises(DatasetValidationError, match=expected):
+            internal_dataset_module._solver_calls(events, "test")
+
+
+def test_solver_event_contract_rejects_failed_or_misordered_solves() -> None:
+    soft = _solver_event(
+        "expiry_soft",
+        "optimal",
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    hard = _solver_event(
+        "expiry_hard",
+        "infeasible",
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    decision = _expiry_decision(0, retained=True, support_attempt=1)
+    surface = _solver_event("surface", "optimal")
+    valid = [soft, decision, surface]
+    failed_soft = dict(soft)
+    failed_soft.update(status="infeasible", objective=None)
+    failed_hard = dict(hard)
+    failed_hard["status"] = "unbounded"
+    failed_surface = dict(surface)
+    failed_surface.update(status="infeasible", objective=None)
+    retry_without_failed_hard = [
+        soft,
+        _solver_event(
+            "expiry_hard",
+            "optimal",
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _solver_event(
+            "expiry_soft",
+            "optimal",
+            input_expiry_index=0,
+            expiry_attempt=2,
+        ),
+    ]
+    cases = [
+        ("does not declare a completed outcome", {"outcome": "failed", "solver_events": valid}),
+        ("has no non-empty solver_events list", {"outcome": "completed", "solver_events": []}),
+        (
+            "has invalid solve ordering",
+            {"outcome": "completed", "solver_events": [hard, decision, surface]},
+        ),
+        (
+            "expiry_soft ends in unexpected state",
+            {"outcome": "completed", "solver_events": [failed_soft, decision, surface]},
+        ),
+        (
+            "expiry_hard ends in unexpected state",
+            {"outcome": "completed", "solver_events": [soft, failed_hard, decision, surface]},
+        ),
+        (
+            "does not end in one successful surface solve",
+            {"outcome": "completed", "solver_events": [soft, decision, failed_surface]},
+        ),
+        (
+            "does not end in one successful surface solve",
+            {"outcome": "completed", "solver_events": [soft, decision, surface, surface]},
+        ),
+        (
+            "expiry solve order/count changed",
+            {"outcome": "completed", "solver_events": [surface, soft, decision, surface]},
+        ),
+        (
+            "retries without a failed hard fit",
+            {
+                "outcome": "completed",
+                "solver_events": [
+                    *retry_without_failed_hard,
+                    _expiry_decision(0, retained=True, support_attempt=2),
+                    surface,
+                ],
+            },
+        ),
+    ]
+    for expected, diagnostics in cases:
+        with pytest.raises(DatasetValidationError, match=expected):
+            internal_dataset_module._terminal_solver_events(
+                diagnostics,
+                "test",
+                expected_expiry_indices=(0,),
+                retained_expiry_indices=(0,),
+            )
+
+
+def test_solver_event_contract_rejects_malformed_decisions() -> None:
+    soft = _solver_event(
+        "expiry_soft",
+        "optimal",
+        input_expiry_index=0,
+        expiry_attempt=1,
+    )
+    surface = _solver_event("surface", "optimal")
+    valid_decision = _expiry_decision(0, retained=True, support_attempt=1)
+
+    missing_field = dict(valid_decision)
+    missing_field.pop("support_attempt")
+    extra_field = {**valid_decision, "unexpected": None}
+    wrong_index = {**valid_decision, "input_expiry_index": 1}
+    bool_index = {**valid_decision, "input_expiry_index": True}
+    non_boolean_retained = {**valid_decision, "retained": 1}
+    invalid_support = {**valid_decision, "support_attempt": 3}
+    boolean_support = {**valid_decision, "support_attempt": True}
+    conflicting_drop = _expiry_decision(0, retained=False, support_attempt=1)
+    conflicting_retained = _expiry_decision(0, retained=True, support_attempt=None)
+    cases = [
+        ("decision fields changed", [soft, missing_field, surface], (0,)),
+        ("decision fields changed", [soft, extra_field, surface], (0,)),
+        ("decision is malformed", [soft, wrong_index, surface], (0,)),
+        ("decision is malformed", [soft, bool_index, surface], (0,)),
+        ("decision is malformed", [soft, non_boolean_retained, surface], (0,)),
+        ("decision is malformed", [soft, invalid_support, surface], (0,)),
+        ("decision is malformed", [soft, boolean_support, surface], (0,)),
+        ("decision conflicts with its solve history", [soft, conflicting_drop, surface], ()),
+        (
+            "decision conflicts with its solve history",
+            [soft, conflicting_retained, surface],
+            (0,),
+        ),
+        ("has invalid solve ordering", [valid_decision, soft, surface], (0,)),
+        (
+            "unknown solver stage 'expiry_decision'",
+            [soft, valid_decision, valid_decision, surface],
+            (0,),
+        ),
+        ("retained-expiry population changed", [soft, valid_decision, surface], ()),
+    ]
+    for expected, events, retained in cases:
+        with pytest.raises(DatasetValidationError, match=expected):
+            internal_dataset_module._terminal_solver_events(
+                {"outcome": "completed", "solver_events": events},
+                "test",
+                expected_expiry_indices=(0,),
+                retained_expiry_indices=retained,
+            )
+
+    fallback_dlv = [
+        _solver_event("discrete_dlv_surface", "solver_error"),
+        _solver_event("discrete_dlv_surface", "optimal", fallback=True),
+    ]
+    with pytest.raises(DatasetValidationError):
+        internal_dataset_module._terminal_solver_events(
+            {"outcome": "completed", "solver_events": fallback_dlv},
+            "test DLV",
+            expected_expiry_indices=None,
+        )
+
+
+def test_partition_validator_couples_hard_fit_failure_to_retained_state(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    config = InternalDatasetConfig(
+        name="solver-event-validation",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=DailySurfaceConfig(),
+    )
+    diagnostics = json.loads(fitted.get_column("smooth_diagnostics_json").item(0))
+    events = diagnostics["solver_events"]
+    soft_position = next(
+        index
+        for index, event in enumerate(events)
+        if event["stage"] == "expiry_soft"
+        and event["input_expiry_index"] == 0
+        and event["expiry_attempt"] == 1
+    )
+    assert events[soft_position]["is_fallback"] is False
+    hard_failure = dict(events[soft_position])
+    hard_failure.update(stage="expiry_hard", status="infeasible", objective=None)
+    retry_soft = dict(events[soft_position])
+    retry_soft["expiry_attempt"] = 2
+    diagnostics["solver_events"] = [
+        *events[: soft_position + 1],
+        hard_failure,
+        retry_soft,
+        *events[soft_position + 1 :],
+    ]
+    decision = next(
+        event
+        for event in diagnostics["solver_events"]
+        if event["stage"] == "expiry_decision"
+        and event["input_expiry_index"] == 0
+    )
+    decision["support_attempt"] = 2
+    accepted = fitted.with_columns(
+        pl.lit(canonical_json(diagnostics)).alias("smooth_diagnostics_json")
+    )
+    validate_fitted_partition(
+        accepted,
+        config=config,
+        trading_date=date(2024, 1, 3),
+        typed_empty_reason=None,
+    )
+
+    wrong_population = json.loads(json.dumps(diagnostics))
+    wrong_decision = next(
+        event
+        for event in wrong_population["solver_events"]
+        if event["stage"] == "expiry_decision"
+        and event["input_expiry_index"] == 0
+    )
+    wrong_decision.update(retained=False, support_attempt=None)
+    failed_surface = json.loads(json.dumps(diagnostics))
+    failed_surface["solver_events"][-1].update(
+        status="infeasible",
+        objective=None,
+    )
+    for corrupted_diagnostics in (wrong_population, failed_surface):
+        corrupted = fitted.with_columns(
+            pl.lit(canonical_json(corrupted_diagnostics)).alias(
+                "smooth_diagnostics_json"
+            )
+        )
+        with pytest.raises(DatasetValidationError):
+            validate_fitted_partition(
+                corrupted,
+                config=config,
+                trading_date=date(2024, 1, 3),
+                typed_empty_reason=None,
+            )
 
 
 def test_dataset_quantitative_boundary_rejects_state_config_and_clock_corruption(
@@ -944,6 +1557,11 @@ def test_dataset_quantitative_boundary_rejects_state_config_and_clock_corruption
         ),
         "smooth_expiry_fit_price": fitted.with_columns(
             (pl.col("smooth_expiry_fit_price") + 0.01).alias("smooth_expiry_fit_price")
+        ),
+        "smooth_surface_fit_price": fitted.with_columns(
+            (pl.col("smooth_surface_fit_price") + 0.01).alias(
+                "smooth_surface_fit_price"
+            )
         ),
         "smooth_fit_summary": fitted.with_columns(
             (pl.col("smooth_pcnt_fit") + 0.01).alias("smooth_pcnt_fit")
@@ -1406,10 +2024,261 @@ def test_surface_version_closures_include_content_affecting_helpers() -> None:
         return set(cast(dict[str, Any], dependencies[1]))
 
     smooth_dependencies = direct_dependency_names(fit_smooth_sanos)
-    assert {"_float_column", "_float32_column", "_require_schema"} <= (
-        smooth_dependencies
-    )
+    assert {
+        "_canonical_fitted_rows",
+        "_float_column",
+        "_float32_column",
+        "_require_schema",
+    } <= smooth_dependencies
     assert direct_dependency_names(selected_reference_view) == {"_require_schema"}
+
+
+def test_fitted_output_canonicalizes_same_date_am_before_pm() -> None:
+    paired = pair_daily_frame(
+        ticker="SPX",
+        trading_date=date(2024, 1, 3),
+        raw=_two_expiry_raw_inputs(first_is_am=True, same_expiry_date=True),
+    )
+    paired_expiry_ids = paired.get_column("expiry_id").unique(maintain_order=True).to_list()
+    assert paired_expiry_ids == sorted(paired_expiry_ids, reverse=True)
+
+    enriched = enrich_daily_frame(paired)
+    no_arb = fit_initial_no_arbitrage(enriched)
+    filtered = apply_options_filter(no_arb)
+    fitted = fit_smooth_sanos(filtered)
+
+    fitted_expiry_ids = fitted.get_column("expiry_id").unique(maintain_order=True).to_list()
+    assert fitted_expiry_ids == sorted(fitted_expiry_ids)
+    expected = fitted.sort("expiry_id", "normalized_strike", maintain_order=True)
+    assert fitted.equals(expected)
+    assert fitted.select("expiry_id", "normalized_strike").equals(
+        filtered.select("expiry_id", "normalized_strike").sort(
+            "expiry_id", "normalized_strike", maintain_order=True
+        )
+    )
+
+    none_selected = filtered.with_columns(
+        pl.lit(False).alias("options_filter_eligible")
+    )
+    empty_smooth = fit_smooth_sanos(none_selected)
+    assert empty_smooth.equals(
+        empty_smooth.sort("expiry_id", "normalized_strike", maintain_order=True)
+    )
+    assert empty_smooth.select("expiry_id", "normalized_strike").equals(
+        filtered.select("expiry_id", "normalized_strike").sort(
+            "expiry_id", "normalized_strike", maintain_order=True
+        )
+    )
+
+
+def test_black_vector_validator_uses_price_not_ill_conditioned_inverse() -> None:
+    frame = pl.DataFrame(
+        {
+            "normalized_strike": pl.Series(
+                [0.7527551054954529], dtype=pl.Float32
+            ),
+            "time_to_expiry_years": pl.Series(
+                [0.011904762126505375], dtype=pl.Float32
+            ),
+            "pure_bid_price": pl.Series([0.24725332856178284], dtype=pl.Float32),
+            "bid_implied_volatility": pl.Series(
+                [0.7817830443382263], dtype=pl.Float32
+            ),
+            "pure_bid_delta": pl.Series([0.9996272325515747], dtype=pl.Float32),
+            "pure_bid_gamma": pl.Series([0.015867725014686584], dtype=pl.Float32),
+            "pure_bid_vega": pl.Series(
+                [0.00014767998072784394], dtype=pl.Float32
+            ),
+            "pure_bid_theta": pl.Series([0.004849055781960487], dtype=pl.Float32),
+            "pure_bid_dk": pl.Series([-0.9994936585426331], dtype=pl.Float32),
+        }
+    )
+    residuals = internal_dataset_module._black_vector_residual(
+        frame,
+        price_column="pure_bid_price",
+        volatility_column="bid_implied_volatility",
+        greek_prefix="pure_bid",
+        strike_was_persisted_input=False,
+        volatility_minimum=0.01,
+        volatility_maximum=5.0,
+    )
+    direct_inverse = np.asarray(
+        bs.implied(
+            frame.get_column("normalized_strike").to_numpy().astype(np.float64),
+            frame.get_column("pure_bid_price").to_numpy().astype(np.float64),
+            sqrtT=np.sqrt(
+                frame.get_column("time_to_expiry_years").to_numpy().astype(np.float64)
+            ),
+            eps=1.0e-8,
+        )
+    )
+    assert abs(
+        float(direct_inverse[0])
+        - float(frame.get_column("bid_implied_volatility").item(0))
+    ) > 0.006
+    assert residuals.price_repricing < 1.0e-7
+    assert residuals.maximum_excess == 0.0
+
+    price_corrupted = frame.with_columns(
+        (pl.col("pure_bid_price") + 5.0e-7).alias("pure_bid_price")
+    )
+    price_residuals = internal_dataset_module._black_vector_residual(
+        price_corrupted,
+        price_column="pure_bid_price",
+        volatility_column="bid_implied_volatility",
+        greek_prefix="pure_bid",
+        strike_was_persisted_input=False,
+        volatility_minimum=0.01,
+        volatility_maximum=5.0,
+    )
+    assert price_residuals.price_rounding_excess > 4.0e-7
+
+    greek_corrupted = frame.with_columns(
+        (pl.col("pure_bid_gamma") + 0.01).alias("pure_bid_gamma")
+    )
+    greek_residuals = internal_dataset_module._black_vector_residual(
+        greek_corrupted,
+        price_column="pure_bid_price",
+        volatility_column="bid_implied_volatility",
+        greek_prefix="pure_bid",
+        strike_was_persisted_input=False,
+        volatility_minimum=0.01,
+        volatility_maximum=5.0,
+    )
+    assert greek_residuals.greek_rounding_excess > 0.009
+
+
+@pytest.mark.parametrize("strike_was_persisted_input", [False, True])
+def test_black_vector_envelope_contains_random_float32_preimages(
+    strike_was_persisted_input: bool,
+) -> None:
+    rng = np.random.default_rng(8471)
+    count = 512
+    time = rng.uniform(0.2 / 252.0, 2.0, size=count).astype(np.float32)
+    time[:3] = np.asarray([0.2 / 252.0, 1.0 / 252.0, 2.0], dtype=np.float32)
+    sqrt_time = np.sqrt(time.astype(np.float64))
+    latent_strike = np.exp(rng.uniform(np.log(0.45), np.log(2.5), size=count))
+    strike32 = latent_strike.astype(np.float32)
+    if strike_was_persisted_input:
+        latent_strike = strike32.astype(np.float64)
+    latent_volatility = rng.uniform(0.01, 4.99, size=count)
+    latent_volatility[:2] = (0.01, 5.0)
+    volatility32 = latent_volatility.astype(np.float32)
+    values = bs(
+        k=latent_strike,
+        vol=latent_volatility,
+        sqrtT=sqrt_time,
+        eps=1.0e-8,
+        what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
+    )
+    frame = pl.DataFrame(
+        {
+            "normalized_strike": pl.Series(strike32, dtype=pl.Float32),
+            "time_to_expiry_years": pl.Series(time, dtype=pl.Float32),
+            "test_volatility": pl.Series(volatility32, dtype=pl.Float32),
+            **{
+                f"test_{name}": pl.Series(
+                    np.asarray(getattr(values, name), dtype=np.float32),
+                    dtype=pl.Float32,
+                )
+                for name in ("price", "delta", "gamma", "vega", "theta", "dk")
+            },
+        }
+    )
+    residuals = internal_dataset_module._black_vector_residual(
+        frame,
+        price_column="test_price",
+        volatility_column="test_volatility",
+        greek_prefix="test",
+        strike_was_persisted_input=strike_was_persisted_input,
+        volatility_minimum=0.01,
+        volatility_maximum=5.0,
+    )
+    assert residuals.maximum_excess == 0.0
+
+
+def test_black_vector_envelope_allows_one_output_ulp_only() -> None:
+    strike = np.asarray([1.05], dtype=np.float32)
+    volatility = np.asarray([0.37], dtype=np.float32)
+    time = np.asarray([0.2 / 252.0], dtype=np.float32)
+    sqrt_time = np.sqrt(time.astype(np.float64))
+    values = bs(
+        k=strike.astype(np.float64),
+        vol=volatility.astype(np.float64),
+        sqrtT=sqrt_time,
+        eps=1.0e-8,
+        what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
+    )
+    names = ("price", "delta", "gamma", "vega", "theta", "dk")
+    frame = pl.DataFrame(
+        {
+            "normalized_strike": pl.Series(strike, dtype=pl.Float32),
+            "time_to_expiry_years": pl.Series(time, dtype=pl.Float32),
+            "test_volatility": pl.Series(volatility, dtype=pl.Float32),
+            **{
+                f"test_{name}": pl.Series(
+                    np.asarray(getattr(values, name), dtype=np.float32),
+                    dtype=pl.Float32,
+                )
+                for name in names
+            },
+        }
+    )
+    envelope = internal_dataset_module._black_value_envelope(
+        strikes32=strike,
+        volatilities32=volatility,
+        sqrt_time=sqrt_time,
+        strike_was_persisted_input=True,
+        volatility_minimum=0.01,
+        volatility_maximum=5.0,
+        epsilon=1.0e-8,
+    )
+
+    for name in names:
+        upper = float(envelope[name][1][0])
+        candidate = np.float32(upper)
+        accepted = candidate
+        for _ in range(8):
+            radius = float(
+                internal_dataset_module._float32_ulp(np.asarray([candidate]))[0]
+            )
+            if float(candidate) - upper > radius:
+                break
+            accepted = candidate
+            candidate = np.nextafter(
+                candidate, np.float32(np.inf), dtype=np.float32
+            )
+        else:
+            raise AssertionError(f"Could not step beyond the {name} output allowance")
+
+        column = "test_price" if name == "price" else f"test_{name}"
+        accepted_frame = frame.with_columns(
+            pl.lit(float(accepted), dtype=pl.Float32).alias(column)
+        )
+        accepted_residuals = internal_dataset_module._black_vector_residual(
+            accepted_frame,
+            price_column="test_price",
+            volatility_column="test_volatility",
+            greek_prefix="test",
+            strike_was_persisted_input=True,
+            volatility_minimum=0.01,
+            volatility_maximum=5.0,
+        )
+        assert accepted_residuals.maximum_excess == 0.0
+
+        rejected_frame = frame.with_columns(
+            pl.lit(float(candidate), dtype=pl.Float32).alias(column)
+        )
+        rejected_residuals = internal_dataset_module._black_vector_residual(
+            rejected_frame,
+            price_column="test_price",
+            volatility_column="test_volatility",
+            greek_prefix="test",
+            strike_was_persisted_input=True,
+            volatility_minimum=0.01,
+            volatility_maximum=5.0,
+        )
+        assert rejected_residuals.maximum_excess > 0.0
 
 
 @pytest.mark.parametrize("fraction", [0.1, 0.2, 0.5])

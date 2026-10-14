@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -51,7 +52,7 @@ from sanos.widb.build import (
     read_daily_frame,
 )
 from sanos.widb.calendar import DAYS_PER_YEAR, count_business_days_between, half_days, is_half_day
-from sanos.widb.daily import _black_implied, _black_values, _numerical_tolerances
+from sanos.widb.daily import _black_values, _numerical_tolerances
 from sanos.widb.surface import (
     FILTERED_SCHEMA,
     FITTED_SCHEMA,
@@ -71,11 +72,11 @@ from sanos.widb.surface import (
 from sanos.wrds import raw_content_producer_version
 
 RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
-INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v3"
+INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v4"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
 LINEAGE_SCHEMA = "sanos-internal-lineage-v1"
-VALIDATION_SCHEMA = "sanos-internal-validation-v2"
-DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v3"
+VALIDATION_SCHEMA = "sanos-internal-validation-v4"
+DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v4"
 LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v3"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -232,26 +233,287 @@ def _reason_counts(frame: pl.DataFrame) -> dict[str, int]:
 
 
 @version("1.0")
-def _terminal_solver_events(value: Mapping[str, Any], label: str) -> None:
-    events = value.get("solver_events")
-    if not isinstance(events, list):
-        _fail(f"{label} diagnostics has no solver_events list")
-    terminal: dict[str, str] = {}
-    for event in events:
+@dataclass(frozen=True, slots=True)
+class _SolverCall:
+    """One logical solve, including an optional adjacent fallback event."""
+
+    stage: str
+    input_expiry_index: int | None
+    expiry_attempt: int | None
+    terminal_status: str
+    used_fallback: bool
+
+
+@version("1.0", dependencies=[_SolverCall])
+def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
+    """Parse and validate the exact diagnostic event and fallback grammar."""
+
+    expiry_stages = {"expiry_soft", "expiry_hard"}
+    allowed_stages = expiry_stages | {"surface", "discrete_dlv_surface"}
+    successful = {"optimal", "optimal_inaccurate"}
+    retry_triggers = {"solver_error", "invalid_solution", "user_limit"}
+    base_fields = {
+        "stage",
+        "solver",
+        "algorithm",
+        "status",
+        "is_fallback",
+        "for_expiry",
+        "objective",
+    }
+
+    def validate_event(event: Any) -> tuple[str, int | None, int | None]:
         if not isinstance(event, Mapping):
             _fail(f"{label} diagnostics contains a malformed solver event")
         stage = event.get("stage")
+        if not isinstance(stage, str) or stage not in allowed_stages:
+            _fail(f"{label} diagnostics has an unknown solver stage {stage!r}")
+        is_expiry = stage in expiry_stages
+        expected_fields = base_fields | (
+            {"input_expiry_index", "expiry_attempt"} if is_expiry else set()
+        )
+        if set(event) != expected_fields:
+            _fail(f"{label} diagnostics {stage} event fields changed")
+        if event.get("algorithm") != "simplex":
+            _fail(f"{label} diagnostics {stage} solver algorithm changed")
+        is_fallback = event.get("is_fallback")
+        for_expiry = event.get("for_expiry")
+        if not isinstance(is_fallback, bool) or not isinstance(for_expiry, bool):
+            _fail(f"{label} diagnostics {stage} has invalid boolean fields")
+        if for_expiry is not is_expiry:
+            _fail(f"{label} diagnostics {stage} has inconsistent expiry scope")
+        expected_solver = "CLARABEL" if is_fallback else "HIGHS"
+        if event.get("solver") != expected_solver:
+            _fail(f"{label} diagnostics {stage} has inconsistent solver identity")
         status = event.get("status")
-        if not isinstance(stage, str) or not isinstance(status, str):
-            _fail(f"{label} diagnostics solver event has invalid stage/status")
-        terminal[stage] = status
-    rejected = {
-        stage: status
-        for stage, status in terminal.items()
-        if status not in {"optimal", "optimal_inaccurate"}
-    }
-    if rejected:
-        _fail(f"{label} diagnostics ends in failed solver states: {rejected}")
+        if not isinstance(status, str) or not status:
+            _fail(f"{label} diagnostics {stage} has invalid solver status")
+        objective = event.get("objective")
+        if objective is not None and (
+            isinstance(objective, bool)
+            or not isinstance(objective, (int, float))
+            or not math.isfinite(float(objective))
+        ):
+            _fail(f"{label} diagnostics {stage} has invalid solver objective")
+        if status in successful and objective is None:
+            _fail(f"{label} diagnostics {stage} success has no finite objective")
+        if status not in successful | {"user_limit"} and objective is not None:
+            _fail(f"{label} diagnostics {stage} failure has an objective value")
+        if not is_expiry:
+            return stage, None, None
+        input_index = event.get("input_expiry_index")
+        attempt = event.get("expiry_attempt")
+        if (
+            isinstance(input_index, bool)
+            or not isinstance(input_index, int)
+            or input_index < 0
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt not in {1, 2}
+        ):
+            _fail(f"{label} diagnostics expiry event has invalid input index/attempt")
+        return stage, input_index, attempt
+
+    calls: list[_SolverCall] = []
+    position = 0
+    while position < len(events):
+        primary = events[position]
+        stage, input_index, attempt = validate_event(primary)
+        if primary["is_fallback"]:
+            _fail(f"{label} diagnostics has an orphan fallback event")
+        terminal = primary
+        used_fallback = False
+        if primary["status"] in retry_triggers:
+            if position + 1 >= len(events):
+                _fail(f"{label} diagnostics has a dangling fallback trigger")
+            fallback = events[position + 1]
+            fallback_key = validate_event(fallback)
+            if not fallback["is_fallback"] or fallback_key != (
+                stage,
+                input_index,
+                attempt,
+            ):
+                _fail(f"{label} diagnostics has a mismatched fallback event")
+            terminal = fallback
+            used_fallback = True
+            position += 1
+        calls.append(
+            _SolverCall(
+                stage=stage,
+                input_expiry_index=input_index,
+                expiry_attempt=attempt,
+                terminal_status=cast(str, terminal["status"]),
+                used_fallback=used_fallback,
+            )
+        )
+        position += 1
+    return calls
+
+
+@version("4.0", dependencies=[_solver_calls])
+def _terminal_solver_events(
+    value: Mapping[str, Any],
+    label: str,
+    *,
+    expected_expiry_indices: tuple[int, ...] | None,
+    retained_expiry_indices: tuple[int, ...] | None = None,
+) -> frozenset[int]:
+    """Validate successful solver calls and the intentional hard-fit fallback."""
+
+    if value.get("outcome") != "completed":
+        _fail(f"{label} diagnostics does not declare a completed outcome")
+    events = value.get("solver_events")
+    if not isinstance(events, list) or not events:
+        _fail(f"{label} diagnostics has no non-empty solver_events list")
+    successful = {"optimal", "optimal_inaccurate"}
+    hard_fallback = successful | {"infeasible", "infeasible_inaccurate"}
+
+    if expected_expiry_indices is None:
+        calls = _solver_calls(events, label)
+        if len(calls) != 1 or calls[0].stage != "discrete_dlv_surface":
+            _fail(f"{label} diagnostics does not contain one discrete-DLV solve")
+        if calls[0].used_fallback or calls[0].terminal_status not in successful:
+            _fail(f"{label} diagnostics discrete-DLV solve did not succeed directly")
+        if retained_expiry_indices is not None:
+            _fail(f"{label} diagnostics received unexpected retained expiry indices")
+        return frozenset()
+
+    if retained_expiry_indices is None:
+        _fail(f"{label} diagnostics has no retained-expiry contract")
+
+    predicted_retained: list[int] = []
+    relaxed_support: set[int] = set()
+    cursor = 0
+    for input_index in expected_expiry_indices:
+        decision_position = next(
+            (
+                position
+                for position in range(cursor, len(events))
+                if isinstance(events[position], Mapping)
+                and events[position].get("stage") == "expiry_decision"
+            ),
+            None,
+        )
+        if decision_position is None:
+            _fail(f"{label} diagnostics expiry {input_index} has no decision event")
+        history = _solver_calls(events[cursor:decision_position], label)
+        if any(call.input_expiry_index != input_index for call in history):
+            _fail(f"{label} diagnostics expiry solve order/count changed")
+        decision = events[decision_position]
+        assert isinstance(decision, Mapping)
+        if set(decision) != {
+            "stage",
+            "input_expiry_index",
+            "retained",
+            "support_attempt",
+        }:
+            _fail(f"{label} diagnostics expiry decision fields changed")
+        decision_index = decision.get("input_expiry_index")
+        retained = decision.get("retained")
+        support_attempt = decision.get("support_attempt")
+        if (
+            isinstance(decision_index, bool)
+            or not isinstance(decision_index, int)
+            or decision_index != input_index
+            or not isinstance(retained, bool)
+            or (
+                support_attempt is not None
+                and (
+                    isinstance(support_attempt, bool)
+                    or not isinstance(support_attempt, int)
+                    or support_attempt not in {1, 2}
+                )
+            )
+        ):
+            _fail(f"{label} diagnostics expiry decision is malformed")
+        cursor = decision_position + 1
+        shape = [(call.stage, call.expiry_attempt) for call in history]
+        accepted_shapes = {
+            (("expiry_soft", 1),),
+            (("expiry_soft", 1), ("expiry_hard", 1)),
+            (("expiry_soft", 1), ("expiry_hard", 1), ("expiry_soft", 2)),
+            (
+                ("expiry_soft", 1),
+                ("expiry_hard", 1),
+                ("expiry_soft", 2),
+                ("expiry_hard", 2),
+            ),
+        }
+        if tuple(shape) not in accepted_shapes:
+            _fail(f"{label} diagnostics expiry {input_index} has invalid solve ordering")
+        for call in history:
+            accepted = successful if call.stage == "expiry_soft" else hard_fallback
+            if call.terminal_status not in accepted:
+                _fail(
+                    f"{label} diagnostics expiry "
+                    f"{(input_index, call.expiry_attempt)} {call.stage} ends in "
+                    f"unexpected state {call.terminal_status!r}"
+                )
+        if len(history) >= 3 and history[1].terminal_status not in {
+            "infeasible",
+            "infeasible_inaccurate",
+        }:
+            _fail(
+                f"{label} diagnostics expiry {input_index} retries without "
+                "a failed hard fit"
+            )
+        hard_failed = {"infeasible", "infeasible_inaccurate"}
+        if len(history) == 1:
+            valid_decision = retained and support_attempt == 1
+        elif len(history) == 2 and history[1].terminal_status in successful:
+            valid_decision = retained and support_attempt == 1
+        elif len(history) == 2:
+            valid_decision = (not retained and support_attempt is None) or (
+                retained and support_attempt == 1
+            )
+        elif len(history) == 3:
+            valid_decision = retained and support_attempt == 2
+        elif history[-1].terminal_status in successful:
+            valid_decision = retained and support_attempt == 2
+        else:
+            valid_decision = retained and support_attempt in {1, 2}
+        if not valid_decision:
+            _fail(
+                f"{label} diagnostics expiry {input_index} decision conflicts "
+                "with its solve history"
+            )
+        if retained:
+            predicted_retained.append(input_index)
+        if (
+            len(history) == 4
+            and history[-1].terminal_status in hard_failed
+            and support_attempt == 1
+        ):
+            relaxed_support.add(input_index)
+    surface_calls = _solver_calls(events[cursor:], label)
+    if (
+        len(surface_calls) != 1
+        or surface_calls[0].stage != "surface"
+        or surface_calls[0].terminal_status not in successful
+    ):
+        _fail(f"{label} diagnostics does not end in one successful surface solve")
+    if tuple(predicted_retained) != retained_expiry_indices:
+        _fail(
+            f"{label} diagnostics retained-expiry population changed: expected "
+            f"{tuple(predicted_retained)}, observed {retained_expiry_indices}"
+        )
+    return frozenset(relaxed_support)
+
+
+@version("1.0")
+def _expected_solver_expiry_indices(
+    frame: pl.DataFrame,
+    row_mask: np.ndarray[Any, Any],
+    minimum_strikes: int,
+) -> tuple[int, ...]:
+    """Return the input expiry indices for which MkArbFree attempts a solve."""
+
+    expiry_ids = frame.get_column("expiry_id").to_numpy()
+    return tuple(
+        index
+        for index, expiry_id in enumerate(np.unique(expiry_ids[row_mask]))
+        if int(np.sum(row_mask & (expiry_ids == expiry_id))) >= minimum_strikes
+    )
 
 
 @version("1.0")
@@ -520,16 +782,17 @@ def _expiry_state_pricer(
     return pricer, indices, maxima
 
 
-@version("1.0")
+@version("2.0")
 def _validate_support_mask_geometry(
     frame: pl.DataFrame,
     *,
     mask_column: str,
     state_index_column: str,
     expiry_strikes_column: str,
+    allow_masked_support_superset: frozenset[int],
     label: str,
 ) -> None:
-    """Tie a stored fitter mask exactly to its retained expiry support."""
+    """Tie a stored fitter mask to its retained expiry support and solve path."""
 
     mask = frame.get_column(mask_column).to_numpy().astype(bool)
     state_present = frame.get_column(state_index_column).is_not_null().to_numpy()
@@ -546,6 +809,10 @@ def _validate_support_mask_geometry(
         ):
             _fail(f"{label} has inconsistent retained expiry support")
         support = np.asarray(supports[0], dtype=np.float64)
+        state_indices = state_rows.get_column(state_index_column).unique().to_list()
+        if len(state_indices) != 1 or state_indices[0] is None:
+            _fail(f"{label} has inconsistent retained input-expiry indices")
+        state_index = int(state_indices[0])
         local_mask = state_rows.get_column(mask_column).to_numpy().astype(bool)
         masked_strikes = (
             state_rows.get_column("normalized_strike")
@@ -553,15 +820,224 @@ def _validate_support_mask_geometry(
             .to_numpy()
             .astype(np.float64, copy=False)
         )
-        if support.ndim != 1 or len(support) < 3 or not np.array_equal(
-            support[1:-1], masked_strikes
-        ):
-            _fail(f"{label} differs from the exact retained expiry support")
+        if support.ndim != 1 or len(support) < 3:
+            _fail(f"{label} has invalid retained expiry support")
+        interior = support[1:-1]
+        if state_index not in allow_masked_support_superset:
+            if not np.array_equal(interior, masked_strikes):
+                _fail(f"{label} differs from the exact retained expiry support")
+            continue
+        positions = np.searchsorted(interior, masked_strikes)
+        is_strict_ordered_subset = (
+            len(masked_strikes) < len(interior)
+            and len(masked_strikes) > 0
+            and np.all(positions < len(interior))
+            and np.array_equal(interior[positions], masked_strikes)
+        )
+        if not is_strict_ordered_subset:
+            _fail(
+                f"{label} must be a strict ordered subset after a failed second "
+                "hard fit"
+            )
+
+
+@version("1.0")
+@dataclass(frozen=True, slots=True)
+class _BlackVectorResiduals:
+    """Independent price and Greek residuals for one persisted Black vector."""
+
+    price_repricing: float
+    price_rounding_excess: float
+    greek_center: float
+    greek_rounding_excess: float
+    volatility_bound_excess: float
+
+    @property
+    def center_residual(self) -> float:
+        return max(self.price_repricing, self.greek_center)
+
+    @property
+    def maximum_excess(self) -> float:
+        return max(
+            self.price_rounding_excess,
+            self.greek_rounding_excess,
+            self.volatility_bound_excess,
+        )
+
+
+@version("1.0")
+def _float32_ulp(values: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
+    """Return a conservative one-ULP radius around finite Float32 values."""
+
+    center = np.asarray(values, dtype=np.float32)
+    lower = np.nextafter(center, np.float32(-np.inf), dtype=np.float32)
+    upper = np.nextafter(center, np.float32(np.inf), dtype=np.float32)
+    center64 = center.astype(np.float64)
+    return np.maximum(
+        center64 - lower.astype(np.float64),
+        upper.astype(np.float64) - center64,
+    )
+
+
+@version("1.0", dependencies=[_black_values])
+def _black_value_envelope(
+    *,
+    strikes32: np.ndarray[Any, Any],
+    volatilities32: np.ndarray[Any, Any],
+    sqrt_time: np.ndarray[Any, Any],
+    strike_was_persisted_input: bool,
+    volatility_minimum: float,
+    volatility_maximum: float,
+    epsilon: float,
+) -> dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]]:
+    """Return conservative Black extrema over the persisted input cells.
+
+    The input interval deliberately spans the adjacent Float32 values, which is
+    wider than the true round-to-nearest cell. Candidate points include the
+    analytic stationary points of d1, d2, gamma, and theta on every boundary;
+    they therefore cover the non-monotone Greek extrema, not just corners.
+    """
+
+    strike_center = strikes32.astype(np.float64)
+    if strike_was_persisted_input:
+        strike_lower = strike_center
+        strike_upper = strike_center
+    else:
+        strike_lower = np.nextafter(
+            strikes32, np.float32(-np.inf), dtype=np.float32
+        ).astype(np.float64)
+        strike_upper = np.nextafter(
+            strikes32, np.float32(np.inf), dtype=np.float32
+        ).astype(np.float64)
+    volatility_lower = np.clip(
+        np.nextafter(
+            volatilities32, np.float32(-np.inf), dtype=np.float32
+        ).astype(np.float64),
+        volatility_minimum,
+        volatility_maximum,
+    )
+    volatility_upper = np.clip(
+        np.nextafter(
+            volatilities32, np.float32(np.inf), dtype=np.float32
+        ).astype(np.float64),
+        volatility_minimum,
+        volatility_maximum,
+    )
+    log_strike_lower = np.log(strike_lower)
+    log_strike_upper = np.log(strike_upper)
+    total_volatility_lower = volatility_lower * sqrt_time
+    total_volatility_upper = volatility_upper * sqrt_time
+    names = ("price", "delta", "gamma", "vega", "theta", "dk")
+    candidate_values: dict[str, list[np.ndarray[Any, Any]]] = {
+        name: [] for name in names
+    }
+
+    def append_candidate(
+        strike: np.ndarray[Any, Any],
+        volatility: np.ndarray[Any, Any],
+    ) -> None:
+        values = _black_values(
+            k=strike,
+            vol=volatility,
+            sqrtT=sqrt_time,
+            eps=epsilon,
+            what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
+        )
+        for name in names:
+            candidate_values[name].append(
+                np.asarray(getattr(values, name), dtype=np.float64)
+            )
+
+    for strike in (strike_lower, strike_upper):
+        for volatility in (volatility_lower, volatility_upper):
+            append_candidate(strike, volatility)
+
+    for strike, log_strike in (
+        (strike_lower, log_strike_lower),
+        (strike_upper, log_strike_upper),
+    ):
+        stationary_total_volatilities = (
+            np.sqrt(np.maximum(-2.0 * log_strike, 0.0)),
+            np.sqrt(np.maximum(2.0 * log_strike, 0.0)),
+            np.sqrt(2.0 * (np.sqrt(1.0 + np.square(log_strike)) - 1.0)),
+            np.sqrt(2.0 * (1.0 + np.sqrt(1.0 + np.square(log_strike)))),
+        )
+        for stationary in stationary_total_volatilities:
+            clipped = np.clip(
+                stationary,
+                total_volatility_lower,
+                total_volatility_upper,
+            )
+            volatility = np.where(
+                stationary <= total_volatility_lower,
+                volatility_lower,
+                np.where(
+                    stationary >= total_volatility_upper,
+                    volatility_upper,
+                    clipped / sqrt_time,
+                ),
+            )
+            append_candidate(strike, volatility)
+
+    for total_volatility, volatility in (
+        (total_volatility_lower, volatility_lower),
+        (total_volatility_upper, volatility_upper),
+    ):
+        stationary_log_strike = 0.5 * np.square(total_volatility)
+        clipped = np.clip(
+            stationary_log_strike,
+            log_strike_lower,
+            log_strike_upper,
+        )
+        strike = np.where(
+            stationary_log_strike <= log_strike_lower,
+            strike_lower,
+            np.where(
+                stationary_log_strike >= log_strike_upper,
+                strike_upper,
+                np.exp(clipped),
+            ),
+        )
+        append_candidate(strike, volatility)
+
+    return {
+        name: (
+            np.min(candidate_values[name], axis=0),
+            np.max(candidate_values[name], axis=0),
+        )
+        for name in names
+    }
+
+
+@version("1.0", dependencies=[_BlackVectorResiduals])
+def _merge_black_vector_residuals(
+    *items: _BlackVectorResiduals,
+) -> _BlackVectorResiduals:
+    """Take componentwise maxima across independently validated Black vectors."""
+
+    if not items:
+        return _BlackVectorResiduals(0.0, 0.0, 0.0, 0.0, 0.0)
+    fields = (
+        "price_repricing",
+        "price_rounding_excess",
+        "greek_center",
+        "greek_rounding_excess",
+        "volatility_bound_excess",
+    )
+    return _BlackVectorResiduals(
+        *(max(getattr(item, field) for item in items) for field in fields)
+    )
 
 
 @version(
-    "1.0",
-    dependencies=[_black_implied, _black_values, _numerical_tolerances],
+    "2.0",
+    dependencies=[
+        _BlackVectorResiduals,
+        _black_value_envelope,
+        _black_values,
+        _float32_ulp,
+        _numerical_tolerances,
+    ],
 )
 def _black_vector_residual(
     frame: pl.DataFrame,
@@ -569,44 +1045,120 @@ def _black_vector_residual(
     price_column: str,
     volatility_column: str,
     greek_prefix: str,
-) -> float:
-    """Recompute one complete stored Black IV/Greek vector at production casts."""
+    strike_was_persisted_input: bool,
+    volatility_minimum: float,
+    volatility_maximum: float,
+) -> _BlackVectorResiduals:
+    """Validate a persisted Black vector against its Float32 production contract.
 
-    implied_epsilon, greek_epsilon = _numerical_tolerances()
-    strikes = frame.get_column("normalized_strike").to_numpy().astype(np.float64)
-    prices = frame.get_column(price_column).to_numpy().astype(np.float64)
+    Implied volatility is deliberately not re-inverted. Deep in-the-money prices
+    can identify volatility very poorly even when repricing is well inside the
+    producer's price tolerance. Greeks are instead checked over every possible
+    source input represented by the persisted Float32 rounding cells.
+    """
+
+    _, greek_epsilon = _numerical_tolerances()
+    strikes32 = (
+        frame.get_column("normalized_strike")
+        .to_numpy()
+        .astype(np.float32, copy=False)
+    )
+    prices32 = frame.get_column(price_column).to_numpy().astype(np.float32, copy=False)
+    volatilities32 = (
+        frame.get_column(volatility_column).to_numpy().astype(np.float32, copy=False)
+    )
     sqrt_time = np.sqrt(
         frame.get_column("time_to_expiry_years").to_numpy().astype(np.float64)
     )
-    expected_volatility = np.asarray(
-        _black_implied(
-            strikes,
-            prices,
-            sqrtT=sqrt_time,
-            eps=implied_epsilon,
-        ),
-        dtype=np.float32,
-    )
-    observed_volatility = (
-        frame.get_column(volatility_column).to_numpy().astype(np.float32, copy=False)
-    )
-    residual = _max_abs(
-        observed_volatility.astype(np.float64),
-        expected_volatility.astype(np.float64),
-    )
-    expected_greeks = _black_values(
+    strikes = strikes32.astype(np.float64)
+    volatilities = volatilities32.astype(np.float64)
+    center = _black_values(
         k=strikes,
-        vol=observed_volatility.astype(np.float64),
+        vol=volatilities,
         sqrtT=sqrt_time,
         eps=greek_epsilon,
         what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
     )
-    for name, values in expected_greeks.items():
-        column = f"{greek_prefix}_{name}"
-        expected = np.asarray(values, dtype=np.float32).astype(np.float64)
-        observed = frame.get_column(column).to_numpy().astype(np.float64)
-        residual = max(residual, _max_abs(observed, expected))
-    return residual
+
+    names = ("price", "delta", "gamma", "vega", "theta", "dk")
+    envelope = _black_value_envelope(
+        strikes32=strikes32,
+        volatilities32=volatilities32,
+        sqrt_time=sqrt_time,
+        strike_was_persisted_input=strike_was_persisted_input,
+        volatility_minimum=volatility_minimum,
+        volatility_maximum=volatility_maximum,
+        epsilon=greek_epsilon,
+    )
+    price_lower, price_upper = envelope["price"]
+    observed_price = prices32.astype(np.float64)
+    price_repricing = _max_abs(
+        observed_price,
+        np.asarray(center.price, dtype=np.float64),
+    )
+    price_allowance = _float32_ulp(prices32)
+    price_rounding_excess = float(
+        np.max(
+            np.maximum.reduce(
+                (
+                    price_lower - observed_price - price_allowance,
+                    observed_price - price_upper - price_allowance,
+                    np.zeros_like(observed_price),
+                )
+            )
+        )
+    )
+
+    greek_center = 0.0
+    greek_rounding_excess = 0.0
+    for name in names[1:]:
+        observed32 = (
+            frame.get_column(f"{greek_prefix}_{name}")
+            .to_numpy()
+            .astype(np.float32, copy=False)
+        )
+        observed = observed32.astype(np.float64)
+        greek_center = max(
+            greek_center,
+            _max_abs(observed, np.asarray(getattr(center, name), dtype=np.float64)),
+        )
+        lower, upper = envelope[name]
+        allowance = _float32_ulp(observed32)
+        greek_rounding_excess = max(
+            greek_rounding_excess,
+            float(
+                np.max(
+                    np.maximum.reduce(
+                        (
+                            lower - observed - allowance,
+                            observed - upper - allowance,
+                            np.zeros_like(observed),
+                        )
+                    )
+                )
+            ),
+        )
+
+    minimum32 = np.float32(volatility_minimum).astype(np.float64)
+    maximum32 = np.float32(volatility_maximum).astype(np.float64)
+    volatility_bound_excess = float(
+        np.max(
+            np.maximum.reduce(
+                (
+                    minimum32 - volatilities,
+                    volatilities - maximum32,
+                    np.zeros_like(volatilities),
+                )
+            )
+        )
+    )
+    return _BlackVectorResiduals(
+        price_repricing=price_repricing,
+        price_rounding_excess=price_rounding_excess,
+        greek_center=greek_center,
+        greek_rounding_excess=greek_rounding_excess,
+        volatility_bound_excess=volatility_bound_excess,
+    )
 
 
 @version("1.0")
@@ -636,17 +1188,19 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "3.5",
+    "3.9",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
         _reason_counts,
+        _expected_solver_expiry_indices,
         _terminal_solver_events,
         _max_abs,
         _validate_pricer_state,
         _expiry_state_pricer,
         _validate_support_mask_geometry,
         _black_vector_residual,
+        _merge_black_vector_residuals,
         _validate_fitted_numeric_finiteness,
         _canonical_discrete_dlv_densities,
         _canonical_discrete_dlv_squares,
@@ -805,6 +1359,7 @@ def validate_fitted_partition(
     for column in (
         "smooth_model_variance",
         "smooth_expiry_fit_price",
+        "smooth_surface_fit_price",
         "smooth_expiry_model_strikes",
         "smooth_expiry_model_density",
         "smooth_surface_model_strikes",
@@ -927,11 +1482,69 @@ def validate_fitted_partition(
     expected_initial_reasons[initial_retained & ~pre_mask] = "initial_no_arb_strike_masked"
     if initial_reasons.tolist() != expected_initial_reasons.tolist():
         _fail(f"{trading_date}: initial no-arbitrage rejection reasons are inconsistent")
+
+    no_arb_text = frame.get_column("no_arb_diagnostics_json").item(0)
+    filter_text = frame.get_column("filter_diagnostics_json").item(0)
+    smooth_text = frame.get_column("smooth_diagnostics_json").item(0)
+    dlv_text = frame.get_column("discrete_dlv_diagnostics_json").item(0)
+    no_arb = _canonical_object(no_arb_text, "no-arbitrage diagnostics")
+    filter_diagnostics = _canonical_object(filter_text, "filter diagnostics")
+    smooth = _canonical_object(smooth_text, "smooth diagnostics")
+    dlv_diagnostics = _canonical_object(dlv_text, "discrete-DLV diagnostics")
+    no_arb_solver_indices = _expected_solver_expiry_indices(
+        frame,
+        np.ones(frame.height, dtype=bool),
+        config.surface.no_arbitrage.min_strikes_per_expiry,
+    )
+    initial_retained_indices = tuple(
+        int(value)
+        for value in frame.get_column("initial_no_arb_input_expiry_index")
+        .drop_nulls()
+        .unique(maintain_order=True)
+    )
+    initial_relaxed_support = _terminal_solver_events(
+        no_arb,
+        "no-arbitrage",
+        expected_expiry_indices=no_arb_solver_indices,
+        retained_expiry_indices=initial_retained_indices,
+    )
+    input_expiry_ids = frame.get_column("expiry_id").unique(maintain_order=True).to_list()
+    retained_expiry_ids = (
+        frame.filter(pl.col("initial_no_arb_expiry_retained"))
+        .get_column("expiry_id")
+        .unique(maintain_order=True)
+        .to_list()
+    )
+    smooth_relaxed_support: frozenset[int] = frozenset()
+    if np.any(selected):
+        smooth_solver_indices = _expected_solver_expiry_indices(
+            frame,
+            selected,
+            config.surface.no_arbitrage.min_strikes_per_expiry,
+        )
+        smooth_retained_indices = tuple(
+            int(value)
+            for value in frame.get_column("smooth_input_expiry_index")
+            .drop_nulls()
+            .unique(maintain_order=True)
+        )
+        smooth_relaxed_support = _terminal_solver_events(
+            smooth,
+            "smooth",
+            expected_expiry_indices=smooth_solver_indices,
+            retained_expiry_indices=smooth_retained_indices,
+        )
+        _terminal_solver_events(
+            dlv_diagnostics,
+            "discrete-DLV",
+            expected_expiry_indices=None,
+        )
     _validate_support_mask_geometry(
         frame,
         mask_column="mask_arb_free",
         state_index_column="initial_no_arb_input_expiry_index",
         expiry_strikes_column="initial_expiry_model_strikes",
+        allow_masked_support_superset=initial_relaxed_support,
         label=f"{trading_date}: initial no-arbitrage mask",
     )
     smooth_fit_mask = frame.get_column("smooth_fit_mask").to_numpy().astype(bool)
@@ -954,6 +1567,7 @@ def validate_fitted_partition(
         mask_column="smooth_fit_mask",
         state_index_column="smooth_input_expiry_index",
         expiry_strikes_column="smooth_expiry_model_strikes",
+        allow_masked_support_superset=smooth_relaxed_support,
         label=f"{trading_date}: smooth fit mask",
     )
 
@@ -1012,24 +1626,30 @@ def validate_fitted_partition(
     ):
         _fail(f"{trading_date}: spot_return differs from the Float32 close return")
 
-    black_vector_residual = max(
+    black_vector_residual = _merge_black_vector_residuals(
         _black_vector_residual(
             frame,
             price_column="pure_bid_price",
             volatility_column="bid_implied_volatility",
             greek_prefix="pure_bid",
+            strike_was_persisted_input=False,
+            volatility_minimum=config.daily.enrichment.min_implied_vol,
+            volatility_maximum=config.daily.enrichment.max_implied_vol,
         ),
         _black_vector_residual(
             frame,
             price_column="pure_ask_price",
             volatility_column="ask_implied_volatility",
             greek_prefix="pure_ask",
+            strike_was_persisted_input=False,
+            volatility_minimum=config.daily.enrichment.min_implied_vol,
+            volatility_maximum=config.daily.enrichment.max_implied_vol,
         ),
     )
-    if black_vector_residual > 1.0e-4:
+    if black_vector_residual.maximum_excess > 0.0:
         _fail(
-            f"{trading_date}: stored enrichment Black IV/Greek residual is "
-            f"{black_vector_residual}"
+            f"{trading_date}: stored enrichment Black vector exceeds its persisted "
+            f"Float32 contract by {black_vector_residual.maximum_excess}"
         )
 
     call_bid = floats("pure_market_call_bid")
@@ -1119,22 +1739,6 @@ def validate_fitted_partition(
     ) > 2e-6:
         _fail(f"{trading_date}: normalized-unit bridge residual exceeds 2e-6")
 
-    no_arb_text = frame.get_column("no_arb_diagnostics_json").item(0)
-    filter_text = frame.get_column("filter_diagnostics_json").item(0)
-    smooth_text = frame.get_column("smooth_diagnostics_json").item(0)
-    dlv_text = frame.get_column("discrete_dlv_diagnostics_json").item(0)
-    no_arb = _canonical_object(no_arb_text, "no-arbitrage diagnostics")
-    filter_diagnostics = _canonical_object(filter_text, "filter diagnostics")
-    smooth = _canonical_object(smooth_text, "smooth diagnostics")
-    dlv_diagnostics = _canonical_object(dlv_text, "discrete-DLV diagnostics")
-    _terminal_solver_events(no_arb, "no-arbitrage")
-    input_expiry_ids = frame.get_column("expiry_id").unique(maintain_order=True).to_list()
-    retained_expiry_ids = (
-        frame.filter(pl.col("initial_no_arb_expiry_retained"))
-        .get_column("expiry_id")
-        .unique(maintain_order=True)
-        .to_list()
-    )
     expected_no_arb = {
         "input_rows": frame.height,
         "input_expiries": len(input_expiry_ids),
@@ -1175,8 +1779,6 @@ def validate_fitted_partition(
     if int(smooth.get("selected_rows", -1)) != int(np.sum(selected)):
         _fail(f"{trading_date}: smooth diagnostic selected count is inconsistent")
     if np.any(selected):
-        _terminal_solver_events(smooth, "smooth")
-        _terminal_solver_events(dlv_diagnostics, "discrete-DLV")
         if (
             dlv_diagnostics.get("schema")
             != "sanos-discrete-dlv-projection-diagnostics-v3"
@@ -1520,7 +2122,7 @@ def validate_fitted_partition(
     expiry_fit_reconstruction = 0.0
     quote_containment = 0.0
     expiry_quote_containment = 0.0
-    fitted_black_vector_residual = 0.0
+    fitted_black_vector_residual = _merge_black_vector_residuals()
     for model_index, (input_index, expiry) in enumerate(
         zip(initial_state_indices, initial_surface_pricer.expiries, strict=True)
     ):
@@ -1541,19 +2143,25 @@ def validate_fitted_partition(
             expiry_fit_reconstruction,
             _max_abs(expiry_observed, rows["pure_fit1_price"].to_numpy()),
         )
-        fitted_black_vector_residual = max(
+        fitted_black_vector_residual = _merge_black_vector_residuals(
             fitted_black_vector_residual,
             _black_vector_residual(
                 rows,
                 price_column="pure_fit1_price",
                 volatility_column="fit1_volatility",
                 greek_prefix="pure_fit1",
+                strike_was_persisted_input=True,
+                volatility_minimum=0.01,
+                volatility_maximum=5.0,
             ),
             _black_vector_residual(
                 rows,
                 price_column="pure_fitX_price",
                 volatility_column="fitX_volatility",
                 greek_prefix="pure_fitX",
+                strike_was_persisted_input=True,
+                volatility_minimum=0.01,
+                volatility_maximum=5.0,
             ),
         )
         local_mask = rows["mask_arb_free"].to_numpy().astype(bool)
@@ -1583,10 +2191,10 @@ def validate_fitted_partition(
             f"{trading_date}: reconstructed initial expiry-fit prices changed by "
             f"{expiry_fit_reconstruction}"
         )
-    if fitted_black_vector_residual > 1.0e-4:
+    if fitted_black_vector_residual.maximum_excess > 0.0:
         _fail(
-            f"{trading_date}: stored fitted Black IV/Greek residual is "
-            f"{fitted_black_vector_residual}"
+            f"{trading_date}: stored fitted Black vector exceeds its persisted "
+            f"Float32 contract by {fitted_black_vector_residual.maximum_excess}"
         )
     if quote_containment > 1.0e-6:
         _fail(f"{trading_date}: initial quote containment residual is {quote_containment}")
@@ -1598,6 +2206,7 @@ def validate_fitted_partition(
 
     smooth_reconstruction = 0.0
     smooth_expiry_reconstruction = 0.0
+    smooth_surface_fit_reconstruction = 0.0
     smooth_fit_error_reconstruction = 0.0
     calendar_residual = 0.0
     if smooth_pricer is not None:
@@ -1611,6 +2220,10 @@ def validate_fitted_partition(
                 smooth_reconstruction,
                 _max_abs(observed, rows["smooth_call_mid"].to_numpy()),
             )
+            smooth_surface_fit_reconstruction = max(
+                smooth_surface_fit_reconstruction,
+                _max_abs(observed, rows["smooth_surface_fit_price"].to_numpy()),
+            )
             expiry_observed = np.asarray(
                 smooth_expiry_pricer(
                     smooth_expiry_pricer.expiries[model_index],
@@ -1623,6 +2236,11 @@ def validate_fitted_partition(
             )
         if smooth_reconstruction > 5.0e-8:
             _fail(f"{trading_date}: reconstructed smooth fitted prices changed")
+        if smooth_surface_fit_reconstruction > 5.0e-8:
+            _fail(
+                f"{trading_date}: reconstructed serialized smooth surface-fit "
+                "prices changed"
+            )
         if smooth_expiry_reconstruction > 5.0e-8:
             _fail(f"{trading_date}: reconstructed smooth expiry-fit prices changed")
 
@@ -1713,8 +2331,30 @@ def validate_fitted_partition(
     initial_retained = frame["initial_no_arb_expiry_retained"].to_numpy().astype(bool)
     smooth_indices = frame["smooth_input_expiry_index"].drop_nulls().unique()
     residuals = {
-        "black_enrichment_vectors": black_vector_residual,
-        "black_fitted_vectors": fitted_black_vector_residual,
+        "black_enrichment_vectors": black_vector_residual.center_residual,
+        "black_enrichment_price_repricing": black_vector_residual.price_repricing,
+        "black_enrichment_price_rounding_excess": (
+            black_vector_residual.price_rounding_excess
+        ),
+        "black_enrichment_greek_center": black_vector_residual.greek_center,
+        "black_enrichment_greek_rounding_excess": (
+            black_vector_residual.greek_rounding_excess
+        ),
+        "black_enrichment_volatility_bound_excess": (
+            black_vector_residual.volatility_bound_excess
+        ),
+        "black_fitted_vectors": fitted_black_vector_residual.center_residual,
+        "black_fitted_price_repricing": fitted_black_vector_residual.price_repricing,
+        "black_fitted_price_rounding_excess": (
+            fitted_black_vector_residual.price_rounding_excess
+        ),
+        "black_fitted_greek_center": fitted_black_vector_residual.greek_center,
+        "black_fitted_greek_rounding_excess": (
+            fitted_black_vector_residual.greek_rounding_excess
+        ),
+        "black_fitted_volatility_bound_excess": (
+            fitted_black_vector_residual.volatility_bound_excess
+        ),
         "calendar": calendar_residual,
         "direct_call_unit": direct_call_residual,
         "direct_put_unit": direct_put_residual,
@@ -1735,6 +2375,7 @@ def validate_fitted_partition(
         "put_call_parity": put_call_residual,
         "quote_containment": quote_containment,
         "smooth_expiry_reconstruction": smooth_expiry_reconstruction,
+        "smooth_surface_fit_reconstruction": smooth_surface_fit_reconstruction,
         "smooth_fit_error_reconstruction": smooth_fit_error_reconstruction,
         "smooth_reconstruction": smooth_reconstruction,
         "spot_reference": spot_reference_residual,
@@ -2167,7 +2808,7 @@ _SMOOTH_SUMMARY_FIELDS = frozenset(
 )
 
 
-@version("1.0")
+@version("1.1")
 def _field_units(name: str) -> tuple[str, str]:
     if name in {"trading_date", "expiry_date"}:
         return "calendar date", "none"
@@ -2213,7 +2854,13 @@ def _field_units(name: str) -> tuple[str, str]:
     if (
         name in {"pure_ask_price", "pure_bid_price", "pure_fit1_price", "pure_fitX_price"}
         or name.startswith("pure_market_")
-        or name in {"smooth_expiry_fit_price", "smooth_call_mid", "smooth_put_mid"}
+        or name
+        in {
+            "smooth_expiry_fit_price",
+            "smooth_surface_fit_price",
+            "smooth_call_mid",
+            "smooth_put_mid",
+        }
     ):
         return "discounted-forward-normalized price", "option price / (DF * F)"
     if name.endswith("_delta") or name.endswith("_dk"):
@@ -2286,7 +2933,7 @@ def _field_units(name: str) -> tuple[str, str]:
     raise AssertionError(f"No immutable unit contract for Dataset field {name!r}")
 
 
-@version("1.0")
+@version("1.1")
 def _field_presence(name: str) -> tuple[bool, str]:
     if name in _INITIAL_STATE_FIELDS:
         return True, "present exactly when initial_no_arb_input_expiry_index is present"
@@ -2311,7 +2958,7 @@ def _field_presence(name: str) -> tuple[bool, str]:
     return False, "always present on populated partitions"
 
 
-@version("3.1", dependencies=[_field_units, _field_presence])
+@version("3.2", dependencies=[_field_units, _field_presence])
 def _schema_document() -> dict[str, Any]:
     fields: list[dict[str, Any]] = []
     for name, dtype in FITTED_SCHEMA.items():

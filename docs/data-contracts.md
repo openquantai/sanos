@@ -201,6 +201,12 @@ rows with cumulative eligibility booleans and the first rejection reason.
 `fitted-day` fits the selected pure call books with smoothness 0.25, retaining
 the full smooth SANOS state, quote-aligned mids/errors, distinct pre-fit,
 smooth-fit and intersection masks, and separately active real call/put books.
+It preserves the three legacy fitted-price meanings as distinct Float64
+columns: `smooth_expiry_fit_price` is the retained per-expiry fit (`fits1`),
+`smooth_surface_fit_price` is the common-surface fit (`fitsX`), and
+`smooth_call_mid` is the quote-aligned result returned by
+`compute_market_fit().fits`. The last two are numerically close but are not
+interchangeable.
 It then fits the CD-023 canonical finite-DLV projection to the completed smooth
 surface at the same retained expiries. The projection has 200 inner nodes over
 inclusive source-smooth NMS `[-3,2]`, one exact ATM node, support boundaries at
