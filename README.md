@@ -14,14 +14,14 @@ dataset will be the canonical reference dataset.
 
 Phases 0 through 9 are complete with code and quantitative review. Phase 10's
 offline safety prerequisites and Phase 11's frozen offline production tooling
-are implemented; the monitored live pilot is still pending. The daily
-no-arbitrage, filtering, compatibility-DLV and smooth-SANOS stages are available
-through the CLI, together with output-first internal Dataset build and
-validation commands. CD-020's all-valid-day failure is preserved for parity;
-repairing it remains an optional future change requiring approval. All ordinary
-tests, including the guarded WRDS layer, are offline; no live WRDS
-access has occurred yet. The exact 2022–2025 legacy comparison endpoint and
-numerical baseline are catalogued. A technically validated projection remains
+are implemented. The daily no-arbitrage, filtering, smooth-SANOS, and canonical
+finite-DLV projection stages are available through the CLI, together with
+output-first internal Dataset build and validation commands. The initial
+no-arbitrage state remains audit state and is not presented as a finite DLV
+model. CD-020's all-valid-day failure is preserved for parity; repairing it
+remains an optional future change requiring approval. Ordinary tests do not
+contact WRDS. The exact 2022–2025 legacy comparison endpoint and numerical
+baseline are catalogued. A technically validated projection remains
 `public_candidate` until separate redistribution approval is recorded. See
 [the legacy baseline](docs/reference-baseline.md) for the 891-date parity oracle
 and the distinction between its legacy artifact populations. Follow the
@@ -111,8 +111,9 @@ shallow: a valid terminal artifact is reused without requiring Raw ancestors.
 `--version '*'` is reuse-only and fails if no matching complete output exists.
 The available terminal stages are `paired-day`, `enriched-day`, `no-arb-day`,
 `filtered-day`, and `fitted-day`. The final frame retains rejected rows with
-eligibility/reason fields and stores both the pre-filter linear compatibility
-DLV state and the post-filter smooth 0.25 SANOS state as typed list columns.
+eligibility/reason fields and stores the pre-filter no-arbitrage audit state,
+the post-filter smooth 0.25 SANOS state, and a separately fitted 200-inner-node
+finite-DLV projection of that smooth state as typed list columns.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

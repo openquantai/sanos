@@ -115,8 +115,8 @@ columns include:
 
 - ordered model expiry times and settlement geometry;
 - normalized strike support for every expiry;
-- unsmoothed density masses and squared-DLV values, including boundaries and
-  model time increments;
+- canonical finite-DLV density masses and squared-DLV values, including
+  boundaries and model time increments;
 - smooth SANOS parameters/density state and separately named smoothing-kernel
   input total variances; and
 - solver status, objective, tolerances, quote-containment and failure
@@ -187,8 +187,9 @@ invalid populations fail rather than becoming silent exclusions.
 `no-arb-day` consumes `enriched-day` and applies the initial linear surface
 fit. It retains all enriched rows, marks expiries dropped by the fit, preserves
 the strike mask, appends reference-compatible Float32 fit/Greek fields, and
-stores the complete pre-filter linear surface state. This is the explicitly
-named compatibility DLV state under CD-021.
+stores the complete pre-filter linear no-arbitrage audit state. Sparse audit
+densities can contain a positive call-time increment at a zero-mass node, so
+this state is not labelled or serialized as a finite DLV model under CD-021.
 
 `filtered-day` consumes `no-arb-day` and applies the recovered production
 sequence: inclusive 70-business-day horizon, spot normalization, inclusive
@@ -200,10 +201,28 @@ rows with cumulative eligibility booleans and the first rejection reason.
 `fitted-day` fits the selected pure call books with smoothness 0.25, retaining
 the full smooth SANOS state, quote-aligned mids/errors, distinct pre-fit,
 smooth-fit and intersection masks, and separately active real call/put books.
+It then fits the CD-023 canonical finite-DLV projection to the completed smooth
+surface at the same retained expiries. The projection has 200 inner nodes over
+inclusive source-smooth NMS `[-3,2]`, one exact ATM node, support boundaries at
+0.5 times the lower and 1.5 times the upper inner strike, and a uniform price
+objective. One deterministic anchor row per retained expiry stores its state.
+Its DLV rows are geometry-and-bound-scaled and use the configured `1e-10`
+strict-solver feasibility target plus a `9e-5` fitted-node call-error cap. At
+source target nodes with Black vega divided by `sqrt(T)` at least `0.05`, the
+fit also obeys the exact Black-price band for an annual-IV move of at most
+`0.005`, inclusive, with the lower volatility floored at zero and the band
+inset by the solver tolerance. These hard linear bounds leave the uniform L1
+objective unchanged. A `1e-8` support-mass floor and `1e-5` solver-only inset
+from each DLV bound keep the persisted inverse well-conditioned without
+post-fit clipping. Canonical DLV serialization and stabilization use wider
+NumPy precision but persist Float64; validation separately proves the ordinary
+Float64 consumer decoder recovers density and off-grid calls within `1e-12`.
+These numerical settings are part of projection identity and do not alter the
+solver policy of the preceding fits.
 Real books are represented in `C/(DF*F)` units. Solver events record stage,
 solver, status, fallback and objective; elapsed time remains in the run journal
-rather than deterministic frame content. A failed solver publishes no terminal
-artifact.
+rather than deterministic frame content. A failed solver or projection gate
+publishes no terminal artifact.
 
 All three artifacts keep one Polars frame per day. Model support and density
 vectors are typed list columns repeated within an expiry; Parquet compression
@@ -217,7 +236,8 @@ strike.
 The internal WIDB dataset is curated, validated and immutable. It normally uses
 partitioned Parquet (ticker/year/date) and includes the nearly complete filtered
 option history, all eligibility masks, expiry geometry, no-arbitrage results,
-smooth SANOS state, unsmoothed DLV state, fitted values and diagnostics. A
+smooth SANOS state, canonical finite-DLV projection, fitted values and
+diagnostics. A
 published identity contains:
 
 - `README.md` with coverage, fields, units, sources, exclusions and exact CLI
@@ -238,7 +258,7 @@ physical representation has **one Polars row per trading day** and typed
 list/struct columns. The exporter starts from an explicit allowlist and fails on
 every unexpected input column.
 
-The approved version-1 logical allowlist is below. CD-004 and CD-009 freeze the
+The approved version-2 logical allowlist is below. CD-004 and CD-009 freeze the
 exact return formula, retained-date policy, normalized units, and unit bridge:
 
 | Level | Fields and units |
@@ -247,9 +267,9 @@ exact return formula, retained-date policy, normalized units, and unit bridge:
 | expiries | expiry date, business DTE, calendar DTE, expiry `is_am`, model time, and dimensionless interpreting geometry including `discounted_forward_over_spot = DF*(F/S)` |
 | books | `expiry_index`, call/put side, `normalized_strike = K/F`, `half_spread_spot = (ask-bid)/(2S)` for every book surviving the exact daily-front filter below |
 | smooth SANOS | complete smooth parameter/density state, supports, expiry/time increments and separately named smoothing input variances |
-| unsmoothed DLV | complete discrete density and squared-DLV state, supports, boundaries and expiry/time increments |
+| discrete DLV | complete CD-023 finite projection density and squared-DLV state, supports, boundaries and expiry/time increments |
 
-The proposed version-1 public book population reproduces the daily-front
+The version-2 public book population reproduces the daily-front
 reference. For
 each call and put side independently, a book is initially active only when the
 pre-smooth no-arbitrage mask is true, bid/ask are finite, bid is non-negative
@@ -296,7 +316,10 @@ deep validation additionally reprojects from the internal source to prove the
 private-input CD-004 and CD-009 calculations.
 
 Capability flags may advertise normalized SANOS/DLV dynamics and normalized
-spread experiments. They explicitly do not advertise vendor-book
+spread experiments. Smooth-to-DLV equivalence is claimed only at retained
+expiries on the inclusive `[-3,2]` NMS projection domain, with maximum absolute
+normalized-call error `1e-4`; arbitrary-time equivalence is not claimed. They
+explicitly do not advertise vendor-book
 reconstruction, quote-containment replay, liquidity models, absolute-dollar
 tick effects or contract-level trading replay. Public validation runs all
 advertised capabilities with WRDS and the internal dataset unavailable.

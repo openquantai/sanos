@@ -45,9 +45,10 @@ sanos --root /path/to/quant-data dataset validate \
 ```
 
 It checks the artifact manifest and all checksums, then recomputes the daily
-schema, population, masks, units, density/moment, no-arbitrage, SANOS/DLV
-round-trip, fitted-price, diagnostics, calendar, and quote-containment
-invariants from the copied Dataset partitions. It does not visit upstream
+schema, population, masks, units, density/moment, no-arbitrage, canonical and
+ordinary-Float64 SANOS/DLV round trips, smooth-to-DLV projection calls and
+conditioned implied volatilities, fitted-price bands, diagnostics, calendar,
+and quote-containment invariants from the copied Dataset partitions. It does not visit upstream
 storage and never rebuilds a missing Dataset.
 
 Use deep validation only while lineage is retained:
@@ -82,8 +83,9 @@ data/ticker=SPX/year=YYYY/date=YYYY-MM-DD/part-00000.parquet
 
 The frame retains every audit row and the exact `FITTED_SCHEMA`: quote and
 liquidity inputs, expiry geometry, masks and reasons, no-arbitrage results,
-unsmoothed/discrete DLV state, smooth SANOS state, fitted values, and
-diagnostics all remain together. The fitted boundary requires each
+the canonical finite-DLV projection, smooth SANOS state, fitted values, and
+diagnostics all remain together. The pre-filter no-arbitrage state is retained
+for audit but is not represented as a finite DLV model. The fitted boundary requires each
 `(expiry_id, normalized_strike)` model key to be unique and strictly ordered,
 as required by SANOS support geometry. Rows sharing coarser session/expiry
 geometry retain their original multiplicity and stable source order;

@@ -7,10 +7,10 @@ from typing import Any, Final, cast
 import polars as pl
 from cdxcore.version import version
 
-PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-daily-v1"
-PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v1"
-PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v1"
-PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v2"
+PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-daily-v2"
+PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v2"
+PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v2"
+PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v3"
 
 EXPIRY_DTYPE: Final = pl.Struct(
     [
@@ -67,9 +67,9 @@ DLV_STATE_DTYPE: Final = pl.Struct(
 )
 
 
-@version("sanos-public-recursive-polars-schema-v1")
+@version("sanos-public-recursive-polars-schema-v2")
 def public_polars_schema() -> pl.Schema:
-    """Return the only accepted version-1 public Parquet schema."""
+    """Return the only accepted version-2 public Parquet schema."""
 
     return pl.Schema(
         {
@@ -85,7 +85,7 @@ def public_polars_schema() -> pl.Schema:
     )
 
 
-@version("1.0", dependencies=[public_polars_schema])
+@version("2.0", dependencies=[public_polars_schema])
 def public_schema_document() -> dict[str, Any]:
     """Return the human- and machine-readable immutable schema contract."""
 
@@ -169,11 +169,17 @@ def public_schema_document() -> dict[str, Any]:
             "after_last_expiry": "final fitted density",
             "put_call_parity": "p=c-1+k",
             "state_mode": "common surface",
+            "dlv_source": "finite projection of the completed smooth SANOS surface",
+            "dlv_projection_scope": (
+                "retained expiries and inclusive normalized-moneyness domain [-3,2]"
+            ),
+            "dlv_projection_call_max_abs": 1.0e-4,
+            "arbitrary_time_smooth_dlv_equivalence": False,
         },
     }
 
 
-@version("1.0")
+@version("2.0")
 def public_capabilities() -> dict[str, bool | str]:
     """Return the closed advertised capability and non-capability object."""
 
@@ -183,6 +189,8 @@ def public_capabilities() -> dict[str, bool | str]:
             "schema": PUBLIC_CAPABILITIES_VERSION,
             "normalized_smooth_sanos_pricing": True,
             "normalized_discrete_dlv_pricing": True,
+            "discrete_dlv_projection_scope": "retained-expiries-inclusive-nms-[-3,2]",
+            "arbitrary_time_smooth_dlv_equivalence": False,
             "model_atm_implied_volatility": True,
             "daily_front_normalized_books": True,
             "spot_one_spread_experiments": True,

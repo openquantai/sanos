@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import warnings as warnings
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 
 import cvxpy as cp
@@ -21,11 +22,42 @@ from sanos.model.constants import DAYS_PER_YEAR, ONE_MINUTE, one_minute_year_fra
 from sanos.model.tools import SanosLPSolver, SanosPricer, warn_and_fix_density
 
 
+@version("1.0", dependencies=[SanosLPSolver])
+@dataclass(frozen=True)
+class _StrictSanosLPSolver(SanosLPSolver):
+    """HiGHS adapter for the dedicated, strictly feasible DLV projection."""
+
+    kkt_tolerance: float = 1.0e-10
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        verify_inp(
+            math.isfinite(self.kkt_tolerance)
+            and 1.0e-10 <= self.kkt_tolerance <= 1.0e-4,
+            lambda: (
+                "HiGHS KKT tolerance must lie in [1e-10,1e-4], found "
+                f"{self.kkt_tolerance}"
+            ),
+        )
+
+    def _lp_solver_settings(self, *, for_expiry: bool, is_fallback: bool) -> tuple[str, dict]:
+        solver, options = super()._lp_solver_settings(
+            for_expiry=for_expiry,
+            is_fallback=is_fallback,
+        )
+        if solver == "HIGHS":
+            options["highs_options"]["kkt_tolerance"] = self.kkt_tolerance
+            options["highs_options"]["primal_feasibility_tolerance"] = self.kkt_tolerance
+            options["highs_options"]["dual_feasibility_tolerance"] = self.kkt_tolerance
+        return solver, options
+
+
 @version(
-    "0.41",
+    "0.47",
     dependencies=[
         SanosPricer,
         SanosLPSolver,
+        _StrictSanosLPSolver,
         warn_and_fix_density,
         one_minute_year_fraction,
         density_floor_enabled,
@@ -49,6 +81,11 @@ class SanosFitter:
     min_density_cap: float | None = (
         1e-5  # Maximum density floor. Only used if :attr:`IMPOSE_FLOOR_ON_DENSITY` is set to True; otherwise 0.
     )
+    density_mass_floor: float = 0.0
+    scale_dlv_constraints: bool = False  #: Scale DLV rows by their geometric coefficients.
+    solver_kkt_tolerance: float = 1.0e-7
+    max_abs_fit_error: float | None = None
+    allow_solver_fallback: bool = True
 
     # protected variables do not alter the ID of this field (because they start with '_')
     _debug_verbose_cvxpy: set[str] | None = None
@@ -68,6 +105,48 @@ class SanosFitter:
             self.smoothness is None or self.smoothness >= 0.0,
             lambda: f"'smoothness' must be positive or None, but found {self.smoothness:.4g}",
         )
+        verify_inp(
+            math.isfinite(self.density_mass_floor) and self.density_mass_floor >= 0.0,
+            lambda: (
+                "'density_mass_floor' must be finite and non-negative, but found "
+                f"{self.density_mass_floor}"
+            ),
+        )
+        verify_inp(
+            isinstance(self.scale_dlv_constraints, bool),
+            lambda: "'scale_dlv_constraints' must be a boolean",
+        )
+        verify_inp(
+            not self.scale_dlv_constraints
+            or (self.min_dlv > 0.0 and self.max_dlv > self.min_dlv),
+            lambda: (
+                "Scaled DLV constraints require 0 < min_dlv < max_dlv, but found "
+                f"{self.min_dlv} and {self.max_dlv}"
+            ),
+        )
+        verify_inp(
+            math.isfinite(self.solver_kkt_tolerance)
+            and 1.0e-10 <= self.solver_kkt_tolerance <= 1.0e-4,
+            lambda: (
+                "'solver_kkt_tolerance' must lie in [1e-10,1e-4], but found "
+                f"{self.solver_kkt_tolerance}"
+            ),
+        )
+        verify_inp(
+            self.max_abs_fit_error is None
+            or (
+                math.isfinite(self.max_abs_fit_error)
+                and self.max_abs_fit_error > 0.0
+            ),
+            lambda: (
+                "'max_abs_fit_error' must be positive or None, but found "
+                f"{self.max_abs_fit_error}"
+            ),
+        )
+        verify_inp(
+            isinstance(self.allow_solver_fallback, bool),
+            lambda: "'allow_solver_fallback' must be a boolean",
+        )
 
     def __str__(self) -> str:
         """Very compact but still readable summary"""
@@ -76,6 +155,23 @@ class SanosFitter:
             + f"{',midv=' + str(self.min_dlv) if self.min_dlv is not None else ''}{',mxdv=' + str(self.max_dlv) if self.max_dlv is not None else ''}{',mindv=' + str(self.min_density_vol) if self.min_density_vol is not None else ''}"
             + ("" if self.min_density_vol is None else f",mdv={self.min_density_vol:.4g}")
             + ("" if self.min_density_cap is None else f",mdc={self.min_density_cap:.4g}")
+            + (
+                ""
+                if self.density_mass_floor == 0.0
+                else f",qfloor={self.density_mass_floor:.1e}"
+            )
+            + (",scaled_dlv" if self.scale_dlv_constraints else "")
+            + (
+                ""
+                if self.solver_kkt_tolerance == 1.0e-7
+                else f",kkt={self.solver_kkt_tolerance:.1e}"
+            )
+            + (
+                ""
+                if self.max_abs_fit_error is None
+                else f",fit_cap={self.max_abs_fit_error:.1e}"
+            )
+            + ("" if self.allow_solver_fallback else ",no_fallback")
         )
 
     def __unique_hash__(self, unique_hash, debug_trace) -> str:
@@ -92,10 +188,12 @@ class SanosFitter:
         xstrikes: list[np.ndarray],
         *,
         weights: list[np.ndarray] | None = None,
+        fit_price_bounds: list[tuple[np.ndarray, np.ndarray]] | None = None,
         vols: np.ndarray
         | float
         | None = None,  # forward volatilities per expiry, used for the strike expansion step. If a float is provided, it is used for all expiries. If None, it is estimated from the data as the median of the implied vols.
         message_context: str | callable[[], str] | None = None,
+        diagnostic_sink: Callable[[Mapping[str, object]], None] | None = None,
         verbose: Context = Context.all,
     ) -> SanosPricer:
         """
@@ -119,6 +217,10 @@ class SanosFitter:
             List of model strikes for which to calibrate a SANOS density for.
         weights : list[:class:``numpy.ndarray``]|None
             List of weight arrays for the ``mids``, used to weight the fit to the mid prices. If None, all weights are set to 1.
+        fit_price_bounds : list[tuple[:class:``numpy.ndarray``, :class:``numpy.ndarray``]]|None
+            Optional per-expiry lower/upper model-price bounds aligned with
+            ``mids``. These add hard constraints without changing the
+            weighted-L1 objective.
         vols : :class:``numpy.ndarray`` | float | None, default ``None``
             Volatilities per expiry used when ``smoothness`` is not None.
             If left to ``None``, the function will compute an approximate mid-atm volatility from the provided bid and ask prices per expiry.
@@ -126,6 +228,8 @@ class SanosFitter:
             Optional context to prepend to error and warning messages.
             This can be a string or a callable which returns a string, e.g. a ``lambda``
             which returns a string with dynamic information such as the current expiry being processed. If None, no context is prepended.
+        diagnostic_sink : callable | None, default None
+            Optional receiver for structured solver-attempt records.
         verbose : :class:`Context`, default ``Context.all``
             Verbose context for logging.
 
@@ -167,6 +271,14 @@ class SanosFitter:
             weights is None or len(weights) == T,
             lambda: (
                 f"{message()}Expected number of weights arrays {T} to match number of expiries {len(expiries)}"
+            ),
+        )
+        verify_inp(
+            fit_price_bounds is None or len(fit_price_bounds) == T,
+            lambda: (
+                f"{message()}Expected number of fit-price-bound pairs {T} to match "
+                f"number of expiries "
+                f"{len(fit_price_bounds) if fit_price_bounds is not None else 0}"
             ),
         )
         verify_inp(
@@ -245,6 +357,9 @@ class SanosFitter:
             mids_t = mids[t]
             xstrikes_t = xstrikes[t]
             weights_t = weights[t] if weights is not None else None
+            fit_price_bounds_t = (
+                fit_price_bounds[t] if fit_price_bounds is not None else None
+            )
 
             verify_inp(
                 len(strikes_t) > 1 and strikes_t[0] > 0.0 and np.min(np.diff(strikes_t)) > 0.0,
@@ -263,6 +378,28 @@ class SanosFitter:
                     strikes_t.shape == weights_t.shape,
                     f"{local_message()}: 'strikes' and 'weights' must have the same shape, found {strikes_t.shape} and {weights_t.shape}",
                 )
+            if fit_price_bounds_t is not None:
+                verify_inp(
+                    isinstance(fit_price_bounds_t, tuple)
+                    and len(fit_price_bounds_t) == 2,
+                    f"{local_message()}: 'fit_price_bounds' entries must be "
+                    "lower/upper array pairs.",
+                )
+                lower_fit_price, upper_fit_price = fit_price_bounds_t
+                verify_inp(
+                    strikes_t.shape
+                    == lower_fit_price.shape
+                    == upper_fit_price.shape,
+                    f"{local_message()}: 'strikes' and both 'fit_price_bounds' "
+                    f"arrays must have the same shape, found {strikes_t.shape}, "
+                    f"{lower_fit_price.shape}, and {upper_fit_price.shape}",
+                )
+                verify_inp(
+                    np.all(np.isfinite(lower_fit_price))
+                    and np.all(np.isfinite(upper_fit_price))
+                    and np.all(lower_fit_price <= upper_fit_price),
+                    f"{local_message()}: 'fit_price_bounds' must be finite and ordered.",
+                )
 
             if t > 0:
                 assert strikes_t[0] <= strikes[t - 1][0], (
@@ -274,6 +411,15 @@ class SanosFitter:
 
             q_t = cp.Variable(len(xstrikes_t), bounds=[0.0, 1.0])  # nonneg=True)
             constraints += [cp.sum(q_t) == 1.0, q_t @ xstrikes_t == 1.0, q_t <= 1.0]
+            verify_inp(
+                self.density_mass_floor * len(xstrikes_t) < 1.0,
+                lambda: (
+                    "'density_mass_floor' leaves no free probability mass for "
+                    f"{len(xstrikes_t)} support nodes"
+                ),
+            )
+            if self.density_mass_floor > 0.0:
+                constraints += [q_t >= self.density_mass_floor]
             if self.min_density_vol is not None:
                 bscalls = bs.price(
                     k=xstrikes_t,
@@ -321,8 +467,23 @@ class SanosFitter:
                 * (expiries[t] - (expiries[t - 1] if t > 0 else 0.0))
                 / (xstrikes_t[2:] - xstrikes_t[:-2])
             )
-            constraints += [dCt >= cp.multiply(box * (self.min_dlv**2), q_t[1:-1])]
-            constraints += [dCt <= cp.multiply(box * (self.max_dlv**2), q_t[1:-1])]
+            if self.scale_dlv_constraints:
+                # The raw tail constraints can be several orders of magnitude below
+                # an LP solver's absolute feasibility tolerance. Scaling preserves the
+                # feasible set while making both DLV bounds order-one in density mass.
+                scaled_lower = cp.multiply(
+                    1.0 / (box * self.min_dlv**2),
+                    dCt,
+                )
+                scaled_upper = cp.multiply(
+                    1.0 / (box * self.max_dlv**2),
+                    dCt,
+                )
+                constraints += [scaled_lower >= q_t[1:-1]]
+                constraints += [scaled_upper <= q_t[1:-1]]
+            else:
+                constraints += [dCt >= cp.multiply(box * (self.min_dlv**2), q_t[1:-1])]
+                constraints += [dCt <= cp.multiply(box * (self.max_dlv**2), q_t[1:-1])]
             del box, Cm1, dCt
 
             # fit
@@ -340,8 +501,16 @@ class SanosFitter:
 
             CX = call(spots=xstrikes_t[None, :], strikes=strikes_t[:, None])
             fits_t = CX @ q_t  # market prices according to the model (with smoothness)
-            err_t = cp.abs(fits_t - mids_t)
-            err_t = err_t if weights_t is None else cp.multiply(weights_t, err_t)
+            absolute_fit_error = cp.abs(fits_t - mids_t)
+            if self.max_abs_fit_error is not None:
+                constraints += [absolute_fit_error <= self.max_abs_fit_error]
+            if fit_price_bounds_t is not None:
+                constraints += [fits_t >= lower_fit_price, fits_t <= upper_fit_price]
+            err_t = (
+                absolute_fit_error
+                if weights_t is None
+                else cp.multiply(weights_t, absolute_fit_error)
+            )
             objective += cp.sum(err_t)
 
             xdensities.append(q_t)
@@ -353,17 +522,35 @@ class SanosFitter:
             ),
             end="",
         ):
-            success, status, fell_back = SanosLPSolver(
-                timeout_seconds=self.timeout_seconds, _debug_verbose_cvxpy=self._debug_verbose_cvxpy
-            )(
+            solver_type = (
+                SanosLPSolver
+                if self.solver_kkt_tolerance == 1.0e-7
+                else _StrictSanosLPSolver
+            )
+            solver = solver_type(
+                timeout_seconds=self.timeout_seconds,
+                _debug_verbose_cvxpy=self._debug_verbose_cvxpy,
+                **(
+                    {}
+                    if solver_type is SanosLPSolver
+                    else {"kkt_tolerance": self.solver_kkt_tolerance}
+                ),
+            )
+            success, status, fell_back = solver(
                 objective=objective,
                 variables=variables,
                 constraints=constraints,
                 message_context=lambda: message(False),
+                diagnostic_sink=diagnostic_sink,
                 verbose=verbose,
             )
         if fell_back:
             verbose.write(lambda: "had to fall back to a slower solver... ", head=False, end="")
+
+        if fell_back and not self.allow_solver_fallback:
+            raise RuntimeError(
+                f"{message()}Strict solver contract forbids fallback for this fit"
+            )
 
         if not success:
             if status in ["infeasible", "infeasible_inaccurate"]:

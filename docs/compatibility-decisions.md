@@ -323,21 +323,23 @@ both accepted it. Only `approved` may alter reference behavior.
 
 ## CD-021 — Meaning of the unsmoothed DLV state
 
-- **Status:** provisional compatibility interpretation; adding a new refit is
-  open and blocked.
+- **Status:** resolved on 2026-10-13; the initial no-arbitrage surface is audit
+  state, not the standalone DLV state.
 - **Evidence:** the production path first constructs a linear surface with
   `MkArbFree(smoothness=None)`, then applies `OptionsFilter`, and finally fits a
   smooth `0.25` SANOS surface. The legacy daily payload serializes only the
-  final smooth pricer, so it does not contain a separately labelled
-  post-filter DLV fit.
-- **Current compatibility behavior:** Phase 6 preserves and explicitly names
-  the complete pre-filter linear surface state as the compatibility
-  unsmoothed DLV state. It also preserves the post-filter smooth SANOS state.
-  It does not add a second post-filter `smoothness=0` optimization.
-- **Expected impact if changed:** a new post-filter DLV refit would use a
-  different quote population and solve a new optimization problem; its grids,
-  densities, DLV values, diagnostics, runtime and failure population can all
-  differ. It requires explicit approval and a separate versioned identity.
+  final smooth pricer. On actual fitted days the sparse initial surface can
+  contain a positive call-time increment at a zero-density node. Such a
+  transition has no finite DLV representation; calling `dlvsqs()` on it is not
+  a valid persisted-state contract.
+- **Approved treatment:** retain the complete initial linear surface, masks,
+  prices, densities, and diagnostics for no-arbitrage/filter audit. Remove the
+  `initial_surface_dlv_squares` field and do not expose this surface as the
+  reference DLV model. The standalone DLV state is defined separately by
+  CD-023.
+- **Expected impact:** initial no-arbitrage prices, masks, populations, and
+  smooth SANOS fits are unchanged. The defective/undefined initial DLV field
+  disappears, and fitted/internal/public schema identities are versioned.
 
 ## CD-022 — Unequal-grid DLV inverse reverses spacing coefficients
 
@@ -361,12 +363,66 @@ both accepted it. Only `approved` may alter reference behavior.
   population, and smooth SANOS fit are unchanged; only inverse decoding
   behavior changes.
 
+## CD-023 — Canonical reference DLV projection
+
+- **Status:** approved on 2026-10-13 for the fresh SANOS reference Dataset.
+- **Evidence:** neither the legacy daily payload nor the sparse initial
+  no-arbitrage surface provides the required finite, independently usable DLV
+  state. A deterministic projection of the completed smooth SANOS surface is
+  stable on the retained pilot dates and leaves the authoritative smooth fit
+  and book population unchanged.
+- **Approved treatment:** after the smooth `0.25` SANOS fit, fit a separate
+  `smoothness=None` `SanosFitter` at the same retained expiries. Use the source
+  smooth ATM-variance geometry, uniform price weights, NMS `[-3,2]`, 200 inner
+  nodes with one exact ATM node, and support boundaries equal to 0.5 times the
+  lower and 1.5 times the upper inner strike. Configure DLV bounds `[0.01,3]`
+  and retain the fitted values without clipping. To make the tail inequalities
+  numerically meaningful, divide each dedicated DLV constraint row by its
+  positive geometric box coefficient and corresponding squared-volatility
+  bound, and solve this projection with HiGHS
+  primal, dual, and KKT tolerances of `1e-10`; other SANOS/no-arbitrage solves
+  retain their established solver settings. Impose a `9e-5` maximum absolute
+  error at the 200 fitted call nodes, leaving headroom inside the independent
+  `1e-4` union-grid acceptance gate. At a target node with source Black vega
+  divided by `sqrt(T)` greater than or equal to `0.05`, intersect that price cap
+  with the exact Black-call band corresponding to source annual implied
+  volatility plus/minus `0.005` (flooring the lower volatility at zero), inset
+  by the `1e-10` solver tolerance. These additional constraints remain linear
+  in fitted prices and do not change the uniform L1 objective.
+  Use a dedicated `1e-8` probability-mass floor and solve against DLV bounds
+  inset by `1e-5` volatility units, so finite-precision inverse decoding does
+  not amplify vanishing tail masses across the published `[0.01,3]` bounds.
+  Persist one deterministic
+  anchor row per retained expiry with support, probability masses, squared DLV,
+  target/fitted calls, time increment, variance geometry, configuration ID,
+  and canonical diagnostics. Before persistence, apply one deterministic
+  DLV encode/decode stabilization cycle and store the decoded density with its
+  re-encoded DLV vector; this removes floating-point amplification at very
+  small tail masses without clipping either state. The canonical boundary
+  calculation uses NumPy extended precision and fails closed when it is not
+  wider than Float64, while every persisted array and the ordinary consumer
+  decoder remain Float64.
+- **Acceptance:** density mass and moment residuals are at most `1e-10`;
+  both canonical and generic-consumer density/call inverse errors are at most
+  `1e-12`; canonical DLV fixed-point error is at most `1e-9`; the mixed
+  Float64-decode/canonical-re-encode residual is conditioning evidence only;
+  no singular node; normalized-call projection error at most `1e-4`;
+  ATM annual-IV error at most `1e-4`; and source-vega-conditioned annual-IV
+  error has maximum `5e-3` and deterministic p99 `1e-3`. A `1e-9` absolute
+  squared-DLV bound allowance accommodates solver-scale residuals, records
+  signed shortfall/excess and saturation counts, and never clips values.
+- **Capability boundary:** smooth-to-DLV equivalence is asserted only at the
+  retained expiries and inside inclusive source-smooth NMS `[-3,2]`.
+  Out-of-domain differences are report-only. Arbitrary-time equivalence is not
+  advertised.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
-CD-010, CD-012, CD-013, CD-015, CD-020, and CD-021. CD-014 and
+CD-010, CD-012, CD-013, CD-015, and CD-020. CD-014 and
 CD-016 through CD-019 need a choice only if their preserved compatibility
 behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked. CD-004,
-CD-009, and CD-022 are resolved by their approved contracts and regressions.
+CD-009, CD-021, CD-022, and CD-023 are resolved by their approved contracts and
+regressions.

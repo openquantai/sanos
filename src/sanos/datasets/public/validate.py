@@ -47,13 +47,14 @@ from sanos.widb.calendar import (
     is_half_day,
     normalized_strike_policy,
 )
+from sanos.widb.surface import _canonical_discrete_dlv_densities
 
 
 class PublicDatasetValidationError(ArtifactIntegrityError):
     """Raised when an intact public Dataset violates its semantic contract."""
 
 
-@version("1.0")
+@version("2.0")
 @dataclass(frozen=True, slots=True)
 class PublicDatasetValidationSummary:
     """Recomputed public-only validation evidence."""
@@ -67,6 +68,7 @@ class PublicDatasetValidationSummary:
     maximum_density_mass_residual: float
     maximum_density_moment_residual: float
     maximum_dlv_roundtrip_residual: float
+    maximum_smooth_dlv_projection_residual: float
     outcome: str = "passed"
 
     def as_dict(self) -> dict[str, Any]:
@@ -196,7 +198,10 @@ def _validate_density(
     return mass, moment
 
 
-@version("1.0", dependencies=[SanosPricer, _validate_density])
+@version(
+    "1.1",
+    dependencies=[SanosPricer, _canonical_discrete_dlv_densities, _validate_density],
+)
 def _state_pricer(
     state: Mapping[str, Any],
     expiries: list[Mapping[str, Any]],
@@ -282,13 +287,17 @@ def _state_pricer(
     )
     roundtrip = 0.0
     if not smooth:
-        decoded = pricer.densities_from_dlvsqs(dlvs)
-        roundtrip = max(
-            float(np.max(np.abs(left - right)))
-            for left, right in zip(decoded, densities, strict=True)
-        )
-        if roundtrip > 1.0e-12:
-            _fail(f"Public DLV density round trip residual is {roundtrip}")
+        for label, decoded in (
+            ("canonical", _canonical_discrete_dlv_densities(pricer, dlvs)),
+            ("generic", pricer.densities_from_dlvsqs(dlvs)),
+        ):
+            residual = max(
+                float(np.max(np.abs(left - right)))
+                for left, right in zip(decoded, densities, strict=True)
+            )
+            roundtrip = max(roundtrip, residual)
+            if residual > 1.0e-12:
+                _fail(f"Public {label} DLV density round trip residual is {residual}")
     grid = np.asarray([0.7, 1.0, 1.3], dtype=np.float64)
     for model_time in times:
         calls = np.asarray(pricer(model_time, grid), dtype=np.float64)
@@ -299,6 +308,117 @@ def _state_pricer(
     if np.any(~np.isfinite(atm_vol)) or np.any(atm_vol <= 0.0):
         _fail("Public model ATM implied-volatility capability failed")
     return pricer, maximum_mass, maximum_moment, roundtrip
+
+
+@version("1.0", dependencies=[NMS])
+def _canonical_dlv_supports(
+    expiries: np.ndarray,
+    variances: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rebuild the fixed CD-023 inner grid and boundary support."""
+
+    lower, upper = (-3.0, 2.0)
+    inner_nodes = 200
+    lower_count = min(
+        max(2, int(inner_nodes * abs(lower) // (upper - lower))),
+        inner_nodes - 3,
+    )
+    upper_count = inner_nodes - lower_count - 1
+    raw_nms = np.concatenate(
+        (
+            np.linspace(lower, 0.0, lower_count, endpoint=False, dtype=np.float64),
+            np.linspace(0.0, upper, upper_count + 1, dtype=np.float64),
+        )
+    )
+    atm_volatilities = np.sqrt(variances / expiries)
+    inner = np.asarray(
+        NMS.from_nms(
+            normalized=raw_nms[None, :],
+            time_years=expiries[:, None],
+            volatility=atm_volatilities[:, None],
+            epsilon_volatility=float(atm_volatilities[0]),
+        ),
+        dtype=np.float64,
+    )
+    supports = np.empty((len(expiries), inner_nodes + 2), dtype=np.float64)
+    supports[:, 1:-1] = inner
+    supports[:, 0] = 0.5 * inner[:, 0]
+    supports[:, -1] = 1.5 * inner[:, -1]
+    return inner, supports
+
+
+@version(
+    "1.1",
+    dependencies=[
+        PublicProjectionConfig,
+        SanosPricer,
+        _canonical_dlv_supports,
+    ],
+)
+def _validate_smooth_dlv_projection(
+    smooth: SanosPricer,
+    discrete: SanosPricer,
+    config: PublicProjectionConfig,
+    books: list[Mapping[str, Any]],
+) -> float:
+    """Validate the advertised retained-expiry, in-domain DLV projection."""
+
+    if config.nms_range != (-3.0, 2.0):
+        _fail("The public CD-023 DLV state requires canonical NMS range [-3,2]")
+    smooth_times = np.asarray(smooth.expiries, dtype=np.float64)
+    discrete_times = np.asarray(discrete.expiries, dtype=np.float64)
+    smooth_variances = np.asarray(smooth.variances, dtype=np.float64)
+    discrete_variances = np.asarray(discrete.variances, dtype=np.float64)
+    if not np.array_equal(smooth_times, discrete_times) or not np.array_equal(
+        smooth_variances, discrete_variances
+    ):
+        _fail("Public discrete-DLV time/variance geometry differs from smooth SANOS")
+    expected_inner, expected_supports = _canonical_dlv_supports(
+        smooth_times, smooth_variances
+    )
+    books_by_expiry: dict[int, list[float]] = {
+        index: [] for index in range(len(smooth_times))
+    }
+    for book in books:
+        books_by_expiry[int(book["expiry_index"])].append(
+            float(book["normalized_strike"])
+        )
+    maximum = 0.0
+    for index, expiry in enumerate(smooth_times):
+        support = np.asarray(discrete.xstrikes[index], dtype=np.float64)
+        expected_support = expected_supports[index]
+        if support.shape != (202,) or not np.allclose(
+            support, expected_support, rtol=0.0, atol=1.0e-12
+        ):
+            _fail("Public discrete-DLV support differs from the canonical 200-node grid")
+        inner = expected_inner[index]
+        lower = float(inner[0])
+        upper = float(inner[-1])
+        validation_parts = [
+            inner,
+            0.5 * (inner[1:] + inner[:-1]),
+            np.asarray([1.0], dtype=np.float64),
+            np.asarray(smooth.xstrikes[index], dtype=np.float64),
+            np.asarray(books_by_expiry[index], dtype=np.float64),
+        ]
+        in_domain = [
+            values[(values >= lower) & (values <= upper)]
+            for values in validation_parts
+            if values.size
+        ]
+        grid = np.unique(np.concatenate(in_domain))
+        error = float(
+            np.max(
+                np.abs(
+                    np.asarray(discrete(float(expiry), grid), dtype=np.float64)
+                    - np.asarray(smooth(float(expiry), grid), dtype=np.float64)
+                )
+            )
+        )
+        maximum = max(maximum, error)
+    if maximum > 1.0e-4:
+        _fail(f"Public smooth-to-DLV projection call residual is {maximum}")
+    return maximum
 
 
 @version("1.0", dependencies=[normalized_strike_policy])
@@ -433,6 +553,7 @@ def _validate_coverage_evidence(
         PublicProjectionConfig,
         _finite_tree,
         _state_pricer,
+        _validate_smooth_dlv_projection,
         _validate_books,
         business_clock_policy,
         is_half_day,
@@ -471,6 +592,7 @@ def validate_public_frame(
     maximum_mass = 0.0
     maximum_moment = 0.0
     maximum_roundtrip = 0.0
+    maximum_projection = 0.0
     started = time.monotonic()
     for completed, row in enumerate(rows, start=1):
         _finite_tree(row, f"row[{completed - 1}]")
@@ -548,14 +670,28 @@ def validate_public_frame(
             int(item["expiry_index"])
             for item in cast(list[Mapping[str, Any]], dlv_state["model_expiries"])
         }
-        if not smooth_indices <= dlv_indices:
-            _fail("Public smooth expiry state is not contained in the DLV state")
-        dlv_times = np.asarray(dlv_pricer.expiries, dtype=np.float64)
-        dlv_variances = np.asarray(dlv_pricer.variances, dtype=np.float64)
+        expected_indices = set(range(len(expiries)))
+        if smooth_indices != expected_indices or dlv_indices != expected_indices:
+            _fail("Public model states must cover every retained expiry exactly")
+        books = cast(list[Mapping[str, Any]], row["books"])
+        _validate_books(books, expiries, epsilon_atm, config)
+        maximum_projection = max(
+            maximum_projection,
+            _validate_smooth_dlv_projection(
+                smooth_pricer,
+                dlv_pricer,
+                config,
+                books,
+            ),
+        )
+        smooth_times = np.asarray(smooth_pricer.expiries, dtype=np.float64)
+        smooth_variances = np.asarray(smooth_pricer.variances, dtype=np.float64)
 
         def expected_atm(time_years: float) -> float:
-            clipped = float(np.clip(time_years, dlv_times[0], dlv_times[-1]))
-            return float(np.sqrt(np.interp(clipped, dlv_times, dlv_variances) / clipped))
+            clipped = float(np.clip(time_years, smooth_times[0], smooth_times[-1]))
+            return float(
+                np.sqrt(np.interp(clipped, smooth_times, smooth_variances) / clipped)
+            )
 
         expected_epsilon_atm = expected_atm(
             config.nms_epsilon_business_dte / business_clock_policy()[0]
@@ -566,7 +702,7 @@ def validate_public_frame(
             rel_tol=0.0,
             abs_tol=1.0e-12,
         ):
-            _fail("Public NMS epsilon ATM volatility is not DLV-state-derived")
+            _fail("Public NMS epsilon ATM volatility is not smooth-SANOS-derived")
         for expiry in expiries:
             if not math.isclose(
                 float(expiry["nms_atm_annual_volatility"]),
@@ -574,7 +710,7 @@ def validate_public_frame(
                 rel_tol=0.0,
                 abs_tol=1.0e-12,
             ):
-                _fail("Public expiry ATM volatility is not DLV-state-derived")
+                _fail("Public expiry ATM volatility is not smooth-SANOS-derived")
         # One off-grid comparison proves both reconstructed common-surface
         # pricers are executable without any internal Dataset field.
         query_time = min(float(smooth_pricer.expiries[-1]), float(dlv_pricer.expiries[-1]))
@@ -583,8 +719,6 @@ def validate_public_frame(
             ~np.isfinite(dlv_pricer(query_time, query))
         ):
             _fail("Public off-grid pricing capability failed")
-        books = cast(list[Mapping[str, Any]], row["books"])
-        _validate_books(books, expiries, epsilon_atm, config)
         expiry_count += len(expiries)
         book_count += len(books)
         smooth_count += len(cast(list[Any], smooth_state["model_expiries"]))
@@ -617,6 +751,7 @@ def validate_public_frame(
         maximum_density_mass_residual=maximum_mass,
         maximum_density_moment_residual=maximum_moment,
         maximum_dlv_roundtrip_residual=maximum_roundtrip,
+        maximum_smooth_dlv_projection_residual=maximum_projection,
     )
 
 

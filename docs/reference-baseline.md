@@ -103,8 +103,8 @@ the ordered 891 populated smooth-cache dates. Its state byte digest is
 The complete `flex-joint-direct-dynamics-v1` checkpoint has a float32
 `daily_state_embedding.weight` of shape `(891, 200)` and 891 market
 fingerprints. This neural fitted state is an **experiment parity oracle**; it
-is not the smooth SANOS or unsmoothed DLV state required in the internal/public
-dataset.
+is not the smooth SANOS or canonical finite-DLV projection required in the
+internal/public dataset.
 
 ## Production path and retained semantics
 

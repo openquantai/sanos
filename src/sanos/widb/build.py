@@ -283,6 +283,7 @@ def _surface_artifact_configuration(
         settings = {
             "no_arbitrage": config.no_arbitrage,
             "smooth_sanos": config.smooth_sanos,
+            "discrete_dlv": config.discrete_dlv,
         }
     else:
         raise ValueError(f"Surface configuration is not defined for stage {stage!r}")
@@ -324,7 +325,7 @@ def filtered_day_producer_version() -> str:
 
 @version("1.0", dependencies=[fit_smooth_sanos])
 def fitted_day_producer_version() -> str:
-    """Return the smooth-SANOS content version closure."""
+    """Return the smooth-SANOS plus discrete-DLV content version closure."""
 
     return str(fitted_day_producer_version.version)
 

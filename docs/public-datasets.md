@@ -47,8 +47,10 @@ sanos --root /path/to/quant-data dataset public validate \
 Normal validation is shallow with respect to lineage. It checks the candidate's
 own checksums, exact payload allowlist, deterministic documents, exact recursive
 Parquet schema, finite values, identity-owned coverage, model geometry, density
-normalization, corrected DLV inverse, off-grid SANOS/DLV pricing, derived ATM
-volatility, normalized books, exact NMS bounds, capability declarations, and
+normalization, corrected generic Float64 DLV inverse, canonical stored-DLV
+reconstruction, off-grid SANOS/DLV pricing, retained-expiry in-domain smooth-to-DLV projection error,
+smooth-SANOS-derived ATM volatility, normalized books, exact NMS bounds,
+capability declarations, and
 the persisted ordered-return and complete logical-content digests. It runs with
 `WRDS_OFF=1`. The internal source, Intermediate, and Raw roots may therefore be
 absent.
@@ -79,7 +81,9 @@ The artifact contains:
 Each row contains only the trading date and half-day flag, the approved
 forward-adjusted return, expiry geometry, normalized side-separated books,
 complete common-surface smooth SANOS state, and complete common-surface
-unsmoothed DLV state. The public state, interpreting geometry, and normalized
+canonical finite-DLV projection state. The DLV vectors are copied from the
+strictly validated internal anchor state rather than regenerated during export.
+The public state, interpreting geometry, and normalized
 books remain in the same Polars frame; source fit diagnostics stay in the
 internal Dataset and are not public fields. There are no separate per-date
 quote, expiry, or surface files.
@@ -117,6 +121,9 @@ no stored per-book fitted price or implied volatility.
 
 It supports normalized SANOS/DLV pricing and dynamics, model ATM volatility,
 daily-front normalized books, and spot-one spread experiments. It does not
+claim that smooth SANOS and the finite-DLV projection agree away from retained
+expiries. At retained expiries, equivalence is validated only inside inclusive
+NMS `[-3,2]` with maximum normalized-call error `1e-4`. It does not
 claim exact vendor-book reconstruction, quote-containment replay, liquidity
 models, absolute-dollar tick effects, expiry-fit-mode pricing, or contract
 replay.

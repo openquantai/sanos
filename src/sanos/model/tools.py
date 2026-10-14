@@ -443,9 +443,11 @@ class SanosPricer:
             if __debug__:
                 # check validity of the DLVsq calculation by reconstructing the density.
                 # here we are doing the test only on non-error identified strikes.
-                if np.any(~(too_small | too_big)):
-                    dC_t_ = dlvsqs_t * p_box
-                    errors = np.abs(dC_t_ - dC_t)[~(too_small | too_big)]
+                dC_t_ = dlvsqs_t * p_box
+                equation_errors = np.abs(dC_t_ - dC_t)
+                active = ~(p_or_dC_zero | too_small | too_big)
+                if np.any(active):
+                    errors = equation_errors[active]
                     if not np.all(errors <= self._eps_price):
                         msg = f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: Expected dC_t_ to match dC_t, found max absolute difference {np.max(errors)} for active strikes [tolerance 'prices' {self._eps_price}] -- this should not happen"
                         warnings.warn(msg)
@@ -454,12 +456,11 @@ class SanosPricer:
                                 break
                             strikes_t = xstrikes_t[1:-1]
                             warnings.warn(
-                                f"  strike #{i} {strikes_t[~(too_small | too_big)][i]:.4g}: p_t={p_t[1:-1][~(too_small | too_big)][i]:.4g} C_t={C_t[~(too_small | too_big)][i]:.4g} C_tm1={C_tm1[1:-1][~(too_small | too_big)][i]:.4g} "
-                                + f"=> dC_t={dC_t[~(too_small | too_big)][i]:.4g} vs "
-                                + f"dlv={np.sqrt(dlvsqs_t[~(too_small | too_big)][i]):.4g} dC_t_={dC_t_[~(too_small | too_big)][i]:.4g} vs , abs error {errors[i]:.4g}; too_small={too_small[~(too_small | too_big)][i]}, too_big={too_big[~(too_small | too_big)][i]}"
+                                f"  strike #{i} {strikes_t[active][i]:.4g}: p_t={p_t[1:-1][active][i]:.4g} C_t={C_t[active][i]:.4g} C_tm1={C_tm1[1:-1][active][i]:.4g} "
+                                + f"=> dC_t={dC_t[active][i]:.4g} vs "
+                                + f"dlv={np.sqrt(dlvsqs_t[active][i]):.4g} dC_t_={dC_t_[active][i]:.4g} vs , abs error {errors[i]:.4g}; too_small={too_small[active][i]}, too_big={too_big[active][i]}"
                             )
                         raise RuntimeError(msg)
-                    del dC_t_
 
                 # check past call prices
                 # ----------------------
@@ -472,47 +473,50 @@ class SanosPricer:
                 )
                 del C_tm1_
 
-                # full implicit solver
-                # compute interpolated density & check it
-                w = dlvsqs_t * box
-                w_plus = w / (xstrikes_t[2:] - xstrikes_t[1:-1])
-                w_minus = w / (xstrikes_t[1:-1] - xstrikes_t[:-2])
-                assert np.min(w_plus) >= 0.0, (
-                    f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed 'w_plus' must be non-negative, but found min {np.min(w_plus)}"
-                )
-                assert np.min(w_minus) >= 0.0, (
-                    f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed 'w_minus' must be non-negative, but found min {np.min(w_minus)}"
-                )
-                assert C_tm1.shape == xstrikes_t.shape, (
-                    f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: expected C_tm1 and xstrikes_t to have the same shape, but found {C_tm1.shape} and {xstrikes_t.shape}"
-                )
-                assert (
-                    w_plus.dtype == np.float64
-                    and w_minus.dtype == np.float64
-                    and q_tm1.dtype == np.float64
-                ), (
-                    f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: expected 'w_plus', 'w_minus' and 'q_tm1' to have dtype 'float64', but found {w_plus.dtype}, {w_minus.dtype} and {q_tm1.dtype}"
-                )
-                q_t = solve_sanos_tridiagonal(w_minus=w_minus, w_plus=w_plus, rhs=q_tm1)
+                # A zero-density/positive-time-value transition has no finite DLV
+                # representation. Only run the coupled inverse check when the
+                # encoded transition still satisfies dC = DLV^2 * box * p.
+                if not np.any(equation_errors > self._eps_price):
+                    w = dlvsqs_t * box
+                    w_plus = w / (xstrikes_t[2:] - xstrikes_t[1:-1])
+                    w_minus = w / (xstrikes_t[1:-1] - xstrikes_t[:-2])
+                    assert np.min(w_plus) >= 0.0, (
+                        f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed 'w_plus' must be non-negative, but found min {np.min(w_plus)}"
+                    )
+                    assert np.min(w_minus) >= 0.0, (
+                        f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed 'w_minus' must be non-negative, but found min {np.min(w_minus)}"
+                    )
+                    assert C_tm1.shape == xstrikes_t.shape, (
+                        f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: expected C_tm1 and xstrikes_t to have the same shape, but found {C_tm1.shape} and {xstrikes_t.shape}"
+                    )
+                    assert (
+                        w_plus.dtype == np.float64
+                        and w_minus.dtype == np.float64
+                        and q_tm1.dtype == np.float64
+                    ), (
+                        f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: expected 'w_plus', 'w_minus' and 'q_tm1' to have dtype 'float64', but found {w_plus.dtype}, {w_minus.dtype} and {q_tm1.dtype}"
+                    )
+                    q_t = solve_sanos_tridiagonal(w_minus=w_minus, w_plus=w_plus, rhs=q_tm1)
 
-                assert np.all(q_t >= -self._eps_dlv_dens_pos), (
-                    f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must be non-negative, but found min {np.min(q_t)} [tolerance {self._eps_dlv_dens_pos:.4g}]"
-                )
-                assert np.abs(q_t.sum() - 1.0) < self._eps_dlv_dens_sum1, (
-                    f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must sum to 1, but found sum {q_t.sum():.6f} [tolerance {self._eps_dlv_dens_sum1:.4g}]"
-                )
-                assert np.abs(xstrikes_t @ q_t - 1.0) < self._eps_dlv_dens_int1, (
-                    f"Expiry#{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must have expectation, but found xstrikes_t@q_t={xstrikes_t @ q_t:.6f} instead of 1 [wh tolerance {self._eps_dlv_dens_int1:.4g}]"
-                )
-                if np.max(np.abs(q_t - p_t)) > self._eps_dlv_diff:
-                    msg = f"Expiry#{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t does not match p_t, found max absolute difference {np.max(np.abs(q_t - p_t))} [tolerance {self._eps_dlv_diff:.4g}] -- this should not happen"
-                    warnings.warn(msg)
-                    errors = np.abs(q_t - p_t)
-                    for i in np.argsort(-errors)[:5]:
-                        warnings.warn(
-                            f"  strike {xstrikes_t[i]:.4g}: q_t={q_t[i]:.4g} vs p_t={p_t[i]:.4g}, abs error {errors[i]:.4g}"
-                        )
-                    raise RuntimeError(msg)
+                    assert np.all(q_t >= -self._eps_dlv_dens_pos), (
+                        f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must be non-negative, but found min {np.min(q_t)} [tolerance {self._eps_dlv_dens_pos:.4g}]"
+                    )
+                    assert np.abs(q_t.sum() - 1.0) < self._eps_dlv_dens_sum1, (
+                        f"Expiry #{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must sum to 1, but found sum {q_t.sum():.6f} [tolerance {self._eps_dlv_dens_sum1:.4g}]"
+                    )
+                    assert np.abs(xstrikes_t @ q_t - 1.0) < self._eps_dlv_dens_int1, (
+                        f"Expiry#{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t must have expectation, but found xstrikes_t@q_t={xstrikes_t @ q_t:.6f} instead of 1 [wh tolerance {self._eps_dlv_dens_int1:.4g}]"
+                    )
+                    if np.max(np.abs(q_t - p_t)) > self._eps_dlv_diff:
+                        msg = f"Expiry#{t} {expiry * DAYS_PER_YEAR:.1f}d: computed q_t does not match p_t, found max absolute difference {np.max(np.abs(q_t - p_t))} [tolerance {self._eps_dlv_diff:.4g}] -- this should not happen"
+                        warnings.warn(msg)
+                        errors = np.abs(q_t - p_t)
+                        for i in np.argsort(-errors)[:5]:
+                            warnings.warn(
+                                f"  strike {xstrikes_t[i]:.4g}: q_t={q_t[i]:.4g} vs p_t={p_t[i]:.4g}, abs error {errors[i]:.4g}"
+                            )
+                        raise RuntimeError(msg)
+                del dC_t_, equation_errors
 
             if on_all_strikes:  # makes dlvsq_t the same size as xstrikes_t
                 dlvsqs_t = np.concatenate(([0.0], dlvsqs_t, [0.0]))
@@ -1220,7 +1224,7 @@ def _compute_market_fit(
 # This class is decorated after the diagnostic helper is defined so the direct
 # dependency can be resolved without a string or a separate compatibility token.
 version(
-    "0.9",
+    "1.0",
     dependencies=[solve_sanos_tridiagonal, one_minute_year_fraction, _compute_market_fit],
 )(SanosPricer)
 

@@ -26,6 +26,36 @@
     }
   },
   "surface": {
+    "discrete_dlv": {
+      "allow_solver_epsilon_warnings": true,
+      "conditioned_iv_vega_sqrt_floor": 0.05,
+      "constraint_dlv_buffer": 1e-05,
+      "density_mass_floor": 1e-08,
+      "fit_call_max_abs": 9e-05,
+      "inner_nodes": 200,
+      "lower_support_multiplier": 0.5,
+      "max_dlv": 3.0,
+      "min_density_cap": 1e-05,
+      "min_density_vol": 0.0001,
+      "min_dlv": 0.01,
+      "nms_range": [-3.0, 2.0],
+      "objective_weighting": "uniform",
+      "solver_timeout_seconds": 300.0,
+      "solver_kkt_tolerance": 1e-10,
+      "tolerances": {
+        "atm_annual_iv_max_abs": 0.0001,
+        "call_inverse_max_abs": 1e-12,
+        "conditioned_annual_iv_max_abs": 0.005,
+        "conditioned_annual_iv_p99_abs": 0.001,
+        "density_inverse_max_abs": 1e-12,
+        "density_mass_abs": 1e-10,
+        "density_moment_abs": 1e-10,
+        "dlv_bound_abs": 1e-09,
+        "dlv_fixed_point_max_abs": 1e-09,
+        "projection_call_max_abs": 0.0001
+      },
+      "upper_support_multiplier": 1.5
+    },
     "no_arbitrage": {
       "max_dlv": null,
       "mid_fit_weight": 0.1,

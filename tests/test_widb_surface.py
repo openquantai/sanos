@@ -32,10 +32,11 @@ from sanos.widb import (
     OptionsFilterConfig,
     SmoothSanosConfig,
     apply_options_filter,
-    compatibility_dlv_pricer,
+    discrete_dlv_pricer,
     enrich_daily_frame,
     fit_initial_no_arbitrage,
     fit_smooth_sanos,
+    initial_no_arb_pricer,
     pair_daily_frame,
     selected_reference_view,
     smooth_sanos_pricer,
@@ -281,15 +282,10 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
     for row in one_per_expiry.iter_rows(named=True):
         initial_strikes = np.asarray(row["initial_surface_model_strikes"])
         initial_density = np.asarray(row["initial_surface_model_density"])
-        initial_dlv = np.asarray(row["initial_surface_dlv_squares"])
         assert np.all(np.diff(initial_strikes) > 0.0)
         assert np.min(initial_density) >= -1.0e-7
         assert np.sum(initial_density) == pytest.approx(1.0, abs=1.0e-4)
         assert initial_strikes @ initial_density == pytest.approx(1.0, abs=1.0e-4)
-        assert initial_dlv.shape == initial_strikes.shape
-        assert initial_dlv[0] == initial_dlv[-1] == 0.0
-        assert np.all(np.isfinite(initial_dlv))
-
         smooth_strikes = np.asarray(row["smooth_surface_model_strikes"])
         smooth_density = np.asarray(row["smooth_surface_model_density"])
         assert np.all(np.diff(smooth_strikes) > 0.0)
@@ -330,6 +326,60 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
         event["status"] in {"optimal", "optimal_inaccurate"}
         for event in diagnostics["solver_events"]
     )
+    dlv_diagnostics = json.loads(
+        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
+    )
+    assert dlv_diagnostics["schema"] == "sanos-discrete-dlv-projection-diagnostics-v3"
+    assert dlv_diagnostics["source"] == "smooth_sanos_surface"
+    assert dlv_diagnostics["objective_weighting"] == "uniform"
+    assert dlv_diagnostics["fit_call_max_abs"] == 9.0e-5
+    assert dlv_diagnostics["solver_kkt_tolerance"] == 1.0e-10
+    assert dlv_diagnostics["constraint_scaling"] == "geometric_box_and_bound"
+    assert dlv_diagnostics["constraint_dlv_bounds"] == [0.01001, 2.99999]
+    assert dlv_diagnostics["density_mass_floor"] == 1.0e-8
+    assert dlv_diagnostics["stabilization_cycles"] == 1
+    assert dlv_diagnostics["projection_domain_nms"] == [-3.0, 2.0]
+    assert dlv_diagnostics["inner_nodes"] == 200
+    assert dlv_diagnostics["singular_nodes"] == 0
+    assert dlv_diagnostics["canonical_density_inverse_max_abs"] <= 1.0e-12
+    assert dlv_diagnostics["generic_density_inverse_max_abs"] <= 1.0e-12
+    assert dlv_diagnostics["canonical_dlv_fixed_point_max_abs"] <= 1.0e-9
+    assert dlv_diagnostics["canonical_call_inverse"]["max"] <= 1.0e-12
+    assert dlv_diagnostics["generic_call_inverse"]["max"] <= 1.0e-12
+    target_band = dlv_diagnostics["target_fit_price_band"]
+    assert target_band["conditioned_nodes"] > 0
+    assert len(target_band["conditioned_nodes_by_expiry"]) == dlv_diagnostics["expiries"]
+    assert target_band["maximum_absolute_iv_error"] <= 5.0e-3
+    assert target_band["maximum_violation"] <= 1.0e-10
+    assert target_band["minimum_lower_slack"] >= -1.0e-10
+    assert target_band["minimum_upper_slack"] >= -1.0e-10
+    assert set(dlv_diagnostics["conditioned_annual_iv_by_source"]) == {
+        "atm",
+        "listed",
+        "midpoints",
+        "smooth_support",
+        "targets",
+    }
+    regularization = dlv_diagnostics["numerical_regularization"]
+    assert regularization["density_mass_floor"] == 1.0e-8
+    assert regularization["constraint_dlv_buffer"] == 1.0e-5
+    assert regularization["required_density_floor_mass_per_expiry"] == pytest.approx(
+        202.0e-8
+    )
+    assert regularization["required_density_floor_mass_all_expiries"] == pytest.approx(
+        202.0e-8 * dlv_diagnostics["expiries"]
+    )
+    assert regularization["dlv_epsilon_warning_count"] == 0
+    for stage in ("pre_stabilization_state", "post_stabilization_state"):
+        assert regularization[stage]["density_floor_shortfall"] <= 1.0e-10
+        assert regularization[stage]["published_minimum_dlv_square_distance"] >= (
+            -1.0e-9
+        )
+        assert regularization[stage]["published_maximum_dlv_square_distance"] >= (
+            -1.0e-9
+        )
+    assert dlv_diagnostics["projection_call"]["max"] <= 1.0e-4
+    assert dlv_diagnostics["conditioned_annual_iv"]["max"] <= 5.0e-3
     no_arb_diagnostics = json.loads(no_arb.get_column("no_arb_diagnostics_json").item(0))
     assert no_arb_diagnostics["solver_events"]
     config = DailySurfaceConfig()
@@ -347,18 +397,41 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
             }
         )
     ]
-
-    dlv_pricer = compatibility_dlv_pricer(fitted)
-    smooth_pricer = smooth_sanos_pricer(fitted)
-    decoded_densities = dlv_pricer.densities_from_dlvsqs(
-        dlv_pricer.dlvsqs(on_all_strikes=True)
+    assert fitted.get_column("discrete_dlv_configuration_id").unique().to_list() == [
+        canonical_sha256({"discrete_dlv": config.discrete_dlv})
+    ]
+    anchors = fitted.filter(pl.col("discrete_dlv_anchor")).sort(
+        "discrete_dlv_input_expiry_index"
     )
-    for observed, expected in zip(
-        decoded_densities,
-        dlv_pricer.xdensities,
-        strict=True,
+    assert anchors.height == fitted.get_column("smooth_input_expiry_index").n_unique()
+    for row in anchors.iter_rows(named=True):
+        support = np.asarray(row["discrete_dlv_model_strikes"])
+        density = np.asarray(row["discrete_dlv_model_density"])
+        squared_dlv = np.asarray(row["discrete_dlv_squares"])
+        assert len(support) == config.discrete_dlv.inner_nodes + 2
+        assert support.shape == density.shape == squared_dlv.shape
+        assert squared_dlv[0] == squared_dlv[-1] == 0.0
+        assert np.min(density) >= 0.0
+        assert np.sum(density) == pytest.approx(1.0, abs=1.0e-10)
+        assert support @ density == pytest.approx(1.0, abs=1.0e-10)
+
+    initial_pricer = initial_no_arb_pricer(fitted)
+    dlv_pricer = discrete_dlv_pricer(fitted)
+    smooth_pricer = smooth_sanos_pricer(fitted)
+    stored_dlvs = [
+        np.asarray(value, dtype=np.float64)
+        for value in anchors.get_column("discrete_dlv_squares").to_list()
+    ]
+    decoded_densities = dlv_pricer.densities_from_dlvsqs(stored_dlvs)
+    canonical_densities = surface_module._canonical_discrete_dlv_densities(
+        dlv_pricer,
+        stored_dlvs,
+    )
+    for generic, canonical, expected in zip(
+        decoded_densities, canonical_densities, dlv_pricer.xdensities, strict=True
     ):
-        np.testing.assert_allclose(observed, expected, rtol=0.0, atol=2.0e-14)
+        np.testing.assert_allclose(generic, expected, rtol=0.0, atol=1.0e-12)
+        np.testing.assert_allclose(canonical, expected, rtol=0.0, atol=1.0e-12)
     decoded_pricer = replace(dlv_pricer, xdensities=decoded_densities)
     irregular_query = np.asarray([0.713, 0.947, 1.037, 1.289], dtype=np.float64)
     for expiry in dlv_pricer.expiries:
@@ -368,11 +441,13 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
             rtol=0.0,
             atol=2.0e-14,
         )
-    for expiry_index, expiry in enumerate(dlv_pricer.expiries):
+    for expiry_index, expiry in enumerate(initial_pricer.expiries):
         expiry_rows = fitted.filter(
             pl.col("initial_no_arb_input_expiry_index") == expiry_index
         )
-        observed = dlv_pricer(expiry, expiry_rows.get_column("normalized_strike").to_numpy())
+        observed = initial_pricer(
+            expiry, expiry_rows.get_column("normalized_strike").to_numpy()
+        )
         np.testing.assert_allclose(
             observed,
             expiry_rows.get_column("pure_fitX_price").to_numpy(),
@@ -394,6 +469,233 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
             # Float32 query arrays directly.
             atol=5.0e-8,
         )
+
+
+def test_canonical_dlv_serialization_is_stable_with_vanishing_tail_mass(
+    tmp_path: Path,
+) -> None:
+    expiries = np.arange(1, 21, dtype=np.float64) / 252.0
+    support = np.linspace(0.8, 1.2, 22, dtype=np.float64)
+    template_density = np.full(22, 1.0 / 22.0, dtype=np.float64)
+    template = surface_module.SanosPricer(
+        smoothness=None,
+        expiries=expiries,
+        variances=expiries * 0.2**2,
+        xstrikes=[support.copy() for _ in expiries],
+        xdensities=[template_density.copy() for _ in expiries],
+    )
+    input_dlvs = [
+        np.concatenate(([0.0], np.full(20, 0.2**2), [0.0]))
+        for _ in expiries
+    ]
+    densities = surface_module._canonical_discrete_dlv_densities(
+        template,
+        input_dlvs,
+    )
+    pricer = replace(template, xdensities=densities)
+    stored_dlvs = surface_module._canonical_discrete_dlv_squares(pricer)
+    assert min(float(np.min(value[1:-1])) for value in densities) < 1.0e-8
+
+    path = tmp_path / "canonical-dlv.parquet"
+    pl.DataFrame(
+        {
+            "expiry": expiries,
+            "variance": pricer.variances,
+            "support": pricer.xstrikes,
+            "density": pricer.xdensities,
+            "dlv_squares": stored_dlvs,
+        }
+    ).write_parquet(path)
+    reopened = pl.read_parquet(path)
+    restored = surface_module.SanosPricer(
+        smoothness=None,
+        expiries=reopened.get_column("expiry").to_numpy(),
+        variances=reopened.get_column("variance").to_numpy(),
+        xstrikes=[np.asarray(value) for value in reopened["support"].to_list()],
+        xdensities=[np.asarray(value) for value in reopened["density"].to_list()],
+    )
+    restored_dlvs = [
+        np.asarray(value) for value in reopened["dlv_squares"].to_list()
+    ]
+
+    canonical_encoded = surface_module._canonical_discrete_dlv_squares(restored)
+    canonical_decoded = surface_module._canonical_discrete_dlv_densities(
+        restored,
+        restored_dlvs,
+    )
+    generic_decoded = restored.densities_from_dlvsqs(restored_dlvs)
+    assert max(
+        float(np.max(np.abs(left - right)))
+        for left, right in zip(canonical_encoded, restored_dlvs, strict=True)
+    ) <= 1.0e-9
+    assert max(
+        float(np.max(np.abs(left - right)))
+        for left, right in zip(canonical_decoded, restored.xdensities, strict=True)
+    ) <= 1.0e-12
+    assert max(
+        float(np.max(np.abs(left - right)))
+        for left, right in zip(generic_decoded, restored.xdensities, strict=True)
+    ) <= 1.0e-12
+
+    generic_pricer = replace(restored, xdensities=generic_decoded)
+    queries = np.asarray([0.83, 0.947, 1.037, 1.17], dtype=np.float64)
+    assert max(
+        float(
+            np.max(
+                np.abs(
+                    generic_pricer(float(expiry), queries)
+                    - restored(float(expiry), queries)
+                )
+            )
+        )
+        for expiry in expiries
+    ) <= 1.0e-12
+
+    mixed_reencoded = surface_module._canonical_discrete_dlv_squares(
+        generic_pricer
+    )
+    assert max(
+        float(np.max(np.abs(left - right)))
+        for left, right in zip(mixed_reencoded, restored_dlvs, strict=True)
+    ) > 1.0e-9
+
+    perturbed_dlv = [value.copy() for value in restored_dlvs]
+    perturbed_dlv[-1][1] += 1.0e-8
+    assert max(
+        float(np.max(np.abs(left - right)))
+        for left, right in zip(canonical_encoded, perturbed_dlv, strict=True)
+    ) > 1.0e-9
+
+    perturbed_density = [value.copy() for value in restored.xdensities]
+    perturbed_density[-1][1] += 2.0e-10
+    corrupted = replace(restored, xdensities=perturbed_density)
+    assert max(
+        float(np.max(np.abs(left - right)))
+        for left, right in zip(canonical_decoded, corrupted.xdensities, strict=True)
+    ) > 1.0e-12
+
+
+def test_projection_target_iv_price_bands_are_exact_and_threshold_inclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expiry = np.asarray([2.0 / 252.0], dtype=np.float64)
+    inner = np.asarray([[0.9999, 1.0, 1.0001]], dtype=np.float64)
+    target_iv = np.asarray([0.003, 0.003, 0.003], dtype=np.float64)
+    target_calls = np.asarray(
+        [surface_module._bs_call_price(inner[0], target_iv, float(expiry[0]))]
+    )
+
+    class SmoothTarget:
+        def __call__(
+            self,
+            query_expiry: float,
+            strikes: np.ndarray[Any, Any],
+            *,
+            and_vols: bool = False,
+        ) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]] | np.ndarray[Any, Any]:
+            del query_expiry
+            calls = surface_module._bs_call_price(
+                np.asarray(strikes),
+                np.full_like(strikes, target_iv[0]),
+                float(expiry[0]),
+            )
+            return (calls, np.full_like(strikes, target_iv[0])) if and_vols else calls
+
+    threshold = 5.0e-2
+    monkeypatch.setattr(
+        surface_module,
+        "_bs_vega_sqrt_time",
+        lambda *args, **kwargs: np.asarray(
+            [
+                np.nextafter(threshold, 0.0),
+                threshold,
+                np.nextafter(threshold, np.inf),
+            ],
+            dtype=np.float64,
+        ),
+    )
+    config = DailySurfaceConfig().discrete_dlv
+    bounds, diagnostics = surface_module._projection_fit_price_bounds(
+        smooth=cast(Any, SmoothTarget()),
+        expiries=expiry,
+        inner=inner,
+        target_calls=target_calls,
+        config=config,
+    )
+    lower, upper = bounds[0]
+    assert diagnostics["conditioned_nodes"] == 2
+    assert diagnostics["conditioned_nodes_by_expiry"] == [2]
+    assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
+    assert np.all(lower <= target_calls[0])
+    assert np.all(target_calls[0] <= upper)
+    # A sub-tolerance target IV uses zero volatility for the lower Black band.
+    expected_zero_vol = surface_module._bs_call_price(
+        inner[0][1:],
+        np.zeros(2, dtype=np.float64),
+        float(expiry[0]),
+    )
+    np.testing.assert_allclose(
+        lower[1:],
+        np.maximum(
+            target_calls[0][1:] - config.fit_call_max_abs,
+            expected_zero_vol + config.solver_kkt_tolerance,
+        ),
+        rtol=0.0,
+        atol=0.0,
+    )
+    at_bounds = target_calls.copy()
+    at_bounds[0, 1] = lower[1]
+    at_bounds[0, 2] = upper[2]
+    at_metrics = surface_module._projection_target_band_metrics(
+        smooth=cast(Any, SmoothTarget()),
+        expiries=expiry,
+        inner=inner,
+        fitted_calls=at_bounds,
+        bounds=bounds,
+        config=config,
+    )
+    assert at_metrics["maximum_violation"] == 0.0
+
+    below = at_bounds.copy()
+    below[0, 1] = np.nextafter(lower[1], -np.inf)
+    below_metrics = surface_module._projection_target_band_metrics(
+        smooth=cast(Any, SmoothTarget()),
+        expiries=expiry,
+        inner=inner,
+        fitted_calls=below,
+        bounds=bounds,
+        config=config,
+    )
+    assert below_metrics["maximum_violation"] > 0.0
+
+    above = at_bounds.copy()
+    above[0, 2] = np.nextafter(upper[2], np.inf)
+    above_metrics = surface_module._projection_target_band_metrics(
+        smooth=cast(Any, SmoothTarget()),
+        expiries=expiry,
+        inner=inner,
+        fitted_calls=above,
+        bounds=bounds,
+        config=config,
+    )
+    assert above_metrics["maximum_violation"] > 0.0
+
+    regression_strike = np.asarray([1.0156393019564227], dtype=np.float64)
+    regression_expiry = 0.007936508394777775
+    regression_iv = np.asarray([0.09748547049469465], dtype=np.float64)
+    lower_regression = surface_module._bs_call_price(
+        regression_strike,
+        regression_iv - 5.0e-3,
+        regression_expiry,
+    )[0]
+    upper_regression = surface_module._bs_call_price(
+        regression_strike,
+        regression_iv + 5.0e-3,
+        regression_expiry,
+    )[0]
+    assert lower_regression == pytest.approx(9.580920912291915e-5, abs=1.0e-16)
+    assert upper_regression == pytest.approx(1.684019810493792e-4, abs=1.0e-16)
+    assert 7.637951934297273e-5 < lower_regression
 
 
 def test_initial_and_smooth_states_match_pinned_reference(
@@ -645,6 +947,18 @@ def test_dataset_quantitative_boundary_rejects_state_config_and_clock_corruption
         ),
         "smooth_fit_summary": fitted.with_columns(
             (pl.col("smooth_pcnt_fit") + 0.01).alias("smooth_pcnt_fit")
+        ),
+        "discrete_dlv_time_increment_years": fitted.with_columns(
+            pl.when(pl.col("discrete_dlv_anchor"))
+            .then(pl.col("discrete_dlv_time_increment_years") + 0.001)
+            .otherwise(pl.col("discrete_dlv_time_increment_years"))
+            .alias("discrete_dlv_time_increment_years")
+        ),
+        "discrete_dlv_atm_annual_volatility": fitted.with_columns(
+            pl.when(pl.col("discrete_dlv_anchor"))
+            .then(pl.col("discrete_dlv_atm_annual_volatility") + 0.001)
+            .otherwise(pl.col("discrete_dlv_atm_annual_volatility"))
+            .alias("discrete_dlv_atm_annual_volatility")
         ),
         "no_arb_diagnostics": inconsistent_last("no_arb_diagnostics_json", "{}"),
         "filter_diagnostics": inconsistent_last("filter_diagnostics_json", "{}"),
@@ -940,6 +1254,10 @@ def test_no_selected_options_still_records_smooth_configuration_identity(
             }
         )
     ]
+    assert fitted.get_column("discrete_dlv_configuration_id").unique().to_list() == [
+        canonical_sha256({"discrete_dlv": config.discrete_dlv})
+    ]
+    assert not fitted.get_column("discrete_dlv_anchor").any()
 
 
 def test_natural_zero_selected_day_passes_dataset_boundary(
@@ -1118,7 +1436,47 @@ def test_overnight_fraction_reaches_filter_and_both_model_states(fraction: float
         np.float32((10.0 + fraction) / 252.0)
     )
     assert first_expiry["initial_model_variance"] is not None
-    assert first_expiry["initial_surface_dlv_squares"] is not None
     assert first_expiry["smooth_model_variance"] is not None
     assert first_expiry["smooth_surface_model_density"] is not None
+    assert first_expiry["discrete_dlv_squares"] is not None
     assert fitted.get_column("options_filter_eligible").sum() == fitted.height
+
+
+def test_dlv_bound_solver_allowance_is_inclusive_and_does_not_clip() -> None:
+    minimum_square = 0.01**2
+    maximum_square = 3.0**2
+    tolerance = 1.0e-9
+    lower_limit = minimum_square - tolerance
+    upper_limit = maximum_square + tolerance
+    values = np.asarray([lower_limit, minimum_square, maximum_square, upper_limit])
+
+    diagnostics = surface_module._validate_dlv_bounds(
+        values,
+        minimum_square=minimum_square,
+        maximum_square=maximum_square,
+        absolute_tolerance=tolerance,
+        label="test",
+    )
+
+    assert diagnostics["minimum"] == lower_limit
+    assert diagnostics["maximum"] == upper_limit
+    np.testing.assert_array_equal(
+        values,
+        np.asarray([lower_limit, minimum_square, maximum_square, upper_limit]),
+    )
+    with pytest.raises(DailyDataError, match="violates configured DLV bounds"):
+        surface_module._validate_dlv_bounds(
+            np.asarray([np.nextafter(lower_limit, -np.inf), maximum_square]),
+            minimum_square=minimum_square,
+            maximum_square=maximum_square,
+            absolute_tolerance=tolerance,
+            label="test lower",
+        )
+    with pytest.raises(DailyDataError, match="violates configured DLV bounds"):
+        surface_module._validate_dlv_bounds(
+            np.asarray([minimum_square, np.nextafter(upper_limit, np.inf)]),
+            minimum_square=minimum_square,
+            maximum_square=maximum_square,
+            absolute_tolerance=tolerance,
+            label="test upper",
+        )

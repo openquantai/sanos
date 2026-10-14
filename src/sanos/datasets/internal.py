@@ -58,20 +58,25 @@ from sanos.widb.surface import (
     FITTED_SCHEMA_VERSION,
     NO_ARB_SCHEMA,
     SOLVER_TIMEOUT_SECONDS,
+    _canonical_discrete_dlv_densities,
+    _canonical_discrete_dlv_squares,
+    _discrete_dlv_grid,
+    _validate_discrete_dlv_projection,
     apply_options_filter,
-    compatibility_dlv_pricer,
+    discrete_dlv_pricer,
     fit_smooth_sanos,
+    initial_no_arb_pricer,
     smooth_sanos_pricer,
 )
 from sanos.wrds import raw_content_producer_version
 
 RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
-INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v2"
+INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v3"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
 LINEAGE_SCHEMA = "sanos-internal-lineage-v1"
-VALIDATION_SCHEMA = "sanos-internal-validation-v1"
-DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v2"
-LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v2"
+VALIDATION_SCHEMA = "sanos-internal-validation-v2"
+DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v3"
+LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v3"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _PARTITION_PATH = re.compile(
@@ -631,7 +636,7 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "3.1",
+    "3.5",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
@@ -643,13 +648,18 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _validate_support_mask_geometry,
         _black_vector_residual,
         _validate_fitted_numeric_finiteness,
+        _canonical_discrete_dlv_densities,
+        _canonical_discrete_dlv_squares,
+        _discrete_dlv_grid,
+        _validate_discrete_dlv_projection,
         bad_data_policy,
         bad_day_reason,
         count_business_days_between,
         is_half_day,
         apply_options_filter,
-        compatibility_dlv_pricer,
+        discrete_dlv_pricer,
         fit_smooth_sanos,
+        initial_no_arb_pricer,
         smooth_sanos_pricer,
     ],
 )
@@ -732,6 +742,7 @@ def validate_fitted_partition(
         "no_arb_diagnostics_json",
         "filter_diagnostics_json",
         "smooth_diagnostics_json",
+        "discrete_dlv_diagnostics_json",
     )
     for column in daily_constant_columns:
         if frame.get_column(column).n_unique() != 1:
@@ -782,7 +793,6 @@ def validate_fitted_partition(
         "initial_expiry_model_density",
         "initial_surface_model_strikes",
         "initial_surface_model_density",
-        "initial_surface_dlv_squares",
     ):
         if not np.array_equal(frame.get_column(column).is_null().to_numpy(), initial_index_null):
             _fail(f"{trading_date}: {column} nullability differs from initial model index")
@@ -802,6 +812,36 @@ def validate_fitted_partition(
     ):
         if not np.array_equal(frame.get_column(column).is_null().to_numpy(), smooth_index_null):
             _fail(f"{trading_date}: {column} nullability differs from smooth model index")
+    dlv_anchor = frame.get_column("discrete_dlv_anchor").to_numpy().astype(bool)
+    dlv_index_null = frame.get_column("discrete_dlv_input_expiry_index").is_null().to_numpy()
+    if not np.array_equal(dlv_anchor, ~dlv_index_null):
+        _fail(f"{trading_date}: DLV anchor flag differs from state-index presence")
+    for column in (
+        "discrete_dlv_time_increment_years",
+        "discrete_dlv_atm_annual_volatility",
+        "discrete_dlv_input_total_variance",
+        "discrete_dlv_nms",
+        "discrete_dlv_model_strikes",
+        "discrete_dlv_model_density",
+        "discrete_dlv_squares",
+        "discrete_dlv_target_calls",
+        "discrete_dlv_fitted_calls",
+    ):
+        if not np.array_equal(frame.get_column(column).is_null().to_numpy(), dlv_index_null):
+            _fail(f"{trading_date}: {column} must be present exactly on DLV anchors")
+    dlv_indices = frame.get_column("discrete_dlv_input_expiry_index").drop_nulls().to_list()
+    if dlv_indices != list(range(len(dlv_indices))):
+        _fail(f"{trading_date}: DLV anchor indices must be contiguous from zero")
+    for source_index in frame.get_column("smooth_input_expiry_index").drop_nulls().unique(
+        maintain_order=True
+    ):
+        positions = np.flatnonzero(
+            frame.get_column("smooth_input_expiry_index").to_numpy() == source_index
+        )
+        if len(positions) == 0 or not dlv_anchor[int(positions[0])]:
+            _fail(f"{trading_date}: DLV anchor is not the first canonical row of its expiry")
+        if int(np.sum(dlv_anchor[positions])) != 1:
+            _fail(f"{trading_date}: smooth expiry does not have exactly one DLV anchor")
 
     expected_ids = {
         "configuration_id": canonical_sha256(config.daily),
@@ -816,6 +856,9 @@ def validate_fitted_partition(
                 "no_arbitrage": config.surface.no_arbitrage,
                 "smooth_sanos": config.surface.smooth_sanos,
             }
+        ),
+        "discrete_dlv_configuration_id": canonical_sha256(
+            {"discrete_dlv": config.surface.discrete_dlv}
         ),
     }
     for column, expected in expected_ids.items():
@@ -1079,9 +1122,11 @@ def validate_fitted_partition(
     no_arb_text = frame.get_column("no_arb_diagnostics_json").item(0)
     filter_text = frame.get_column("filter_diagnostics_json").item(0)
     smooth_text = frame.get_column("smooth_diagnostics_json").item(0)
+    dlv_text = frame.get_column("discrete_dlv_diagnostics_json").item(0)
     no_arb = _canonical_object(no_arb_text, "no-arbitrage diagnostics")
     filter_diagnostics = _canonical_object(filter_text, "filter diagnostics")
     smooth = _canonical_object(smooth_text, "smooth diagnostics")
+    dlv_diagnostics = _canonical_object(dlv_text, "discrete-DLV diagnostics")
     _terminal_solver_events(no_arb, "no-arbitrage")
     input_expiry_ids = frame.get_column("expiry_id").unique(maintain_order=True).to_list()
     retained_expiry_ids = (
@@ -1131,6 +1176,15 @@ def validate_fitted_partition(
         _fail(f"{trading_date}: smooth diagnostic selected count is inconsistent")
     if np.any(selected):
         _terminal_solver_events(smooth, "smooth")
+        _terminal_solver_events(dlv_diagnostics, "discrete-DLV")
+        if (
+            dlv_diagnostics.get("schema")
+            != "sanos-discrete-dlv-projection-diagnostics-v3"
+            or dlv_diagnostics.get("outcome") != "completed"
+            or dlv_diagnostics.get("source") != "smooth_sanos_surface"
+            or dlv_diagnostics.get("inner_nodes") != config.surface.discrete_dlv.inner_nodes
+        ):
+            _fail(f"{trading_date}: discrete-DLV diagnostics contract changed")
         selected_expiry_ids = (
             frame.filter(pl.Series(selected))
             .get_column("expiry_id")
@@ -1167,6 +1221,12 @@ def validate_fitted_partition(
         or smooth.get("solver_timeout_seconds") != SOLVER_TIMEOUT_SECONDS
     ):
         _fail(f"{trading_date}: zero-selected day lacks explicit smooth outcome")
+    elif dlv_diagnostics != {
+        "schema": "sanos-discrete-dlv-projection-diagnostics-v3",
+        "outcome": "no_smooth_state",
+        "source": "smooth_sanos_surface",
+    }:
+        _fail(f"{trading_date}: empty discrete-DLV diagnostics changed")
 
     input_expiry_ids_tuple = tuple(int(value) for value in input_expiry_ids)
     initial_expiry_pricer, initial_state_indices, initial_expiry_residuals = (
@@ -1213,13 +1273,9 @@ def validate_fitted_partition(
             )
         )
 
-    dlv_pricer = compatibility_dlv_pricer(frame)
+    initial_surface_pricer = initial_no_arb_pricer(frame)
     smooth_pricer = smooth_sanos_pricer(frame) if np.any(selected) else None
-    dlv_state_residuals = _validate_pricer_state(
-        dlv_pricer,
-        "compatibility DLV state",
-        check_dlvs=True,
-    )
+    dlv_state_residuals: dict[str, float] = {}
     smooth_state_residuals = (
         {}
         if smooth_pricer is None
@@ -1230,55 +1286,248 @@ def validate_fitted_partition(
         )
     )
     dlv_density_error = 0.0
+    dlv_canonical_density_error = 0.0
     dlv_call_error = 0.0
-    stored_dlvs: list[np.ndarray[Any, Any]] = []
-    initial_state = frame.filter(
-        pl.col("initial_no_arb_input_expiry_index").is_not_null()
-    ).sort("initial_no_arb_input_expiry_index")
-    for input_index in range(len(dlv_pricer.expiries)):
-        group = initial_state.filter(pl.col("initial_no_arb_input_expiry_index") == input_index)
-        values = group.get_column("initial_surface_dlv_squares").to_list()
-        if not values or any(value != values[0] for value in values[1:]):
-            _fail(f"{trading_date}: repeated initial DLV state is inconsistent")
-        stored_dlvs.append(np.asarray(values[0], dtype=np.float64))
-    recomputed_dlvs = dlv_pricer.dlvsqs(on_all_strikes=True)
-    for stored, recomputed in zip(stored_dlvs, recomputed_dlvs, strict=True):
-        error = _max_abs(stored, recomputed)
-        if error > 1.0e-12:
-            _fail(f"{trading_date}: stored DLV differs from encoded density by {error}")
-    decoded = dlv_pricer.densities_from_dlvsqs(stored_dlvs)
-    for observed, expected in zip(decoded, dlv_pricer.xdensities, strict=True):
-        dlv_density_error = max(dlv_density_error, _max_abs(observed, expected))
-    if dlv_density_error > 1.0e-12:
-        _fail(f"{trading_date}: DLV density round-trip error is {dlv_density_error}")
-    decoded_pricer = type(dlv_pricer)(
-        smoothness=dlv_pricer.smoothness,
-        expiries=dlv_pricer.expiries,
-        variances=dlv_pricer.variances,
-        xstrikes=dlv_pricer.xstrikes,
-        xdensities=decoded,
-        min_half_spread=dlv_pricer.min_half_spread,
-        min_dlv=dlv_pricer.min_dlv,
-        max_dlv=dlv_pricer.max_dlv,
-    )
-    query = np.asarray([0.713, 0.947, 1.037, 1.289], dtype=np.float64)
-    for expiry in dlv_pricer.expiries:
-        dlv_call_error = max(
-            dlv_call_error,
-            _max_abs(decoded_pricer(expiry, query), dlv_pricer(expiry, query)),
+    dlv_projection_call_error = 0.0
+    dlv_atm_iv_error = 0.0
+    dlv_conditioned_iv_error = 0.0
+    dlv_conditioned_iv_p99 = 0.0
+    dlv_minimum_bound_shortfall = 0.0
+    dlv_maximum_bound_excess = 0.0
+    if smooth_pricer is not None:
+        dlv_pricer = discrete_dlv_pricer(frame)
+        dlv_state_residuals = _validate_pricer_state(
+            dlv_pricer,
+            "discrete DLV projection",
+            check_dlvs=True,
         )
-    if dlv_call_error > 1.0e-12:
-        _fail(f"{trading_date}: DLV off-grid call round-trip error is {dlv_call_error}")
+        stored_dlvs: list[np.ndarray[Any, Any]] = []
+        dlv_state = frame.filter(pl.col("discrete_dlv_anchor")).sort(
+            "discrete_dlv_input_expiry_index"
+        )
+        if dlv_state.height != len(dlv_pricer.expiries):
+            _fail(f"{trading_date}: DLV anchor count differs from model expiries")
+        for input_index in range(len(dlv_pricer.expiries)):
+            group = dlv_state.filter(
+                pl.col("discrete_dlv_input_expiry_index") == input_index
+            )
+            values = group.get_column("discrete_dlv_squares").to_list()
+            if len(values) != 1 or values[0] is None:
+                _fail(f"{trading_date}: DLV state must have one anchor per expiry")
+            stored_dlvs.append(np.asarray(values[0], dtype=np.float64))
+        recomputed_dlvs = _canonical_discrete_dlv_squares(dlv_pricer)
+        for stored, recomputed in zip(stored_dlvs, recomputed_dlvs, strict=True):
+            error = _max_abs(stored, recomputed)
+            if error > config.surface.discrete_dlv.tolerances.dlv_fixed_point_max_abs:
+                _fail(f"{trading_date}: stored DLV differs from encoded density by {error}")
+        canonical_decoded = _canonical_discrete_dlv_densities(
+            dlv_pricer, stored_dlvs
+        )
+        for observed, expected in zip(
+            canonical_decoded,
+            dlv_pricer.xdensities,
+            strict=True,
+        ):
+            dlv_canonical_density_error = max(
+                dlv_canonical_density_error,
+                _max_abs(observed, expected),
+            )
+        if (
+            dlv_canonical_density_error
+            > config.surface.discrete_dlv.tolerances.density_inverse_max_abs
+        ):
+            _fail(
+                f"{trading_date}: canonical DLV density round-trip error is "
+                f"{dlv_canonical_density_error}"
+            )
+        decoded = dlv_pricer.densities_from_dlvsqs(stored_dlvs)
+        for observed, expected in zip(decoded, dlv_pricer.xdensities, strict=True):
+            dlv_density_error = max(dlv_density_error, _max_abs(observed, expected))
+        if (
+            dlv_density_error
+            > config.surface.discrete_dlv.tolerances.density_inverse_max_abs
+        ):
+            _fail(f"{trading_date}: DLV density round-trip error is {dlv_density_error}")
+        decoded_pricer = type(dlv_pricer)(
+            smoothness=dlv_pricer.smoothness,
+            expiries=dlv_pricer.expiries,
+            variances=dlv_pricer.variances,
+            xstrikes=dlv_pricer.xstrikes,
+            xdensities=decoded,
+            min_half_spread=dlv_pricer.min_half_spread,
+            min_dlv=dlv_pricer.min_dlv,
+            max_dlv=dlv_pricer.max_dlv,
+        )
+        query = np.asarray([0.713, 0.947, 1.037, 1.289], dtype=np.float64)
+        for expiry in dlv_pricer.expiries:
+            dlv_call_error = max(
+                dlv_call_error,
+                _max_abs(decoded_pricer(expiry, query), dlv_pricer(expiry, query)),
+            )
+        if dlv_call_error > config.surface.discrete_dlv.tolerances.call_inverse_max_abs:
+            _fail(f"{trading_date}: DLV off-grid call round-trip error is {dlv_call_error}")
+
+        smooth_expiries = np.asarray(smooth_pricer.expiries, dtype=np.float64)
+        smooth_variances = np.asarray(smooth_pricer.variances, dtype=np.float64)
+        if not np.array_equal(
+            smooth_expiries, np.asarray(dlv_pricer.expiries, dtype=np.float64)
+        ):
+            _fail(f"{trading_date}: DLV expiries differ from source smooth SANOS")
+        if not np.array_equal(
+            smooth_variances, np.asarray(dlv_pricer.variances, dtype=np.float64)
+        ):
+            _fail(f"{trading_date}: DLV total variances differ from source smooth SANOS")
+        stored_time_increments = dlv_state.get_column(
+            "discrete_dlv_time_increment_years"
+        ).to_numpy()
+        expected_time_increments = np.diff(smooth_expiries, prepend=0.0)
+        if not np.array_equal(stored_time_increments, expected_time_increments):
+            _fail(f"{trading_date}: stored DLV time increments changed")
+        stored_atm_volatilities = dlv_state.get_column(
+            "discrete_dlv_atm_annual_volatility"
+        ).to_numpy()
+        expected_atm_volatilities = np.sqrt(smooth_variances / smooth_expiries)
+        if not np.array_equal(stored_atm_volatilities, expected_atm_volatilities):
+            _fail(f"{trading_date}: stored DLV ATM annual volatilities changed")
+        expected_nms, expected_inner, expected_supports = _discrete_dlv_grid(
+            smooth_expiries,
+            expected_atm_volatilities,
+            config.surface.discrete_dlv,
+        )
+        stored_nms = [
+            np.asarray(value, dtype=np.float64)
+            for value in dlv_state.get_column("discrete_dlv_nms").to_list()
+        ]
+        stored_targets = np.stack(
+            [
+                np.asarray(value, dtype=np.float64)
+                for value in dlv_state.get_column("discrete_dlv_target_calls").to_list()
+            ]
+        )
+        stored_fitted = np.stack(
+            [
+                np.asarray(value, dtype=np.float64)
+                for value in dlv_state.get_column("discrete_dlv_fitted_calls").to_list()
+            ]
+        )
+        recomputed_targets = np.asarray(
+            smooth_pricer(smooth_expiries[:, None], expected_inner), dtype=np.float64
+        )
+        recomputed_fitted = np.asarray(
+            dlv_pricer(smooth_expiries[:, None], expected_inner), dtype=np.float64
+        )
+        if _max_abs(stored_targets, recomputed_targets) > 1.0e-14:
+            _fail(f"{trading_date}: stored DLV target calls changed")
+        if _max_abs(stored_fitted, recomputed_fitted) > 1.0e-14:
+            _fail(f"{trading_date}: stored DLV fitted calls changed")
+        for index, (nms, support) in enumerate(
+            zip(stored_nms, dlv_pricer.xstrikes, strict=True)
+        ):
+            if not np.array_equal(nms, expected_nms):
+                _fail(f"{trading_date}: DLV NMS grid changed at expiry {index}")
+            if _max_abs(np.asarray(support), expected_supports[index]) > 1.0e-14:
+                _fail(f"{trading_date}: DLV support differs from source smooth geometry")
+        smooth_source_indices = sorted(
+            int(value)
+            for value in frame.get_column("smooth_input_expiry_index")
+            .drop_nulls()
+            .unique()
+            .to_list()
+        )
+        listed_strikes = [
+            frame.filter(pl.col("smooth_input_expiry_index") == source_index)
+            .get_column("normalized_strike")
+            .to_numpy()
+            .astype(np.float64, copy=False)
+            for source_index in smooth_source_indices
+        ]
+        target_fit_price_band = cast(
+            Mapping[str, Any],
+            dlv_diagnostics["target_fit_price_band"],
+        )
+        numerical_regularization = cast(
+            Mapping[str, Any],
+            dlv_diagnostics["numerical_regularization"],
+        )
+        revalidated_dlv_diagnostics = _validate_discrete_dlv_projection(
+            smooth=smooth_pricer,
+            discrete=dlv_pricer,
+            raw_nms=expected_nms,
+            inner=expected_inner,
+            supports=expected_supports,
+            target_calls=stored_targets,
+            fitted_calls=stored_fitted,
+            listed_strikes=listed_strikes,
+            dlv_squares=stored_dlvs,
+            solver_events=[dict(value) for value in dlv_diagnostics["solver_events"]],
+            solver_warnings=[str(value) for value in dlv_diagnostics["solver_warnings"]],
+            stabilization={
+                "density_max_abs": float(
+                    dlv_diagnostics["stabilization_density_max_abs"]
+                ),
+                "dlv_max_abs": float(dlv_diagnostics["stabilization_dlv_max_abs"]),
+                "pre_target_call_max_abs": float(
+                    dlv_diagnostics["pre_stabilization_target_call_max_abs"]
+                ),
+                "post_target_call_max_abs": float(
+                    dlv_diagnostics["post_stabilization_target_call_max_abs"]
+                ),
+                "pre_target_iv_max_abs": float(
+                    target_fit_price_band[
+                        "pre_stabilization_maximum_absolute_iv_error"
+                    ]
+                ),
+                "post_target_iv_max_abs": float(
+                    target_fit_price_band["maximum_absolute_iv_error"]
+                ),
+                "pre_target_band_max_violation": float(
+                    target_fit_price_band["pre_stabilization_maximum_violation"]
+                ),
+                "post_target_band_max_violation": float(
+                    target_fit_price_band["maximum_violation"]
+                ),
+            },
+            pre_state_metrics=cast(
+                Mapping[str, float | int],
+                numerical_regularization["pre_stabilization_state"],
+            ),
+            config=config.surface.discrete_dlv,
+        )
+        if canonical_json(revalidated_dlv_diagnostics) != dlv_text:
+            _fail(f"{trading_date}: stored DLV diagnostics differ from strict recomputation")
+        dlv_projection_call_error = float(
+            cast(Mapping[str, Any], revalidated_dlv_diagnostics["projection_call"])[
+                "max"
+            ]
+        )
+        dlv_atm_iv_error = float(
+            cast(Mapping[str, Any], revalidated_dlv_diagnostics["atm_annual_iv"])[
+                "max"
+            ]
+        )
+        conditioned_iv = cast(
+            Mapping[str, Any], revalidated_dlv_diagnostics["conditioned_annual_iv"]
+        )
+        dlv_conditioned_iv_error = float(conditioned_iv["max"])
+        dlv_conditioned_iv_p99 = float(conditioned_iv["p99"])
+        dlv_minimum_bound_shortfall = float(
+            revalidated_dlv_diagnostics["minimum_bound_shortfall"]
+        )
+        dlv_maximum_bound_excess = float(
+            revalidated_dlv_diagnostics["maximum_bound_excess"]
+        )
 
     expiry_fit_reconstruction = 0.0
     quote_containment = 0.0
     expiry_quote_containment = 0.0
     fitted_black_vector_residual = 0.0
     for model_index, (input_index, expiry) in enumerate(
-        zip(initial_state_indices, dlv_pricer.expiries, strict=True)
+        zip(initial_state_indices, initial_surface_pricer.expiries, strict=True)
     ):
         rows = frame.filter(pl.col("initial_no_arb_input_expiry_index") == input_index)
-        observed = np.asarray(dlv_pricer(expiry, rows["normalized_strike"].to_numpy()))
+        observed = np.asarray(
+            initial_surface_pricer(expiry, rows["normalized_strike"].to_numpy())
+        )
         expected = rows["pure_fitX_price"].to_numpy()
         if _max_abs(observed, expected) > 1.0e-6:
             _fail(f"{trading_date}: reconstructed initial fitted prices changed")
@@ -1470,6 +1719,13 @@ def validate_fitted_partition(
         "direct_call_unit": direct_call_residual,
         "direct_put_unit": direct_put_residual,
         "dlv_call_roundtrip": dlv_call_error,
+        "dlv_canonical_density_roundtrip": dlv_canonical_density_error,
+        "dlv_projection_call": dlv_projection_call_error,
+        "dlv_atm_annual_iv": dlv_atm_iv_error,
+        "dlv_conditioned_annual_iv": dlv_conditioned_iv_error,
+        "dlv_conditioned_annual_iv_p99": dlv_conditioned_iv_p99,
+        "dlv_minimum_bound_shortfall": dlv_minimum_bound_shortfall,
+        "dlv_maximum_bound_excess": dlv_maximum_bound_excess,
         "dlv_density_roundtrip": dlv_density_error,
         "expiry_fit_quote_containment": expiry_quote_containment,
         "expiry_fit_reconstruction": expiry_fit_reconstruction,
@@ -1826,6 +2082,8 @@ _DAY_FIELDS = frozenset(
         "smooth_mean_total_error",
         "smooth_diagnostics_json",
         "smooth_sanos_configuration_id",
+        "discrete_dlv_diagnostics_json",
+        "discrete_dlv_configuration_id",
     }
 )
 _EXPIRY_FIELDS = frozenset(
@@ -1847,7 +2105,6 @@ _EXPIRY_FIELDS = frozenset(
         "initial_expiry_model_density",
         "initial_surface_model_strikes",
         "initial_surface_model_density",
-        "initial_surface_dlv_squares",
         "initial_x_to_surface_indices",
         "smooth_input_expiry_index",
         "smooth_model_variance",
@@ -1868,7 +2125,7 @@ _INITIAL_STATE_FIELDS = frozenset(
     or name.startswith("initial_model_")
     or name.startswith("initial_expiry_model_")
     or name.startswith("initial_surface_model_")
-    or name in {"initial_no_arb_input_expiry_index", "initial_surface_dlv_squares"}
+    or name == "initial_no_arb_input_expiry_index"
 )
 _SMOOTH_STATE_FIELDS = frozenset(
     name
@@ -1876,6 +2133,17 @@ _SMOOTH_STATE_FIELDS = frozenset(
     if name.startswith("smooth_expiry_")
     or name.startswith("smooth_surface_")
     or name in {"smooth_input_expiry_index", "smooth_model_variance"}
+)
+_DLV_STATE_FIELDS = frozenset(
+    name
+    for name in FITTED_SCHEMA
+    if name.startswith("discrete_dlv_")
+    and name
+    not in {
+        "discrete_dlv_anchor",
+        "discrete_dlv_diagnostics_json",
+        "discrete_dlv_configuration_id",
+    }
 )
 _SELECTED_ONLY_FIELDS = frozenset(
     {
@@ -1956,14 +2224,26 @@ def _field_units(name: str) -> tuple[str, str]:
         return "normalized price per unit volatility", "Black vega in K/F geometry"
     if name.endswith("_theta"):
         return "normalized price per business year", "Black theta in K/F geometry"
-    if name in {"initial_model_variance", "smooth_model_variance"}:
+    if name in {
+        "initial_model_variance",
+        "smooth_model_variance",
+        "discrete_dlv_input_total_variance",
+    }:
         return "dimensionless total variance", "ATM variance coordinate used by SANOS"
+    if name == "discrete_dlv_time_increment_years":
+        return "business years", "increment from the preceding retained model expiry"
+    if name == "discrete_dlv_atm_annual_volatility":
+        return "annualized volatility", "source smooth-SANOS ATM volatility"
+    if name == "discrete_dlv_nms":
+        return "dimensionless NMS", "canonical source-smooth ATM/NMS target geometry"
     if name.endswith("_model_strikes"):
         return "dimensionless support", "K/F support nodes"
     if name.endswith("_model_density"):
         return "probability mass", "discrete martingale mass on corresponding support"
-    if name == "initial_surface_dlv_squares":
+    if name == "discrete_dlv_squares":
         return "annualized variance rate (1/year)", "squared DLV with zero boundaries"
+    if name in {"discrete_dlv_target_calls", "discrete_dlv_fitted_calls"}:
+        return "discounted-forward-normalized price", "call prices on discrete_dlv_nms"
     if name.endswith("_indices") or name.endswith("_index"):
         return "integer index", "zero-based interpreting geometry"
     if name == "surface_min_half_spread":
@@ -1999,6 +2279,7 @@ def _field_units(name: str) -> tuple[str, str]:
             "put_symbol",
             "call_option_id",
             "put_option_id",
+            "discrete_dlv_anchor",
         }
     ):
         return "not applicable", "none"
@@ -2011,6 +2292,8 @@ def _field_presence(name: str) -> tuple[bool, str]:
         return True, "present exactly when initial_no_arb_input_expiry_index is present"
     if name in _SMOOTH_STATE_FIELDS:
         return True, "present exactly when smooth_input_expiry_index is present"
+    if name in _DLV_STATE_FIELDS:
+        return True, "present exactly on the one deterministic DLV anchor row per expiry"
     if name in _SELECTED_ONLY_FIELDS:
         return True, "present exactly when options_filter_eligible is true"
     if name in _SMOOTH_SUMMARY_FIELDS:
@@ -2028,7 +2311,7 @@ def _field_presence(name: str) -> tuple[bool, str]:
     return False, "always present on populated partitions"
 
 
-@version("2.0", dependencies=[_field_units, _field_presence])
+@version("3.1", dependencies=[_field_units, _field_presence])
 def _schema_document() -> dict[str, Any]:
     fields: list[dict[str, Any]] = []
     for name, dtype in FITTED_SCHEMA.items():
@@ -2040,7 +2323,11 @@ def _schema_document() -> dict[str, Any]:
             else (
                 "expiry value/state repeated on its applicable expiry rows"
                 if name in _EXPIRY_FIELDS
-                else "paired call/put strike-book row"
+                else (
+                    "one deterministic anchor row per retained DLV expiry"
+                    if name in _DLV_STATE_FIELDS or name == "discrete_dlv_anchor"
+                    else "paired call/put strike-book row"
+                )
             )
         )
         fields.append(
@@ -2061,9 +2348,27 @@ def _schema_document() -> dict[str, Any]:
         "session_half_day_field": "is_half_day",
         "expiry_settlement_field": "expiry_is_am",
         "list_contract": (
-            "List fields are complete per-expiry model state repeated on applicable rows; "
-            "density values are probability masses, not continuous density ordinates."
+            "Initial and smooth list fields repeat complete per-expiry model state on "
+            "applicable rows. Discrete-DLV list fields occur only on the first canonical "
+            "row of each retained expiry. Density values are probability masses, not "
+            "continuous density ordinates."
         ),
+        "dlv_contract": {
+            "source": "completed smooth SANOS surface",
+            "direct_vendor_book_fit": False,
+            "initial_no_arb_audit_state": False,
+            "retained_expiries": "identical to smooth SANOS",
+            "configuration_path": "config.json:surface.discrete_dlv",
+            "projection_domain_nms": "configured by discrete_dlv.nms_range",
+            "inner_nodes": "configured by discrete_dlv.inner_nodes",
+            "support_boundaries": (
+                "configured by discrete_dlv.lower_support_multiplier and "
+                "discrete_dlv.upper_support_multiplier"
+            ),
+            "acceptance_tolerances": "configured by discrete_dlv.tolerances",
+            "equivalence_scope": "retained expiries within inclusive NMS domain",
+            "arbitrary_time_equivalence": False,
+        },
         "fields": fields,
     }
 
@@ -2075,8 +2380,8 @@ def _readme(config: InternalDatasetConfig, plan: InternalDatasetPlan) -> str:
 Immutable internal WIDB-to-SANOS Dataset candidate for `{config.ticker}` from
 {config.start_date.isoformat()} through {config.end_date.isoformat()}. It contains one
 losslessly copied fitted-day Polars/Parquet frame per planned NYSE session, including
-all audit rows, no-arbitrage/filter masks, unsmoothed DLV state, smooth SANOS state,
-fitted values, and diagnostics. Half days are
+all audit rows, no-arbitrage/filter masks, smooth SANOS state, its canonical
+daily-front discrete-DLV projection, fitted values, and diagnostics. Half days are
 {'included' if config.include_half_days else 'excluded'}.
 
 The source stream is WRDS OptionMetrics/IvyDB security identity, option quotes,

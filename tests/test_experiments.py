@@ -665,8 +665,9 @@ def test_overnight_fraction_reaches_dlv_experiment_horizon_and_hdf5(
         observed_frames[fraction] = fitted
         first = ordered.row(0, named=True)
         assert first["business_dte"] == pytest.approx(np.float32(10.0 + fraction))
+        first_dlv = ordered.filter(pl.col("discrete_dlv_anchor")).row(0, named=True)
         observed_dlv.append(
-            np.asarray(first["initial_surface_dlv_squares"], dtype=np.float64)
+            np.asarray(first_dlv["discrete_dlv_squares"], dtype=np.float64)
         )
         config = replace(
             base,

@@ -230,10 +230,14 @@ def test_populated_comparison_exact_match_and_fresh_only_dlv_gap(
     assert result["population"]["fresh_selected_rows"] == frame.height
     assert result["item_oracle_gaps"] == [
         {
-            "item": "unsmoothed_no_arbitrage_state",
-            "reason": "legacy daily HDF5 does not store complete pre-filter state",
+            "item": "canonical_discrete_dlv_projection",
+            "reason": "legacy daily HDF5 stores only the smooth SANOS state",
             "fresh_invariants_passed": True,
-            "density_dlv_inverse_maximum_absolute_error": pytest.approx(0.0, abs=2e-14),
+            "dlv_fixed_point_maximum_absolute_error": pytest.approx(0.0, abs=1e-9),
+            "canonical_density_dlv_inverse_maximum_absolute_error": pytest.approx(
+                0.0, abs=1e-12
+            ),
+            "density_dlv_inverse_maximum_absolute_error": pytest.approx(0.0, abs=1e-12),
         }
     ]
     fields = {
@@ -263,6 +267,17 @@ def test_population_distinguishes_input_and_selected_expiries(
         pl.lit(False).alias("options_filter_eligible"),
         pl.lit(None, dtype=pl.Int32).alias("initial_no_arb_input_expiry_index"),
         pl.lit(None, dtype=pl.Int32).alias("smooth_input_expiry_index"),
+        pl.lit(False).alias("discrete_dlv_anchor"),
+        pl.lit(None, dtype=pl.Int32).alias("discrete_dlv_input_expiry_index"),
+        pl.lit(None, dtype=pl.Float64).alias("discrete_dlv_time_increment_years"),
+        pl.lit(None, dtype=pl.Float64).alias("discrete_dlv_atm_annual_volatility"),
+        pl.lit(None, dtype=pl.Float64).alias("discrete_dlv_input_total_variance"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_nms"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_model_strikes"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_model_density"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_squares"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_target_calls"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_fitted_calls"),
     )
     with_ineligible_expiry = pl.concat([frame, ineligible]).cast(
         FITTED_SCHEMA, strict=False
@@ -273,6 +288,18 @@ def test_population_distinguishes_input_and_selected_expiries(
     assert result["matched"] is True
     assert result["population"]["input_expiries"] == 2
     assert result["population"]["selected_expiries"] == 1
+
+
+def test_populated_comparison_explicitly_rejects_zero_selected_fresh_day(
+    comparison_pair: tuple[pl.DataFrame, dict[str, object]],
+) -> None:
+    frame, payload = comparison_pair
+    zero_selected = frame.with_columns(
+        pl.lit(False).alias("options_filter_eligible")
+    )
+
+    with pytest.raises(ReferenceComparisonError, match="zero filter-selected rows"):
+        compare_populated_day(zero_selected, payload)
 
 
 def test_comparison_accepts_selected_expiry_dropped_from_smooth_state(
@@ -289,6 +316,17 @@ def test_comparison_accepts_selected_expiry_dropped_from_smooth_state(
         ),
         pl.lit(None, dtype=pl.Int32).alias("initial_no_arb_input_expiry_index"),
         pl.lit(None, dtype=pl.Int32).alias("smooth_input_expiry_index"),
+        pl.lit(False).alias("discrete_dlv_anchor"),
+        pl.lit(None, dtype=pl.Int32).alias("discrete_dlv_input_expiry_index"),
+        pl.lit(None, dtype=pl.Float64).alias("discrete_dlv_time_increment_years"),
+        pl.lit(None, dtype=pl.Float64).alias("discrete_dlv_atm_annual_volatility"),
+        pl.lit(None, dtype=pl.Float64).alias("discrete_dlv_input_total_variance"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_nms"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_model_strikes"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_model_density"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_squares"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_target_calls"),
+        pl.lit(None, dtype=pl.List(pl.Float64)).alias("discrete_dlv_fitted_calls"),
     )
     with_dropped_expiry = pl.concat([frame, dropped]).cast(
         FITTED_SCHEMA, strict=False
@@ -419,12 +457,13 @@ def test_structural_and_numerical_families_block_match(
 def test_tolerance_contract_is_versioned_and_frozen() -> None:
     tolerance = DailyLegacyComparisonTolerances()
     assert str(DailyLegacyComparisonTolerances.version).startswith(
-        "phase10-legacy-daily-comparison-tolerances-v1"
+        "phase10-legacy-daily-comparison-tolerances-v3"
     )
     assert tolerance.to_dict()["float32_atol"] == 0.0
     assert tolerance.to_dict()["float64_atol"] == 1.0e-12
     assert tolerance.to_dict()["reconstructed_call_atol"] == 5.0e-8
-    assert tolerance.to_dict()["density_dlv_inverse_atol"] == 2.0e-14
+    assert tolerance.to_dict()["density_dlv_inverse_atol"] == 1.0e-12
+    assert tolerance.to_dict()["dlv_fixed_point_atol"] == 1.0e-9
     with pytest.raises(ValueError, match="frozen"):
         DailyLegacyComparisonTolerances(float32_atol=1.0)
     with pytest.raises(ValueError, match="frozen"):
@@ -437,7 +476,7 @@ def test_tolerance_contract_is_versioned_and_frozen() -> None:
         ("persisted_float32", np.dtype("float32"), 0.0),
         ("persisted_float64", np.dtype("float64"), 1.0e-12),
         ("reconstructed_call", np.dtype("float64"), 5.0e-8),
-        ("density_dlv_inverse", np.dtype("float64"), 2.0e-14),
+        ("density_dlv_inverse", np.dtype("float64"), 1.0e-12),
     ],
 )
 def test_numerical_contract_at_and_beyond_each_tolerance(

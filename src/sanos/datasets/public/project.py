@@ -24,7 +24,8 @@ from sanos.widb.daily import DailyDataError
 from sanos.widb.surface import (
     FITTED_SCHEMA,
     FITTED_SCHEMA_VERSION,
-    compatibility_dlv_pricer,
+    _canonical_discrete_dlv_densities,
+    discrete_dlv_pricer,
     smooth_sanos_pricer,
 )
 
@@ -121,7 +122,7 @@ def _atm_volatility(
     variance = np.interp(clipped, pricer.expiries, pricer.variances)
     result = np.sqrt(variance / clipped)
     if np.any(~np.isfinite(result)) or np.any(result <= 0.0):
-        _fail("DLV-state ATM volatility interpolation produced invalid values")
+        _fail("Model-state ATM volatility interpolation produced invalid values")
     return np.asarray(result, dtype=np.float64)
 
 
@@ -179,18 +180,22 @@ def _source_carry_curve(
     )
 
 
-@version("1.0", dependencies=[SanosPricer])
+@version("2.0", dependencies=[SanosPricer])
 def _state_payload(
     pricer: SanosPricer,
     source_records: tuple[dict[str, Any], ...],
     public_index_by_expiry_id: dict[int, int],
     *,
     smooth: bool,
+    dlv_squares: tuple[np.ndarray, ...] | None = None,
 ) -> dict[str, Any]:
     if len(source_records) != len(pricer.expiries):
         _fail("Model state and source expiry geometry have different lengths")
+    if smooth and dlv_squares is not None:
+        _fail("Smooth SANOS payload cannot contain a discrete-DLV vector")
+    if not smooth and (dlv_squares is None or len(dlv_squares) != len(pricer.expiries)):
+        _fail("Discrete-DLV payload differs from the stored expiry state")
     increments = np.diff(np.concatenate(([0.0], np.asarray(pricer.expiries, dtype=np.float64))))
-    dlvs = None if smooth else pricer.dlvsqs(on_all_strikes=True)
     model_expiries: list[dict[str, Any]] = []
     for index, record in enumerate(source_records):
         expiry_id = int(record["expiry_id"])
@@ -213,8 +218,10 @@ def _state_payload(
                 pricer.xdensities[index], dtype=np.float64
             ).tolist(),
         }
-        if dlvs is not None:
-            item["squared_dlv"] = np.asarray(dlvs[index], dtype=np.float64).tolist()
+        if dlv_squares is not None:
+            item["squared_dlv"] = np.asarray(
+                dlv_squares[index], dtype=np.float64
+            ).tolist()
         model_expiries.append(item)
     result: dict[str, Any] = {"model_expiries": model_expiries}
     if smooth:
@@ -223,6 +230,44 @@ def _state_payload(
         result["smoothness"] = float(pricer.smoothness)
         return {"smoothness": result["smoothness"], "model_expiries": model_expiries}
     return result
+
+
+@version("1.1", dependencies=[SanosPricer, _canonical_discrete_dlv_densities])
+def _stored_dlv_squares(
+    frame: pl.DataFrame,
+    pricer: SanosPricer,
+) -> tuple[np.ndarray, ...]:
+    """Read and independently verify the persisted canonical DLV vectors."""
+
+    anchors = frame.filter(pl.col("discrete_dlv_anchor")).sort(
+        "discrete_dlv_input_expiry_index"
+    )
+    indices = anchors.get_column("discrete_dlv_input_expiry_index").to_list()
+    if indices != list(range(len(pricer.expiries))):
+        _fail("Stored discrete-DLV anchors are not contiguous from zero")
+    values = tuple(
+        np.asarray(value, dtype=np.float64)
+        for value in anchors.get_column("discrete_dlv_squares").to_list()
+    )
+    if any(
+        value.shape != np.asarray(pricer.xstrikes[index]).shape
+        or np.any(~np.isfinite(value))
+        for index, value in enumerate(values)
+    ):
+        _fail("Stored discrete-DLV vectors have invalid shape or values")
+    for label, decoded in (
+        ("canonical", _canonical_discrete_dlv_densities(pricer, list(values))),
+        ("generic", pricer.densities_from_dlvsqs(list(values))),
+    ):
+        residual = max(
+            float(np.max(np.abs(np.asarray(observed) - np.asarray(expected))))
+            for observed, expected in zip(decoded, pricer.xdensities, strict=True)
+        )
+        if residual > 1.0e-12:
+            _fail(
+                f"Stored discrete-DLV {label} density round trip residual is {residual}"
+            )
+    return values
 
 
 @version("1.0", dependencies=[normalized_strike_policy])
@@ -276,7 +321,7 @@ def _book_payload(
     *,
     expiry_records: tuple[dict[str, Any], ...],
     public_index_by_expiry_id: dict[int, int],
-    dlv_pricer: SanosPricer,
+    surface_pricer: SanosPricer,
     epsilon_atm_vol: float,
     config: PublicProjectionConfig,
 ) -> list[dict[str, Any]]:
@@ -293,7 +338,7 @@ def _book_payload(
             continue
         business_dte = float(record["business_dte"])
         time_years = float(record["time_to_expiry_years"])
-        atm_vol = float(_atm_volatility(time_years, dlv_pricer))
+        atm_vol = float(_atm_volatility(time_years, surface_pricer))
         strikes = group.get_column("normalized_strike").to_numpy()
         for is_call, active_column, fit_column, bid_column, ask_column in (
             (
@@ -381,8 +426,9 @@ def _book_payload(
         _source_carry_curve,
         _state_payload,
         _state_records,
+        _stored_dlv_squares,
         business_clock_policy,
-        compatibility_dlv_pricer,
+        discrete_dlv_pricer,
         public_polars_schema,
         smooth_sanos_pricer,
     ],
@@ -396,18 +442,24 @@ def project_public_day(
     _require_fitted_schema(frame)
     if frame.is_empty():
         _fail("A typed-empty internal day has no public row")
+    if not bool(frame.get_column("options_filter_eligible").any()):
+        _fail(
+            "A populated internal day with zero filter-selected rows has no public "
+            "model state; it requires an explicit retained-date policy decision"
+        )
     trading_date = _one(frame, "trading_date")
     if not isinstance(trading_date, date):
         _fail("trading_date is not a calendar date")
     spot = float(_one(frame, "spot_reference"))
-    dlv_pricer = compatibility_dlv_pricer(frame)
+    dlv_pricer = discrete_dlv_pricer(frame)
     smooth_pricer = smooth_sanos_pricer(frame)
+    stored_dlv_squares = _stored_dlv_squares(frame, dlv_pricer)
     if smooth_pricer.smoothness != config.smoothness:
         _fail(
             "Internal smoothness differs from public projection configuration "
             f"({smooth_pricer.smoothness} != {config.smoothness})"
         )
-    dlv_records = _state_records(frame, "initial_no_arb_input_expiry_index")
+    dlv_records = _state_records(frame, "discrete_dlv_input_expiry_index")
     smooth_records = _state_records(frame, "smooth_input_expiry_index")
 
     record_by_expiry_id: dict[int, dict[str, Any]] = {}
@@ -434,10 +486,10 @@ def project_public_day(
     )
     if np.any(~np.isfinite(times)) or np.any(times <= 0.0) or np.any(np.diff(times) <= 0.0):
         _fail("Public expiry geometry must have positive strictly increasing model times")
-    expiry_atm_vols = _atm_volatility(times, dlv_pricer)
+    expiry_atm_vols = _atm_volatility(times, smooth_pricer)
     epsilon_atm_vol = float(
         _atm_volatility(
-            config.nms_epsilon_business_dte / business_clock_policy()[0], dlv_pricer
+            config.nms_epsilon_business_dte / business_clock_policy()[0], smooth_pricer
         )
     )
     expiries: list[dict[str, Any]] = []
@@ -468,7 +520,7 @@ def project_public_day(
         frame,
         expiry_records=ordered_records,
         public_index_by_expiry_id=public_index_by_expiry_id,
-        dlv_pricer=dlv_pricer,
+        surface_pricer=smooth_pricer,
         epsilon_atm_vol=epsilon_atm_vol,
         config=config,
     )
@@ -490,6 +542,7 @@ def project_public_day(
             dlv_records,
             public_index_by_expiry_id,
             smooth=False,
+            dlv_squares=stored_dlv_squares,
         ),
     }
     # Force the recursive Polars cast here so a projection cannot accumulate an

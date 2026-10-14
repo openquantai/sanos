@@ -12,6 +12,7 @@ from cdxcore.bs import bs
 from cdxcore.verbose import Context
 from cvxpy.error import SolverError
 
+import sanos.model.fitter as fitter_module
 from sanos.model import (
     ArbFreePricer,
     MkArbFree,
@@ -153,6 +154,28 @@ def test_density_dlv_round_trip_and_call_invariants_on_unequal_grids() -> None:
     reconstructed_full = pricer.densities_from_dlvsqs(full_dlvsqs)
     for observed, expected in zip(reconstructed_full, densities, strict=True):
         np.testing.assert_allclose(observed, expected, rtol=0.0, atol=2.0e-14)
+
+
+def test_dlv_extraction_tolerates_a_nonrepresentable_sparse_audit_state() -> None:
+    """Sparse audit densities need not define a finite standalone DLV state."""
+
+    strikes = [np.asarray([0.5, 0.75, 1.0, 1.25, 1.5], dtype=np.float64)]
+    densities = [np.asarray([0.2, 0.0, 0.6, 0.0, 0.2], dtype=np.float64)]
+    pricer = SanosPricer(
+        smoothness=None,
+        expiries=np.asarray([5.0 / 252.0], dtype=np.float64),
+        variances=np.asarray([5.0 / 252.0 * 0.04], dtype=np.float64),
+        xstrikes=strikes,
+        xdensities=densities,
+    )
+
+    dlv_squares = pricer.dlvsqs(on_all_strikes=True)
+
+    assert len(dlv_squares) == 1
+    assert np.all(np.isfinite(dlv_squares[0]))
+    assert dlv_squares[0][1] == 0.0
+    reconstructed = pricer.densities_from_dlvsqs(dlv_squares)
+    assert not np.allclose(reconstructed[0], densities[0], rtol=0.0, atol=1.0e-12)
 
 
 def test_pre_first_expiry_jump_is_preserved_for_parity() -> None:
@@ -319,6 +342,116 @@ def test_lp_fitter_reprices_deterministic_sanos_market(smoothness: float | None)
         assert np.min(density) >= 0.0
         assert np.sum(density) == pytest.approx(1.0, abs=2.0e-7)
         assert strikes @ density == pytest.approx(1.0, abs=2.0e-7)
+
+
+def test_strict_fitter_rejects_solver_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forced_fallback(*args: Any, **kwargs: Any) -> tuple[bool, str, bool]:
+        del args, kwargs
+        return True, "optimal", True
+
+    monkeypatch.setattr(
+        fitter_module._StrictSanosLPSolver,
+        "__call__",
+        forced_fallback,
+    )
+    expiry = np.asarray([5.0 / 252.0], dtype=np.float64)
+    strikes = [np.asarray([0.9, 1.0, 1.1], dtype=np.float64)]
+    mids = [
+        np.asarray(
+            bs.price(k=strikes[0], vol=0.2, sqrtT=np.sqrt(expiry[0])),
+            dtype=np.float64,
+        )
+    ]
+    supports = [np.asarray([0.5, 0.9, 1.0, 1.1, 1.5], dtype=np.float64)]
+    with pytest.raises(RuntimeError, match="forbids fallback"):
+        SanosFitter(
+            smoothness=None,
+            scale_dlv_constraints=True,
+            solver_kkt_tolerance=1.0e-10,
+            max_abs_fit_error=9.0e-5,
+            allow_solver_fallback=False,
+        )(
+            expiry,
+            strikes,
+            mids,
+            supports,
+            vols=0.2,
+            verbose=cast(Any, Context).quiet,
+        )
+
+
+def test_strict_fitter_configures_all_highs_feasibility_tolerances() -> None:
+    solver, options = fitter_module._StrictSanosLPSolver(
+        kkt_tolerance=1.0e-10
+    )._lp_solver_settings(for_expiry=False, is_fallback=False)
+    assert solver == "HIGHS"
+    highs_options = options["highs_options"]
+    for name in (
+        "kkt_tolerance",
+        "primal_feasibility_tolerance",
+        "dual_feasibility_tolerance",
+    ):
+        assert highs_options[name] == 1.0e-10
+
+
+def test_fitter_applies_optional_per_node_price_bounds() -> None:
+    expiry = np.asarray([5.0 / 252.0], dtype=np.float64)
+    strikes = [np.asarray([0.9, 1.0, 1.1], dtype=np.float64)]
+    mids = [
+        np.asarray(
+            bs.price(k=strikes[0], vol=0.2, sqrtT=np.sqrt(expiry[0])),
+            dtype=np.float64,
+        )
+    ]
+    supports = [
+        np.asarray([0.5, 0.9, 1.0, 1.1, 1.5], dtype=np.float64)
+    ]
+    bounds = [(mids[0] - 1.0e-6, mids[0] + 1.0e-6)]
+    fitted = SanosFitter(smoothness=None, timeout_seconds=20.0)(
+        expiry,
+        strikes,
+        mids,
+        supports,
+        fit_price_bounds=bounds,
+        vols=0.2,
+        verbose=cast(Any, Context).quiet,
+    )
+    observed = np.asarray(fitted(float(expiry[0]), strikes[0]))
+    assert np.all(observed >= bounds[0][0] - 1.0e-7)
+    assert np.all(observed <= bounds[0][1] + 1.0e-7)
+
+    with pytest.raises(ValueError, match="same shape"):
+        SanosFitter(smoothness=None, timeout_seconds=20.0)(
+            expiry,
+            strikes,
+            mids,
+            supports,
+            fit_price_bounds=[
+                (
+                    np.asarray([0.0], dtype=np.float64),
+                    np.asarray([1.0], dtype=np.float64),
+                )
+            ],
+            vols=0.2,
+            verbose=cast(Any, Context).quiet,
+        )
+
+    impossible = [
+        (
+            np.full(3, 2.0, dtype=np.float64),
+            np.full(3, 2.0, dtype=np.float64),
+        )
+    ]
+    with pytest.raises(RuntimeError, match="infeasible"):
+        SanosFitter(smoothness=None, timeout_seconds=20.0)(
+            expiry,
+            strikes,
+            mids,
+            supports,
+            fit_price_bounds=impossible,
+            vols=0.2,
+            verbose=cast(Any, Context).quiet,
+        )
 
 
 def test_arbfree_surface_contains_quotes_and_preserves_geometry() -> None:
@@ -610,6 +743,7 @@ def test_numerical_components_have_resolved_versions() -> None:
     assert direct_dependency_names(SanosFitter) == {
         "SanosLPSolver",
         "SanosPricer",
+        "_StrictSanosLPSolver",
         "density_floor_enabled",
         "one_minute_year_fraction",
         "warn_and_fix_density",
