@@ -469,6 +469,71 @@ both accepted it. Only `approved` may alter reference behavior.
   validation schema and validation producer identity change because the three
   field meanings and two bridge residuals are now explicit.
 
+## CD-026 — Initial surface fit is a soft quote-band fit
+
+- **Status:** resolved from the copied implementation and fresh Phase 10 pilot
+  measurement on 2026-10-14.
+- **Evidence:** `MkArbFree.fits1` is an accepted per-expiry fit whose producer
+  accepts masked prices only within bid/ask plus `1e-6`. `MkArbFree.fitsX` is a
+  globally arbitrage-free soft closest fit; the copied class contract states
+  explicitly that it need not remain inside bid/ask. The first Phase 10
+  validator incorrectly imposed the hard-fit tolerance on both. Across all 15
+  populated pilot dates, reconstructed `fits1` has maximum quote-band
+  violation `9.922384824334607e-7`, while reconstructed `fitsX` reaches
+  `1.1905097704500989e-4` and is therefore behaving within its declared soft
+  objective rather than a nonexistent containment contract.
+- **Treatment:** enforce the version-owned `1e-6` quote-containment tolerance
+  on reconstructed `fits1` only. Record the reconstructed `fitsX` value as
+  `initial_surface_fit_quote_band_violation`, in absolute normalized pure-call
+  units `C/(DF*F)` over `mask_arb_free`, without using it as an acceptance gate.
+  Continue to require exact `fitsX` producer replay, its Black-vector contract,
+  normalized call bounds, density mass/moment/positivity, strike convexity,
+  and calendar no-arbitrage.
+- **Expected impact:** no Raw, Intermediate, fitted, SANOS, DLV, mask, or
+  population value changes. Validation schema and producer identity change to
+  correct the meaning of one residual and remove the invalid surface
+  containment rejection.
+
+## CD-027 — Smooth calendar validation follows the accepted solver
+
+- **Status:** resolved from the copied solver configuration and fresh Phase 10
+  pilot measurement on 2026-10-14.
+- **Evidence:** 2025-01-03's primary serial HiGHS smooth-surface solve returned
+  `invalid_solution`; the recorded CLARABEL fallback returned `optimal` with
+  feasibility tolerance `1e-6`. Its reconstructed calendar residual is
+  `2.0046636678427987e-7`. The previous universal `1e-7` validator rejected a
+  state accepted by the copied solver. Across the other populated pilot dates,
+  smooth residuals are at most `8.067573398218286e-8`; initial-state residuals
+  are at most `8.7691252648181e-8`; canonical DLV residuals are at most
+  `4.440892098500626e-16`.
+- **Treatment:** validate each initial and smooth terminal solver grammar
+  first, then use its configured feasibility contract: `1e-7` for HiGHS,
+  `1e-6` for an optimal CLARABEL fallback, and `5e-5` for CLARABEL
+  `optimal_inaccurate` reduced termination. Record the applied values as
+  `initial_surface_calendar_acceptance_tolerance` and
+  `smooth_calendar_acceptance_tolerance`. Strike shape and model-free bounds
+  retain `1e-7`; DLV validation retains its existing independent contracts.
+- **Expected impact:** validation and legacy-comparison report identity change;
+  fitted states, prices, masks, populations, SANOS parameters, and DLV
+  parameters do not.
+
+## CD-028 — Exact AM business-clock replay operation order
+
+- **Status:** resolved from the copied daily producer and fresh Phase 10 pilot
+  measurement on 2026-10-14.
+- **Evidence:** the producer casts the integer business-session count to
+  Float32, subtracts the configurable AM amount in Float64, clips, and then
+  casts the result to Float32. The validator prematurely cast the subtraction
+  to Float32. On 2025-01-16 this changed 145 rows of the front AM expiry by one
+  Float32 step (`1.4901161193847656e-8`); replaying the producer order is
+  bitwise exact.
+- **Treatment:** own and test the producer-exact operation order in the
+  validation dependency closure. Keep `overnight_variance_fraction=0.2` as the
+  backward-compatible configurable default and continue requiring exact
+  `business_dte` and `time_to_expiry_years` equality.
+- **Expected impact:** validation identity only; no daily or fitted artifact is
+  changed or rebuilt.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -477,5 +542,5 @@ CD-016 through CD-019 need a choice only if their preserved compatibility
 behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked. CD-004,
-CD-009 and CD-021 through CD-025 are resolved by their approved or measured
+CD-009 and CD-021 through CD-028 are resolved by their approved or measured
 contracts and regressions.

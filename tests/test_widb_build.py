@@ -924,6 +924,15 @@ def test_internal_dataset_validator_version_owns_all_semantic_helpers() -> None:
     } <= set(dependencies)
 
 
+def test_legacy_comparison_document_schema_change_is_version_owned() -> None:
+    document = internal_dataset_module._legacy_comparison_document(_dataset_config())
+    assert document["schema"] == internal_dataset_module.LEGACY_COMPARISON_SCHEMA
+    assert document["schema"] == "sanos-legacy-comparison-v4"
+    assert str(internal_dataset_module._legacy_comparison_document.version).startswith(
+        "1.2"
+    )
+
+
 def test_internal_dataset_document_is_strict() -> None:
     config = _dataset_config()
     document = {

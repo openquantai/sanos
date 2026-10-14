@@ -151,7 +151,7 @@ hash.
 | `MkArbFree`, `ArbFreePricer`, `mk_arb_free_day` | copy/adapt; parity on fits/masks/prices and invariant tests |
 | `OptionsFilter`, `normalize_day`, `filter_options_day` | preserve order and legacy simple `spot_ret`; public forward-adjusted return is a separate field; `min_vegaSqrtVar` remains an explicitly registered no-op pending CD-012 |
 | `SanosPricer` | copy/adapt; price, density, DLV and unequal-grid round trips |
-| `SanosLPSolver` | copy/adapt; feasible/infeasible behavior, quote containment and solver selection |
+| `SanosLPSolver` | copy/adapt; feasible/infeasible behavior, accepted per-expiry quote containment, soft surface-fit diagnostics and solver selection |
 | `repair_density_nonnegative`, `warn_and_fix_density` | copy/adapt; fixture and invariant tests |
 | `make_variances` | copy/adapt; preserve interpolation/ATM input semantics |
 | `SanosFitter` | copy/adapt; deterministic LP repricing plus isolated pinned-reference state/price parity at smoothness `0` and production `0.25` |
@@ -172,7 +172,7 @@ human-readable `__str__` value.
 | Imported test | Action | Coverage retained or added |
 |---|---|---|
 | `tests/test_biz_calendar.py` | copy/adapt in Phase 5 | sessions, half days, scalar/vector business-day arithmetic and AM fraction sensitivity |
-| `tests/test_arbfree.py` | adapted in Phase 3 without unavailable proprietary fixture | synthetic strike extension, LP fits, quote containment, calendar and convexity rules, serialization |
+| `tests/test_arbfree.py` | adapted in Phase 3 without unavailable proprietary fixture | synthetic strike extension, LP fits, accepted per-expiry quote containment, soft surface-fit diagnostics, calendar and convexity rules, serialization |
 | `tests/test_arbfree_density_projection.py` | adapted in Phase 3 | nonnegative mass/moment projection, independent CVXPY optimum, and price invariants |
 | `tests/test_sanos_utils.py` | reference only | tests only the omitted historical `sanos.old.utils.extract_atm_fwd_vols`; write new current `SanosPricer` price/density/DLV/repair tests |
 | `tests/test_dysanos_download.py` | replace/adapt in Phases 2/4 | CLI planning, cache-only behavior, no-network guarantees, progress and errors |

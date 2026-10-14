@@ -334,7 +334,8 @@ Acceptance tests include:
 - call boundary values `C(0)=1`, left slope `-1`, and zero far tail;
 - smoothness limits and smooth/unsmoothed state geometry;
 - explicit smoothness `0` and production `0.25` parity;
-- feasible/infeasible LP behavior and quote containment;
+- feasible/infeasible LP behavior, accepted per-expiry quote containment, and
+  soft surface-fit quote-band diagnostics;
 - unequal-grid DLV/density round trips;
 - NumPy/JAX value and gradient parity where both paths are retained; and
 - numerical parity with the reference on shared deterministic inputs.

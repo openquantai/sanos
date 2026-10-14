@@ -850,6 +850,14 @@ def test_two_expiry_fitted_frame_passes_dataset_quantitative_boundary(
     assert statistics.smooth_retained_expiries == 2
     assert statistics.residual_maxima["initial_surface_fit_black_roundtrip"] == 0.0
     assert statistics.residual_maxima["expiry_fit_black_roundtrip"] == 0.0
+    assert "initial_surface_fit_quote_band_violation" in statistics.residual_maxima
+    assert "quote_containment" not in statistics.residual_maxima
+    for prefix in ("initial_surface", "smooth"):
+        tolerance = statistics.residual_maxima[
+            f"{prefix}_calendar_acceptance_tolerance"
+        ]
+        assert tolerance == 1.0e-7
+        assert statistics.residual_maxima[f"{prefix}_calendar"] <= tolerance
     assert statistics.residual_maxima["dlv_density_roundtrip"] <= 2.0e-14
     assert statistics.residual_maxima["smooth_expiry_reconstruction"] <= 1.0e-12
     assert statistics.residual_maxima["smooth_surface_fit_reconstruction"] <= 1.0e-12
@@ -986,7 +994,261 @@ def test_smooth_canonical_market_bridge_retains_frozen_acceptance_gate() -> None
         )
 
 
+def test_initial_quote_contract_enforces_only_the_expiry_hard_fit() -> None:
+    tolerance = (
+        internal_dataset_module._initial_expiry_quote_containment_tolerance()
+    )
+    internal_dataset_module._validate_initial_fit_quote_contract(
+        expiry_fit_residual=tolerance,
+        surface_fit_residual=1.1905097704500989e-4,
+        label="test",
+    )
+
+    rejected = float(np.nextafter(tolerance, np.inf))
+    with pytest.raises(
+        DatasetValidationError,
+        match="initial expiry-fit quote containment residual",
+    ):
+        internal_dataset_module._validate_initial_fit_quote_contract(
+            expiry_fit_residual=rejected,
+            surface_fit_residual=0.0,
+            label="test",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expiry", -1.0),
+        ("expiry", np.nan),
+        ("expiry", np.inf),
+        ("expiry", -np.inf),
+        ("surface", -1.0),
+        ("surface", np.nan),
+        ("surface", np.inf),
+        ("surface", -np.inf),
+    ],
+)
+def test_initial_quote_contract_rejects_invalid_diagnostics(
+    field: str,
+    value: float,
+) -> None:
+    kwargs = {
+        "expiry_fit_residual": 0.0,
+        "surface_fit_residual": 0.0,
+        f"{field}_fit_residual": value,
+    }
+    with pytest.raises(DatasetValidationError, match="quote-band residual is invalid"):
+        internal_dataset_module._validate_initial_fit_quote_contract(
+            **kwargs,
+            label="test",
+        )
+
+
+def test_masked_quote_band_residual_ignores_unretained_rows() -> None:
+    observed = internal_dataset_module._masked_quote_band_residual(
+        bids=np.asarray([0.2, 0.2]),
+        asks=np.asarray([0.3, 0.3]),
+        fits=np.asarray([0.25, 10.0]),
+        mask=np.asarray([True, False]),
+    )
+    assert observed == 0.0
+
+    observed = internal_dataset_module._masked_quote_band_residual(
+        bids=np.asarray([0.2, 0.2]),
+        asks=np.asarray([0.3, 0.3]),
+        fits=np.asarray([0.15, 10.0]),
+        mask=np.asarray([True, False]),
+    )
+    assert observed == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize(
+    ("status", "used_fallback", "expected"),
+    [
+        ("optimal", False, 1.0e-7),
+        ("optimal_inaccurate", False, 1.0e-7),
+        ("optimal", True, 1.0e-6),
+        ("optimal_inaccurate", True, 5.0e-5),
+    ],
+)
+def test_surface_calendar_tolerance_tracks_validated_terminal_solver_accuracy(
+    status: str,
+    used_fallback: bool,
+    expected: float,
+) -> None:
+    call = internal_dataset_module._SolverCall(
+        stage="surface",
+        input_expiry_index=None,
+        expiry_attempt=None,
+        terminal_status=status,
+        used_fallback=used_fallback,
+    )
+    assert (
+        internal_dataset_module._surface_calendar_acceptance_tolerance(call, "test")
+        == expected
+    )
+
+
+def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
+    events = [
+        _solver_event(
+            "expiry_soft",
+            "optimal",
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _expiry_decision(0, retained=True, support_attempt=1),
+        _solver_event("surface", "invalid_solution"),
+        _solver_event("surface", "optimal", fallback=True),
+    ]
+    evidence = internal_dataset_module._terminal_solver_events(
+        {"outcome": "completed", "solver_events": events},
+        "test",
+        expected_expiry_indices=(0,),
+        retained_expiry_indices=(0,),
+    )
+    assert evidence.terminal_solver_call == internal_dataset_module._SolverCall(
+        stage="surface",
+        input_expiry_index=None,
+        expiry_attempt=None,
+        terminal_status="optimal",
+        used_fallback=True,
+    )
+    assert (
+        internal_dataset_module._surface_calendar_acceptance_tolerance(
+            evidence.terminal_solver_call,
+            "test",
+        )
+        == 1.0e-6
+    )
+
+
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        (
+            internal_dataset_module._SolverCall(
+                stage="expiry_soft",
+                input_expiry_index=0,
+                expiry_attempt=1,
+                terminal_status="optimal",
+                used_fallback=False,
+            ),
+            "accepted surface solve",
+        ),
+        (
+            internal_dataset_module._SolverCall(
+                stage="surface",
+                input_expiry_index=None,
+                expiry_attempt=None,
+                terminal_status="invalid_solution",
+                used_fallback=False,
+            ),
+            "accepted surface solve",
+        ),
+    ],
+)
+def test_surface_calendar_tolerance_rejects_non_surface_or_failed_evidence(
+    call: internal_dataset_module._SolverCall,
+    expected: str,
+) -> None:
+    with pytest.raises(DatasetValidationError, match=expected):
+        internal_dataset_module._surface_calendar_acceptance_tolerance(call, "test")
+
+
+@pytest.mark.parametrize("tolerance", [1.0e-7, 1.0e-6, 5.0e-5])
+def test_calendar_residual_has_inclusive_exact_boundary(tolerance: float) -> None:
+    internal_dataset_module._validate_calendar_residual(
+        tolerance,
+        tolerance=tolerance,
+        label="test",
+    )
+    with pytest.raises(DatasetValidationError, match="calendar monotonicity"):
+        internal_dataset_module._validate_calendar_residual(
+            np.nextafter(tolerance, np.inf),
+            tolerance=tolerance,
+            label="test",
+        )
+
+
+def test_pricer_state_rejects_valid_densities_with_decreasing_convex_order() -> None:
+    pricer = surface_module.SanosPricer(
+        smoothness=None,
+        expiries=np.asarray([10.0, 20.0]) / 252.0,
+        variances=np.asarray([0.04, 0.08]),
+        xstrikes=[
+            np.asarray([0.5, 1.0, 1.5]),
+            np.asarray([0.9, 1.0, 1.1]),
+        ],
+        xdensities=[
+            np.asarray([0.25, 0.5, 0.25]),
+            np.asarray([0.25, 0.5, 0.25]),
+        ],
+    )
+    for index in range(2):
+        internal_dataset_module._validate_pricer_state(
+            replace(
+                pricer,
+                expiries=pricer.expiries[index : index + 1],
+                variances=pricer.variances[index : index + 1],
+                xstrikes=pricer.xstrikes[index : index + 1],
+                xdensities=pricer.xdensities[index : index + 1],
+            ),
+            f"expiry {index}",
+            check_dlvs=False,
+        )
+    with pytest.raises(DatasetValidationError, match="calendar monotonicity"):
+        internal_dataset_module._validate_pricer_state(
+            pricer,
+            "inverted surface",
+            check_dlvs=False,
+        )
+
+
+@pytest.mark.parametrize("overnight_fraction", [0.0, 0.2, 0.5, 1.0])
+def test_business_dte_replay_preserves_producer_operation_order(
+    overnight_fraction: float,
+) -> None:
+    observed = internal_dataset_module._business_dte_replay(
+        trading_date=date(2025, 1, 16),
+        expiry_dates=np.asarray(
+            [
+                np.datetime64("2025-01-17"),
+                np.datetime64("2025-01-17"),
+                np.datetime64("2025-01-16"),
+                np.datetime64("2025-01-21"),
+            ]
+        ),
+        expiry_is_am=np.asarray([True, False, True, True]),
+        am_business_day_subtraction=1.0 - overnight_fraction,
+    )
+    expected = np.asarray(
+        [
+            overnight_fraction,
+            1.0,
+            0.0,
+            1.0 + overnight_fraction,
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(observed, expected)
+
+    expected_time = (expected / np.float32(252.0)).astype(np.float32)
+    observed_time = (observed / np.float32(252.0)).astype(np.float32)
+    np.testing.assert_array_equal(observed_time, expected_time)
+
+    if overnight_fraction == 0.2:
+        premature_float32 = np.float32(1.0) - np.float32(0.8)
+        assert observed[0].view(np.uint32) != premature_float32.view(np.uint32)
+
+
 def test_smooth_replay_version_closure_owns_kernel_and_time_boundary() -> None:
+    def dependency_names(component: Any) -> set[str]:
+        dependencies = cast(Any, component.version).dependencies
+        assert isinstance(dependencies, tuple)
+        return set(cast(dict[str, Any], dependencies[1]))
+
     call_dependencies = set(
         dict(
             cast(Any, internal_dataset_module._smooth_call_matrix.version).dependencies[1]
@@ -1009,6 +1271,18 @@ def test_smooth_replay_version_closure_owns_kernel_and_time_boundary() -> None:
         "_smooth_call_matrix",
         "one_minute_year_fraction",
     }
+    assert dependency_names(
+        internal_dataset_module._surface_calendar_acceptance_tolerance
+    ) == {"SanosLPSolver", "_SolverCall"}
+    assert dependency_names(internal_dataset_module._business_dte_replay) == {
+        "count_business_days_between"
+    }
+    assert {
+        "_business_dte_replay",
+        "_surface_calendar_acceptance_tolerance",
+        "_terminal_solver_events",
+        "_validate_calendar_residual",
+    } <= dependency_names(validate_fitted_partition)
 
 
 @pytest.mark.parametrize(
@@ -1317,13 +1591,14 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
         _expiry_decision(0, retained=True, support_attempt=2),
         _solver_event("surface", "optimal"),
     ]
-    internal_dataset_module._terminal_solver_events(
+    evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "test",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(0,),
     )
-    internal_dataset_module._terminal_solver_events(
+    assert evidence.terminal_solver_call.stage == "surface"
+    dlv_evidence = internal_dataset_module._terminal_solver_events(
         {
             "outcome": "completed",
             "solver_events": [_solver_event("discrete_dlv_surface", "optimal")],
@@ -1331,6 +1606,8 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
         "test DLV",
         expected_expiry_indices=None,
     )
+    assert dlv_evidence.relaxed_support == frozenset()
+    assert dlv_evidence.terminal_solver_call.stage == "discrete_dlv_surface"
     dropped = [
         _solver_event(
             "expiry_soft",
@@ -1347,15 +1624,14 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
         _expiry_decision(0, retained=False, support_attempt=None),
         _solver_event("surface", "optimal"),
     ]
-    assert (
-        internal_dataset_module._terminal_solver_events(
-            {"outcome": "completed", "solver_events": dropped},
-            "dropped test",
-            expected_expiry_indices=(0,),
-            retained_expiry_indices=(),
-        )
-        == frozenset()
+    dropped_evidence = internal_dataset_module._terminal_solver_events(
+        {"outcome": "completed", "solver_events": dropped},
+        "dropped test",
+        expected_expiry_indices=(0,),
+        retained_expiry_indices=(),
     )
+    assert dropped_evidence.relaxed_support == frozenset()
+    assert dropped_evidence.terminal_solver_call.stage == "surface"
 
 
 def test_support_mask_contract_allows_superset_only_after_second_hard_failure() -> None:
@@ -1520,13 +1796,14 @@ def test_mkarbfree_hard_fit_branches_match_diagnostic_population_contract(
         verbose=cast(Any, Context).quiet,
     )
     assert tuple(int(value) for value in result.input_index) == retained_indices
-    observed_relaxed = internal_dataset_module._terminal_solver_events(
+    observed_evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "scripted MkArbFree",
         expected_expiry_indices=(0, 1),
         retained_expiry_indices=retained_indices,
     )
-    assert observed_relaxed == relaxed_support
+    assert observed_evidence.relaxed_support == relaxed_support
+    assert observed_evidence.terminal_solver_call.stage == "surface"
     if 0 not in retained_indices:
         return
     output_index = retained_indices.index(0)

@@ -460,13 +460,19 @@ def test_structural_and_numerical_families_block_match(
 def test_tolerance_contract_is_versioned_and_frozen() -> None:
     tolerance = DailyLegacyComparisonTolerances()
     assert str(DailyLegacyComparisonTolerances.version).startswith(
-        "phase10-legacy-daily-comparison-tolerances-v3"
+        "phase10-legacy-daily-comparison-tolerances-v4"
     )
     assert tolerance.to_dict()["float32_atol"] == 0.0
     assert tolerance.to_dict()["float64_atol"] == 1.0e-12
     assert tolerance.to_dict()["reconstructed_call_atol"] == 5.0e-8
     assert tolerance.to_dict()["density_dlv_inverse_atol"] == 1.0e-12
     assert tolerance.to_dict()["dlv_fixed_point_atol"] == 1.0e-9
+    assert tolerance.to_dict()["density_calendar_validity"] == 1.0e-7
+    assert tolerance.to_dict()["clarabel_density_calendar_validity"] == 1.0e-6
+    assert (
+        tolerance.to_dict()["clarabel_reduced_density_calendar_validity"]
+        == 5.0e-5
+    )
     with pytest.raises(ValueError, match="frozen"):
         DailyLegacyComparisonTolerances(float32_atol=1.0)
     with pytest.raises(ValueError, match="frozen"):

@@ -214,6 +214,27 @@ checked at `1e-12`. The canonical serialized-state `SanosPricer` remains a
 Float64 off-grid consumer: its bridge to `smooth_call_mid` retains a `5e-8`
 acceptance gate, while the accumulated bridge to solver-time `fitsX` is a
 separately named diagnostic under CD-025.
+For the initial no-arbitrage model, quote containment is an acceptance
+criterion only for the accepted per-expiry fit (`fits1`), with the copied `1e-6`
+absolute numerical tolerance. The globally arbitrage-free surface `fitsX` is
+the copied soft closest fit and is not guaranteed to remain inside every quote.
+Its maximum masked quote-band violation is therefore recorded as
+`initial_surface_fit_quote_band_violation` in absolute normalized pure-call
+units `C/(DF*F)` over `mask_arb_free`, while its state, exact fitted-price replay,
+Black-vector replay, density constraints, and calendar no-arbitrage checks
+remain mandatory under CD-026.
+Calendar monotonicity is evaluated independently for the initial and smooth
+surfaces against each terminal accepted surface solver's feasibility contract:
+`1e-7` for the serial HiGHS solve, `1e-6` for an optimal CLARABEL fallback,
+and `5e-5` only for CLARABEL's explicit reduced-accuracy
+`optimal_inaccurate` result. The terminal solver and status remain
+authenticated by the exact diagnostic grammar, and the applied tolerances are
+recorded as `initial_surface_calendar_acceptance_tolerance` and
+`smooth_calendar_acceptance_tolerance` under CD-027.
+Business DTE validation replays the producer's operation order exactly:
+Float32 integer session count, Float64 configurable AM subtraction, clipping,
+then one final Float32 cast. This matters at the front AM expiry and is fixed
+by CD-028.
 It then fits the CD-023 canonical finite-DLV projection to the completed smooth
 surface at the same retained expiries. The projection has 200 inner nodes over
 inclusive source-smooth NMS `[-3,2]`, one exact ATM node, support boundaries at

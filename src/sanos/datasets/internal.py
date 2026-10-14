@@ -36,7 +36,7 @@ from sanos.artifacts import (
 from sanos.config import StorageLocations, canonical_json, canonical_sha256, canonical_value
 from sanos.datasets.config import DatasetBuildOptions, InternalDatasetConfig
 from sanos.model.constants import one_minute_year_fraction
-from sanos.model.tools import SanosPricer
+from sanos.model.tools import SanosLPSolver, SanosPricer
 from sanos.pipeline import DailyRunSummary, RunJournal
 from sanos.resources import packaged_source_revision
 from sanos.widb.bad import bad_data_policy, bad_day_reason
@@ -81,9 +81,9 @@ RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
 INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v4"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
 LINEAGE_SCHEMA = "sanos-internal-lineage-v1"
-VALIDATION_SCHEMA = "sanos-internal-validation-v5"
+VALIDATION_SCHEMA = "sanos-internal-validation-v6"
 DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v4"
-LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v3"
+LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v4"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _PARTITION_PATH = re.compile(
@@ -251,6 +251,15 @@ class _SolverCall:
 
 
 @version("1.0", dependencies=[_SolverCall])
+@dataclass(frozen=True, slots=True)
+class _TerminalSolverEvidence:
+    """Validated terminal surface call and any intentionally relaxed support."""
+
+    relaxed_support: frozenset[int]
+    terminal_solver_call: _SolverCall
+
+
+@version("1.0", dependencies=[_SolverCall])
 def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
     """Parse and validate the exact diagnostic event and fallback grammar."""
 
@@ -356,14 +365,14 @@ def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
     return calls
 
 
-@version("4.0", dependencies=[_solver_calls])
+@version("5.0", dependencies=[_solver_calls, _TerminalSolverEvidence])
 def _terminal_solver_events(
     value: Mapping[str, Any],
     label: str,
     *,
     expected_expiry_indices: tuple[int, ...] | None,
     retained_expiry_indices: tuple[int, ...] | None = None,
-) -> frozenset[int]:
+) -> _TerminalSolverEvidence:
     """Validate successful solver calls and the intentional hard-fit fallback."""
 
     if value.get("outcome") != "completed":
@@ -382,7 +391,10 @@ def _terminal_solver_events(
             _fail(f"{label} diagnostics discrete-DLV solve did not succeed directly")
         if retained_expiry_indices is not None:
             _fail(f"{label} diagnostics received unexpected retained expiry indices")
-        return frozenset()
+        return _TerminalSolverEvidence(
+            relaxed_support=frozenset(),
+            terminal_solver_call=calls[0],
+        )
 
     if retained_expiry_indices is None:
         _fail(f"{label} diagnostics has no retained-expiry contract")
@@ -503,7 +515,10 @@ def _terminal_solver_events(
             f"{label} diagnostics retained-expiry population changed: expected "
             f"{tuple(predicted_retained)}, observed {retained_expiry_indices}"
         )
-    return frozenset(relaxed_support)
+    return _TerminalSolverEvidence(
+        relaxed_support=frozenset(relaxed_support),
+        terminal_solver_call=surface_calls[0],
+    )
 
 
 @version("1.0")
@@ -530,11 +545,31 @@ def _max_abs(left: np.ndarray[Any, Any], right: np.ndarray[Any, Any]) -> float:
 
 
 @version("1.0")
+def _validate_calendar_residual(
+    residual: float,
+    *,
+    tolerance: float,
+    label: str,
+) -> None:
+    """Apply one inclusive finite calendar-feasibility boundary."""
+    if (
+        not np.isfinite(residual)
+        or residual < 0.0
+        or not np.isfinite(tolerance)
+        or tolerance < 0.0
+    ):
+        _fail(f"{label} has an invalid calendar residual or tolerance")
+    if residual > tolerance:
+        _fail(f"{label} normalized calls violate calendar monotonicity")
+
+
+@version("1.2", dependencies=[_validate_calendar_residual])
 def _validate_pricer_state(
     pricer: Any,
     label: str,
     *,
     check_dlvs: bool,
+    calendar_tolerance: float = 1.0e-7,
 ) -> dict[str, float]:
     expiries = np.asarray(pricer.expiries, dtype=np.float64)
     variances = np.asarray(pricer.variances, dtype=np.float64)
@@ -620,8 +655,11 @@ def _validate_pricer_state(
         _fail(f"{label} normalized calls violate decreasing/convex strike shape")
     if bounds_residual > 1.0e-7:
         _fail(f"{label} normalized calls violate model-free bounds")
-    if calendar_residual > 1.0e-7:
-        _fail(f"{label} normalized calls violate calendar monotonicity")
+    _validate_calendar_residual(
+        calendar_residual,
+        tolerance=calendar_tolerance,
+        label=label,
+    )
     return {
         "bounds": bounds_residual,
         "calendar": calendar_residual,
@@ -630,6 +668,57 @@ def _validate_pricer_state(
         "density_moment": moment_residual,
         "strike_shape": strike_shape_residual,
     }
+
+
+@version("2.0", dependencies=[SanosLPSolver, _SolverCall])
+def _surface_calendar_acceptance_tolerance(
+    terminal_solver_call: _SolverCall,
+    label: str,
+) -> float:
+    """Return the feasibility tolerance of the accepted surface solve."""
+
+    if terminal_solver_call.stage != "surface" or terminal_solver_call.terminal_status not in {
+        "optimal",
+        "optimal_inaccurate",
+    }:
+        _fail(f"{label} diagnostics has no accepted surface solve")
+    _, settings = SanosLPSolver()._lp_solver_settings(
+        for_expiry=False,
+        is_fallback=terminal_solver_call.used_fallback,
+    )
+    if not terminal_solver_call.used_fallback:
+        return float(settings["highs_options"]["kkt_tolerance"])
+    key = (
+        "tol_feas"
+        if terminal_solver_call.terminal_status == "optimal"
+        else "reduced_tol_feas"
+    )
+    return float(settings[key])
+
+
+@version(
+    "producer-float32-count-float64-overnight-final-float32-v1",
+    dependencies=[count_business_days_between],
+)
+def _business_dte_replay(
+    *,
+    trading_date: date,
+    expiry_dates: np.ndarray[Any, Any],
+    expiry_is_am: np.ndarray[Any, Any],
+    am_business_day_subtraction: float,
+) -> np.ndarray[Any, Any]:
+    """Replay the daily producer's dtype-sensitive AM/PM business clock."""
+
+    integer_business_dte = np.asarray(
+        count_business_days_between(trading_date, expiry_dates),
+        dtype=np.float32,
+    )
+    return np.clip(
+        integer_business_dte
+        - np.where(expiry_is_am, am_business_day_subtraction, 0.0),
+        a_min=0.0,
+        a_max=None,
+    ).astype(np.float32)
 
 
 @version("1.0")
@@ -1027,6 +1116,69 @@ def _validate_smooth_canonical_market_fit_bridge(
     if residual > _smooth_canonical_market_fit_bridge_tolerance():
         _fail(
             f"{label}: smooth canonical market-fit bridge residual is {residual}"
+        )
+
+
+@version("initial-expiry-quote-containment-1e-6-v1")
+def _initial_expiry_quote_containment_tolerance() -> float:
+    """Return the copied per-expiry fitter's absolute quote-band tolerance."""
+
+    return 1.0e-6
+
+
+@version("1.0")
+def _masked_quote_band_residual(
+    *,
+    bids: np.ndarray[Any, Any],
+    asks: np.ndarray[Any, Any],
+    fits: np.ndarray[Any, Any],
+    mask: np.ndarray[Any, Any],
+) -> float:
+    """Return the maximum absolute quote-band violation on retained rows."""
+
+    bid_values = np.asarray(bids)
+    ask_values = np.asarray(asks)
+    fit_values = np.asarray(fits)
+    mask_values = np.asarray(mask, dtype=bool)
+    if not (
+        bid_values.shape
+        == ask_values.shape
+        == fit_values.shape
+        == mask_values.shape
+    ):
+        _fail("initial quote-band residual inputs have inconsistent shapes")
+    if not np.any(mask_values):
+        return 0.0
+    below = np.maximum(bid_values - fit_values, 0.0)
+    above = np.maximum(fit_values - ask_values, 0.0)
+    return float(np.max(np.maximum(below[mask_values], above[mask_values])))
+
+
+@version("1.1", dependencies=[_initial_expiry_quote_containment_tolerance])
+def _validate_initial_fit_quote_contract(
+    *,
+    expiry_fit_residual: float,
+    surface_fit_residual: float,
+    label: str,
+) -> None:
+    """Enforce quote containment only for the copied accepted per-expiry fit.
+
+    ``MkArbFree.fits1`` is accepted only inside the quote band up to its
+    numerical tolerance. ``fitsX`` is a globally arbitrage-free soft closest
+    fit and is explicitly allowed to leave the quote band; its residual remains
+    a validation diagnostic rather than an acceptance criterion.
+    """
+
+    for name, residual in (
+        ("expiry-fit", expiry_fit_residual),
+        ("surface-fit", surface_fit_residual),
+    ):
+        if not np.isfinite(residual) or residual < 0.0:
+            _fail(f"{label}: initial {name} quote-band residual is invalid")
+    if expiry_fit_residual > _initial_expiry_quote_containment_tolerance():
+        _fail(
+            f"{label}: initial expiry-fit quote containment residual is "
+            f"{expiry_fit_residual}"
         )
 
 
@@ -1654,7 +1806,7 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "4.2",
+    "4.3",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
@@ -1663,6 +1815,9 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _terminal_solver_events,
         _max_abs,
         _validate_pricer_state,
+        _validate_calendar_residual,
+        _surface_calendar_acceptance_tolerance,
+        _business_dte_replay,
         _expiry_state_pricer,
         _validate_support_mask_geometry,
         _black_vector_residual,
@@ -1671,6 +1826,8 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _merge_black_vector_residuals,
         _smooth_producer_replay,
         _validate_smooth_canonical_market_fit_bridge,
+        _masked_quote_band_residual,
+        _validate_initial_fit_quote_contract,
         _validate_fitted_numeric_finiteness,
         _canonical_discrete_dlv_densities,
         _canonical_discrete_dlv_squares,
@@ -1972,12 +2129,13 @@ def validate_fitted_partition(
         .drop_nulls()
         .unique(maintain_order=True)
     )
-    initial_relaxed_support = _terminal_solver_events(
+    initial_solver_evidence = _terminal_solver_events(
         no_arb,
         "no-arbitrage",
         expected_expiry_indices=no_arb_solver_indices,
         retained_expiry_indices=initial_retained_indices,
     )
+    initial_relaxed_support = initial_solver_evidence.relaxed_support
     input_expiry_ids = frame.get_column("expiry_id").unique(maintain_order=True).to_list()
     retained_expiry_ids = (
         frame.filter(pl.col("initial_no_arb_expiry_retained"))
@@ -1986,6 +2144,7 @@ def validate_fitted_partition(
         .to_list()
     )
     smooth_relaxed_support: frozenset[int] = frozenset()
+    smooth_solver_evidence: _TerminalSolverEvidence | None = None
     if np.any(selected):
         smooth_solver_indices = _expected_solver_expiry_indices(
             frame,
@@ -1998,12 +2157,13 @@ def validate_fitted_partition(
             .drop_nulls()
             .unique(maintain_order=True)
         )
-        smooth_relaxed_support = _terminal_solver_events(
+        smooth_solver_evidence = _terminal_solver_events(
             smooth,
             "smooth",
             expected_expiry_indices=smooth_solver_indices,
             retained_expiry_indices=smooth_retained_indices,
         )
+        smooth_relaxed_support = smooth_solver_evidence.relaxed_support
         _terminal_solver_events(
             dlv_diagnostics,
             "discrete-DLV",
@@ -2052,19 +2212,12 @@ def validate_fitted_partition(
     observed_calendar_dte = frame.get_column("calendar_dte").to_numpy()
     if not np.array_equal(observed_calendar_dte, expected_calendar_dte):
         _fail(f"{trading_date}: calendar_dte differs from expiry_date minus trading_date")
-    integer_business_dte = np.asarray(
-        count_business_days_between(trading_date, expiry_dates), dtype=np.float32
+    expected_business_dte = _business_dte_replay(
+        trading_date=trading_date,
+        expiry_dates=expiry_dates,
+        expiry_is_am=expiry_is_am,
+        am_business_day_subtraction=config.daily.clock.am_business_day_subtraction,
     )
-    expected_business_dte = np.clip(
-        integer_business_dte
-        - np.where(
-            expiry_is_am,
-            np.float32(config.daily.clock.am_business_day_subtraction),
-            np.float32(0.0),
-        ),
-        a_min=np.float32(0.0),
-        a_max=None,
-    ).astype(np.float32)
     observed_business_dte = frame.get_column("business_dte").to_numpy()
     if not np.array_equal(observed_business_dte, expected_business_dte):
         _fail(
@@ -2347,6 +2500,24 @@ def validate_fitted_partition(
 
     initial_surface_pricer = initial_no_arb_pricer(frame)
     smooth_pricer = smooth_sanos_pricer(frame) if np.any(selected) else None
+    initial_surface_calendar_tolerance = _surface_calendar_acceptance_tolerance(
+        initial_solver_evidence.terminal_solver_call,
+        f"{trading_date} initial",
+    )
+    smooth_calendar_tolerance = (
+        0.0
+        if smooth_pricer is None
+        else _surface_calendar_acceptance_tolerance(
+            cast(_TerminalSolverEvidence, smooth_solver_evidence).terminal_solver_call,
+            f"{trading_date} smooth",
+        )
+    )
+    initial_surface_state_residuals = _validate_pricer_state(
+        initial_surface_pricer,
+        "initial SANOS state",
+        check_dlvs=False,
+        calendar_tolerance=initial_surface_calendar_tolerance,
+    )
     dlv_state_residuals: dict[str, float] = {}
     smooth_state_residuals = (
         {}
@@ -2355,6 +2526,7 @@ def validate_fitted_partition(
             smooth_pricer,
             "smooth SANOS state",
             check_dlvs=False,
+            calendar_tolerance=smooth_calendar_tolerance,
         )
     )
     dlv_density_error = 0.0
@@ -2595,8 +2767,8 @@ def validate_fitted_partition(
     expiry_fit_reconstruction = 0.0
     expiry_fit_contract_excess = 0.0
     expiry_fit_black_roundtrip = 0.0
-    quote_containment = 0.0
-    expiry_quote_containment = 0.0
+    initial_surface_fit_quote_band_violation = 0.0
+    expiry_fit_quote_containment = 0.0
     fitted_black_vector_residual = _merge_black_vector_residuals()
     for model_index, (input_index, expiry) in enumerate(
         zip(initial_state_indices, initial_surface_pricer.expiries, strict=True)
@@ -2684,24 +2856,22 @@ def validate_fitted_partition(
         )
         local_mask = rows["mask_arb_free"].to_numpy().astype(bool)
         if np.any(local_mask):
-            below = np.maximum(rows["pure_bid_price"].to_numpy() - observed, 0.0)
-            above = np.maximum(observed - rows["pure_ask_price"].to_numpy(), 0.0)
-            expiry_below = np.maximum(
-                rows["pure_bid_price"].to_numpy() - expiry_observed, 0.0
+            initial_surface_fit_quote_band_violation = max(
+                initial_surface_fit_quote_band_violation,
+                _masked_quote_band_residual(
+                    bids=rows["pure_bid_price"].to_numpy(),
+                    asks=rows["pure_ask_price"].to_numpy(),
+                    fits=observed,
+                    mask=local_mask,
+                ),
             )
-            expiry_above = np.maximum(
-                expiry_observed - rows["pure_ask_price"].to_numpy(), 0.0
-            )
-            quote_containment = max(
-                quote_containment,
-                float(np.max(np.maximum(below[local_mask], above[local_mask]))),
-            )
-            expiry_quote_containment = max(
-                expiry_quote_containment,
-                float(
-                    np.max(
-                        np.maximum(expiry_below[local_mask], expiry_above[local_mask])
-                    )
+            expiry_fit_quote_containment = max(
+                expiry_fit_quote_containment,
+                _masked_quote_band_residual(
+                    bids=rows["pure_bid_price"].to_numpy(),
+                    asks=rows["pure_ask_price"].to_numpy(),
+                    fits=expiry_observed,
+                    mask=local_mask,
                 ),
             )
     if initial_surface_fit_contract_excess > 0.0:
@@ -2721,13 +2891,11 @@ def validate_fitted_partition(
             f"{trading_date}: stored fitted Black vector exceeds its persisted "
             f"Float32 contract by {fitted_black_vector_residual.maximum_excess}"
         )
-    if quote_containment > 1.0e-6:
-        _fail(f"{trading_date}: initial quote containment residual is {quote_containment}")
-    if expiry_quote_containment > 1.0e-6:
-        _fail(
-            f"{trading_date}: initial expiry-fit quote containment residual is "
-            f"{expiry_quote_containment}"
-        )
+    _validate_initial_fit_quote_contract(
+        expiry_fit_residual=expiry_fit_quote_containment,
+        surface_fit_residual=initial_surface_fit_quote_band_violation,
+        label=str(trading_date),
+    )
 
     smooth_reconstruction = 0.0
     smooth_expiry_reconstruction = 0.0
@@ -2855,8 +3023,11 @@ def validate_fitted_partition(
                     float(np.max(np.maximum(previous_calls - calls, 0.0))),
                 )
             previous_calls = calls
-        if calendar_residual > 1.0e-7:
-            _fail(f"{trading_date}: smooth calendar residual is {calendar_residual}")
+        _validate_calendar_residual(
+            calendar_residual,
+            tolerance=smooth_calendar_tolerance,
+            label=f"{trading_date}: smooth state",
+        )
     else:
         for column in (
             "smooth_call_mid",
@@ -2918,7 +3089,7 @@ def validate_fitted_partition(
         "dlv_minimum_bound_shortfall": dlv_minimum_bound_shortfall,
         "dlv_maximum_bound_excess": dlv_maximum_bound_excess,
         "dlv_density_roundtrip": dlv_density_error,
-        "expiry_fit_quote_containment": expiry_quote_containment,
+        "expiry_fit_quote_containment": expiry_fit_quote_containment,
         "expiry_fit_reconstruction": expiry_fit_reconstruction,
         "expiry_fit_contract_excess": expiry_fit_contract_excess,
         "expiry_fit_black_roundtrip": expiry_fit_black_roundtrip,
@@ -2926,13 +3097,18 @@ def validate_fitted_partition(
         "normalized_strike": strike_residual,
         "previous_spot_over_spot": previous_spot_residual,
         "put_call_parity": put_call_residual,
-        "quote_containment": quote_containment,
+        "initial_surface_fit_quote_band_violation": (
+            initial_surface_fit_quote_band_violation
+        ),
         "initial_surface_fit_reconstruction": initial_surface_fit_reconstruction,
         "initial_surface_fit_contract_excess": (
             initial_surface_fit_contract_excess
         ),
         "initial_surface_fit_black_roundtrip": (
             initial_surface_fit_black_roundtrip
+        ),
+        "initial_surface_calendar_acceptance_tolerance": (
+            initial_surface_calendar_tolerance
         ),
         "smooth_expiry_reconstruction": smooth_expiry_reconstruction,
         "smooth_surface_fit_reconstruction": smooth_surface_fit_reconstruction,
@@ -2944,9 +3120,14 @@ def validate_fitted_partition(
         "smooth_canonical_surface_fit_bridge": (
             smooth_canonical_surface_fit_bridge
         ),
+        "smooth_calendar_acceptance_tolerance": smooth_calendar_tolerance,
         "spot_reference": spot_reference_residual,
         "spot_normalized_strike": spot_strike_residual,
         **{f"initial_expiry_{name}": value for name, value in initial_expiry_residuals.items()},
+        **{
+            f"initial_surface_{name}": value
+            for name, value in initial_surface_state_residuals.items()
+        },
         **{f"smooth_expiry_{name}": value for name, value in smooth_expiry_residuals.items()},
         **{f"dlv_{name}": value for name, value in dlv_state_residuals.items()},
         **{f"smooth_{name}": value for name, value in smooth_state_residuals.items()},
@@ -3624,7 +3805,7 @@ Intermediate artifacts. Deep lineage validation deliberately does. Dataset ident
 """
 
 
-@version("1.1")
+@version("1.2")
 def _legacy_comparison_document(config: InternalDatasetConfig) -> dict[str, Any]:
     return {
         "schema": LEGACY_COMPARISON_SCHEMA,

@@ -115,7 +115,7 @@ class ReferenceComparisonError(RuntimeError):
     """Raised when comparison evidence is missing, malformed, or unsafe."""
 
 
-@version("phase10-legacy-daily-comparison-tolerances-v3")
+@version("phase10-legacy-daily-comparison-tolerances-v4")
 @dataclass(frozen=True, slots=True)
 class DailyLegacyComparisonTolerances:
     """Frozen parity and invariant tolerances for the migration oracle."""
@@ -126,6 +126,8 @@ class DailyLegacyComparisonTolerances:
     density_dlv_inverse_atol: float = 1.0e-12
     dlv_fixed_point_atol: float = 1.0e-9
     density_calendar_validity: float = 1.0e-7
+    clarabel_density_calendar_validity: float = 1.0e-6
+    clarabel_reduced_density_calendar_validity: float = 5.0e-5
     quote_containment_validity: float = 1.0e-6
     density_mass_moment_validity: float = 1.0e-4
 
@@ -137,6 +139,8 @@ class DailyLegacyComparisonTolerances:
             "density_dlv_inverse_atol": 1.0e-12,
             "dlv_fixed_point_atol": 1.0e-9,
             "density_calendar_validity": 1.0e-7,
+            "clarabel_density_calendar_validity": 1.0e-6,
+            "clarabel_reduced_density_calendar_validity": 5.0e-5,
             "quote_containment_validity": 1.0e-6,
             "density_mass_moment_validity": 1.0e-4,
         }
