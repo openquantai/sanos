@@ -22,7 +22,8 @@ import sanos.widb.surface as surface_module
 from sanos.config import canonical_json, canonical_sha256
 from sanos.datasets import InternalDatasetConfig
 from sanos.datasets.internal import DatasetValidationError, validate_fitted_partition
-from sanos.model import MkArbFree
+from sanos.model import ArbFreePricer, MkArbFree
+from sanos.model.constants import ONE_MINUTE
 from sanos.widb import (
     ENRICHED_SCHEMA,
     FILTERED_SCHEMA,
@@ -850,6 +851,232 @@ def test_two_expiry_fitted_frame_passes_dataset_quantitative_boundary(
     assert statistics.residual_maxima["initial_surface_fit_black_roundtrip"] == 0.0
     assert statistics.residual_maxima["expiry_fit_black_roundtrip"] == 0.0
     assert statistics.residual_maxima["dlv_density_roundtrip"] <= 2.0e-14
+    assert statistics.residual_maxima["smooth_expiry_reconstruction"] <= 1.0e-12
+    assert statistics.residual_maxima["smooth_surface_fit_reconstruction"] <= 1.0e-12
+    assert statistics.residual_maxima["smooth_reconstruction"] <= 1.0e-12
+
+
+def test_smooth_producer_observables_have_distinct_exact_replays(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    selected = fitted.get_column("options_filter_eligible").to_numpy().astype(bool)
+    expiry_ids = fitted.get_column("expiry_id").to_numpy()
+    selected_expiry_ids = (
+        fitted.filter(pl.Series(selected))
+        .get_column("expiry_id")
+        .unique(maintain_order=True)
+        .to_list()
+    )
+    groups = [
+        fitted.filter(pl.Series(selected & (expiry_ids == expiry_id)))
+        for expiry_id in selected_expiry_ids
+    ]
+    replay = internal_dataset_module._smooth_producer_replay(
+        fitted,
+        selected_groups=groups,
+        smoothness=0.25,
+        min_half_spread=1.0e-4,
+    )
+    for model_index, input_index in enumerate(replay.retained_input_indices):
+        group = groups[input_index]
+        np.testing.assert_array_equal(
+            replay.expiry_fits[model_index],
+            group.get_column("smooth_expiry_fit_price").to_numpy(),
+        )
+        np.testing.assert_array_equal(
+            replay.surface_fits[model_index],
+            group.get_column("smooth_surface_fit_price").to_numpy(),
+        )
+        support64 = np.asarray(
+            group.get_column("smooth_surface_model_strikes").item(0),
+            dtype=np.float64,
+        )
+        np.testing.assert_array_equal(
+            support64,
+            support64.astype(np.float32).astype(np.float64),
+        )
+        assert group.get_column("normalized_strike").dtype == pl.Float32
+    for group, fitted_values, fit_errors in zip(
+        groups,
+        replay.market_fits,
+        replay.market_fit_errors,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(
+            fitted_values,
+            group.get_column("smooth_call_mid").to_numpy(),
+        )
+        np.testing.assert_array_equal(
+            fit_errors,
+            group.get_column("smooth_fit_error_half_spreads").to_numpy(),
+        )
+    assert any(
+        not np.array_equal(
+            replay.surface_fits[model_index],
+            replay.market_fits[input_index],
+        )
+        for model_index, input_index in enumerate(replay.retained_input_indices)
+    )
+
+
+def test_smooth_market_replay_matches_all_legacy_time_regions() -> None:
+    smoothness = 0.25
+    expiries = np.asarray([0.1, 0.2], dtype=np.float64)
+    variances = np.asarray([0.01, 0.03], dtype=np.float64)
+    supports = [
+        np.asarray([0.8, 1.0, 1.2], dtype=np.float32),
+        np.asarray([0.7, 1.0, 1.3], dtype=np.float32),
+    ]
+    densities = [
+        np.asarray([0.25, 0.5, 0.25], dtype=np.float64),
+        np.asarray([0.25, 0.5, 0.25], dtype=np.float64),
+    ]
+    strikes = np.asarray([0.8, 1.0, 1.2], dtype=np.float32)
+    legacy = ArbFreePricer(smoothness=smoothness)
+    legacy.expiries = expiries
+    legacy.variances = variances
+    legacy.xstrikes = supports
+    legacy.xdensities = densities
+    legacy.mstrikes = supports
+    legacy.mdensities = densities
+    legacy.fitsX = [np.zeros_like(strikes), np.zeros_like(strikes)]
+    legacy.expiry_linear = True
+
+    queries = (
+        0.0,
+        ONE_MINUTE / 2.0,
+        np.nextafter(ONE_MINUTE, 0.0),
+        ONE_MINUTE,
+        0.05,
+        0.1,
+        0.1 + ONE_MINUTE / 2.0,
+        0.15,
+        0.25,
+    )
+    for expiry in queries:
+        expected = legacy.price(expiry, strikes, and_vols=False, mode="surface")
+        observed = internal_dataset_module._smooth_market_fit_prices(
+            expiry=expiry,
+            strikes32=strikes,
+            smoothness=smoothness,
+            expiries64=expiries,
+            variances64=variances,
+            surface_supports=supports,
+            surface_densities=densities,
+        )
+        np.testing.assert_array_equal(observed, expected)
+
+
+def test_smooth_canonical_market_bridge_retains_frozen_acceptance_gate() -> None:
+    tolerance = (
+        internal_dataset_module._smooth_canonical_market_fit_bridge_tolerance()
+    )
+    internal_dataset_module._validate_smooth_canonical_market_fit_bridge(
+        tolerance,
+        label="boundary",
+    )
+    with pytest.raises(
+        DatasetValidationError,
+        match="canonical market-fit bridge residual",
+    ):
+        internal_dataset_module._validate_smooth_canonical_market_fit_bridge(
+            np.nextafter(tolerance, np.inf),
+            label="boundary",
+        )
+
+
+def test_smooth_replay_version_closure_owns_kernel_and_time_boundary() -> None:
+    call_dependencies = set(
+        dict(
+            cast(Any, internal_dataset_module._smooth_call_matrix.version).dependencies[1]
+        )
+    )
+    market_dependencies = set(
+        dict(
+            cast(
+                Any,
+                internal_dataset_module._smooth_market_fit_prices.version,
+            ).dependencies[1]
+        )
+    )
+    assert call_dependencies == {
+        "_smooth_black_price",
+        "_smooth_black_price_epsilon",
+        "one_minute_year_fraction",
+    }
+    assert market_dependencies == {
+        "_smooth_call_matrix",
+        "one_minute_year_fraction",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    (
+        ("smooth_expiry_fit_price", "expiry-fit producer replay"),
+        ("smooth_surface_fit_price", "surface-fit producer replay"),
+        ("smooth_call_mid", "smooth market-fit values or errors"),
+    ),
+)
+def test_partition_validator_rejects_each_smooth_producer_observable_independently(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+    field: str,
+    expected: str,
+) -> None:
+    fitted = phase6_frames[-1]
+    corrupted = fitted.with_columns((pl.col(field) + 1.0e-9).alias(field))
+    if field == "smooth_call_mid":
+        corrupted = corrupted.with_columns(
+            (pl.col("smooth_put_mid") + 1.0e-9).alias("smooth_put_mid")
+        )
+    config = InternalDatasetConfig(
+        name=f"smooth-replay-{field}",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=DailySurfaceConfig(),
+    )
+    with pytest.raises(DatasetValidationError, match=expected):
+        validate_fitted_partition(
+            corrupted,
+            config=config,
+            trading_date=date(2024, 1, 3),
+            typed_empty_reason=None,
+        )
+
+
+def test_smooth_producer_replay_rejects_non_lossless_float32_support(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    corrupted = fitted.with_columns(
+        pl.col("smooth_surface_model_strikes")
+        .list.eval(pl.element() + 1.0e-10)
+        .alias("smooth_surface_model_strikes")
+    )
+    selected = corrupted.get_column("options_filter_eligible").to_numpy().astype(bool)
+    expiry_ids = corrupted.get_column("expiry_id").to_numpy()
+    groups = [
+        corrupted.filter(pl.Series(selected & (expiry_ids == expiry_id)))
+        for expiry_id in (
+            corrupted.filter(pl.Series(selected))
+            .get_column("expiry_id")
+            .unique(maintain_order=True)
+            .to_list()
+        )
+    ]
+    with pytest.raises(DatasetValidationError, match="lossless serialization"):
+        internal_dataset_module._smooth_producer_replay(
+            corrupted,
+            selected_groups=groups,
+            smoothness=0.25,
+            min_half_spread=1.0e-4,
+        )
 
 
 def test_initial_fit_price_contract_includes_black_tolerance_and_float32_ulp() -> None:

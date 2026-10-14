@@ -207,6 +207,13 @@ columns: `smooth_expiry_fit_price` is the retained per-expiry fit (`fits1`),
 `smooth_call_mid` is the quote-aligned result returned by
 `compute_market_fit().fits`. The last two are numerically close but are not
 interchangeable.
+Validation replays all three producer paths separately under their original
+Float32 support/strike arithmetic and operation ordering, including the direct
+intrinsic-value rule below one model minute. Each persisted producer field is
+checked at `1e-12`. The canonical serialized-state `SanosPricer` remains a
+Float64 off-grid consumer: its bridge to `smooth_call_mid` retains a `5e-8`
+acceptance gate, while the accumulated bridge to solver-time `fitsX` is a
+separately named diagnostic under CD-025.
 It then fits the CD-023 canonical finite-DLV projection to the completed smooth
 surface at the same retained expiries. The projection has 200 inner nodes over
 inclusive source-smooth NMS `[-3,2]`, one exact ATM node, support boundaries at

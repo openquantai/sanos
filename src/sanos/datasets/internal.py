@@ -35,6 +35,7 @@ from sanos.artifacts import (
 )
 from sanos.config import StorageLocations, canonical_json, canonical_sha256, canonical_value
 from sanos.datasets.config import DatasetBuildOptions, InternalDatasetConfig
+from sanos.model.constants import one_minute_year_fraction
 from sanos.model.tools import SanosPricer
 from sanos.pipeline import DailyRunSummary, RunJournal
 from sanos.resources import packaged_source_revision
@@ -80,7 +81,7 @@ RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
 INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v4"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
 LINEAGE_SCHEMA = "sanos-internal-lineage-v1"
-VALIDATION_SCHEMA = "sanos-internal-validation-v4"
+VALIDATION_SCHEMA = "sanos-internal-validation-v5"
 DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v4"
 LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v3"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
@@ -883,6 +884,321 @@ class _BlackSourceVectorResiduals:
 
 
 @version("1.0")
+@dataclass(frozen=True, slots=True)
+class _SmoothProducerReplay:
+    """Exact producer observables recovered from serialized smooth state."""
+
+    retained_input_indices: tuple[int, ...]
+    expiry_fits: tuple[np.ndarray[Any, Any], ...]
+    surface_fits: tuple[np.ndarray[Any, Any], ...]
+    market_fits: tuple[np.ndarray[Any, Any], ...]
+    market_fit_errors: tuple[np.ndarray[Any, Any], ...]
+    pcnt_fit: float
+    median_error: float
+    mean_error: float
+    median_total_error: float
+    mean_total_error: float
+
+
+@version("1.0")
+def _exact_float32_state(values: Any, label: str) -> np.ndarray[Any, Any]:
+    """Recover producer Float32 state only when serialization was lossless."""
+
+    values64 = np.asarray(values, dtype=np.float64)
+    values32 = values64.astype(np.float32)
+    if not np.array_equal(values64, values32.astype(np.float64)):
+        _fail(f"{label} is not a lossless serialization of producer Float32 state")
+    return values32
+
+
+@version("cdxcore-bs-price-kernel-2026-10-v1")
+def _smooth_black_price(*args: Any, **kwargs: Any) -> np.ndarray[Any, Any]:
+    """Version-owned adapter for the copied smooth producer's Black kernel."""
+
+    return np.asarray(bs.price(*args, **kwargs))
+
+
+@version("sanos-smooth-black-price-epsilon-1e-6-v1")
+def _smooth_black_price_epsilon() -> float:
+    """Return the copied smooth producer's Black price epsilon."""
+
+    return 1.0e-6
+
+
+@version(
+    "1.0",
+    dependencies=[
+        _smooth_black_price,
+        _smooth_black_price_epsilon,
+        one_minute_year_fraction,
+    ],
+)
+def _smooth_call_matrix(
+    *,
+    expiry: float | np.floating[Any],
+    strikes: np.ndarray[Any, Any],
+    support: np.ndarray[Any, Any],
+    volatility: float | np.floating[Any],
+) -> np.ndarray[Any, Any]:
+    """Replay the copied fitter's dtype-sensitive smooth Black kernel."""
+
+    if float(expiry) < one_minute_year_fraction() or float(volatility) == 0.0:
+        return np.maximum(
+            np.float32(0.0),
+            support[None, :] - strikes[:, None],
+        )
+    return (
+        _smooth_black_price(
+            k=strikes[:, None] / support[None, :],
+            vol=volatility,
+            sqrtT=math.sqrt(expiry),
+            eps=_smooth_black_price_epsilon(),
+        )
+        * support[None, :]
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[_smooth_call_matrix, one_minute_year_fraction],
+)
+def _smooth_market_fit_prices(
+    *,
+    expiry: float | np.floating[Any],
+    strikes32: np.ndarray[Any, Any],
+    smoothness: float,
+    expiries64: np.ndarray[Any, Any],
+    variances64: np.ndarray[Any, Any],
+    surface_supports: list[np.ndarray[Any, Any]],
+    surface_densities: list[np.ndarray[Any, Any]],
+) -> np.ndarray[Any, Any]:
+    """Replay copied ``ArbFreePricer.price(..., mode='surface')`` semantics."""
+
+    if float(expiry) < one_minute_year_fraction():
+        return np.maximum(np.float32(0.0), np.float32(1.0) - strikes32)
+
+    clipped = np.float64(np.clip(expiry, expiries64[0], expiries64[-1]))
+    variance = np.float64(np.interp(clipped, expiries64, variances64))
+    market_volatility = np.sqrt(variance / clipped) * math.sqrt(smoothness)
+
+    def at_state(index: int) -> np.ndarray[Any, Any]:
+        return (
+            _smooth_call_matrix(
+                expiry=expiry,
+                strikes=strikes32,
+                support=surface_supports[index],
+                volatility=market_volatility,
+            )
+            @ surface_densities[index]
+        )
+
+    insertion = int(np.searchsorted(expiries64, expiry))
+    if insertion == 0:
+        return at_state(0)
+    if insertion == len(expiries64):
+        return at_state(len(expiries64) - 1)
+    left_distance = abs(expiry - expiries64[insertion - 1])
+    right_distance = abs(expiry - expiries64[insertion])
+    if min(left_distance, right_distance) < one_minute_year_fraction():
+        return at_state(insertion if right_distance < left_distance else insertion - 1)
+    left = at_state(insertion - 1)
+    right = at_state(insertion)
+    return (
+        (expiry - expiries64[insertion - 1]) * right
+        + (expiries64[insertion] - expiry) * left
+    ) / (expiries64[insertion] - expiries64[insertion - 1])
+
+
+@version("1.0")
+def _smooth_canonical_market_fit_bridge_tolerance() -> float:
+    """Bound the copied listed-price path against canonical Float64 SANOS."""
+
+    return 5.0e-8
+
+
+@version("1.0", dependencies=[_smooth_canonical_market_fit_bridge_tolerance])
+def _validate_smooth_canonical_market_fit_bridge(
+    residual: float,
+    *,
+    label: str,
+) -> None:
+    """Reject a canonical consumer that diverges from the producer market fit."""
+
+    if residual > _smooth_canonical_market_fit_bridge_tolerance():
+        _fail(
+            f"{label}: smooth canonical market-fit bridge residual is {residual}"
+        )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        _SmoothProducerReplay,
+        _exact_float32_state,
+        _smooth_call_matrix,
+        _smooth_market_fit_prices,
+    ],
+)
+def _smooth_producer_replay(
+    frame: pl.DataFrame,
+    *,
+    selected_groups: list[pl.DataFrame],
+    smoothness: float,
+    min_half_spread: float,
+) -> _SmoothProducerReplay:
+    """Replay fits1, fitsX, and market-fit output under their producer contracts.
+
+    The copied fitter deliberately receives Float32 market inputs.  Its expiry
+    and common-surface supports remain Float32 in memory but are serialized in
+    Float64 list columns without loss.  The solver-time ``fitsX`` kernel and
+    the later ``compute_market_fit`` kernel also use algebraically equivalent,
+    numerically distinct volatility expressions.  Replaying each observable
+    separately prevents the canonical Float64 :class:`SanosPricer` contract
+    from being conflated with either producer audit field.
+    """
+
+    state = frame.filter(pl.col("smooth_input_expiry_index").is_not_null()).sort(
+        "smooth_input_expiry_index"
+    )
+    retained_indices = tuple(
+        int(value)
+        for value in state.get_column("smooth_input_expiry_index")
+        .unique(maintain_order=True)
+        .to_list()
+    )
+    if not retained_indices:
+        _fail("smooth producer replay requires retained model state")
+
+    retained_expiries: list[float] = []
+    retained_variances: list[float] = []
+    expiry_supports: list[np.ndarray[Any, Any]] = []
+    expiry_densities: list[np.ndarray[Any, Any]] = []
+    surface_supports: list[np.ndarray[Any, Any]] = []
+    surface_densities: list[np.ndarray[Any, Any]] = []
+    for input_index in retained_indices:
+        group = state.filter(pl.col("smooth_input_expiry_index") == input_index)
+        expiry_values = group.get_column("time_to_expiry_years").unique().to_list()
+        variance_values = group.get_column("smooth_model_variance").unique().to_list()
+        if len(expiry_values) != 1 or len(variance_values) != 1:
+            _fail(f"smooth producer state {input_index} has inconsistent time/variance")
+        retained_expiries.append(float(np.float32(expiry_values[0])))
+        retained_variances.append(float(variance_values[0]))
+        for column, target, dtype in (
+            ("smooth_expiry_model_strikes", expiry_supports, "support"),
+            ("smooth_surface_model_strikes", surface_supports, "support"),
+        ):
+            values = group.get_column(column).to_list()
+            if (
+                not values
+                or values[0] is None
+                or any(value != values[0] for value in values[1:])
+            ):
+                _fail(f"smooth producer state {input_index} has inconsistent {column}")
+            target.append(
+                _exact_float32_state(
+                    values[0],
+                    f"smooth producer state {input_index} {dtype} {column}",
+                )
+            )
+        for column, target in (
+            ("smooth_expiry_model_density", expiry_densities),
+            ("smooth_surface_model_density", surface_densities),
+        ):
+            values = group.get_column(column).to_list()
+            if (
+                not values
+                or values[0] is None
+                or any(value != values[0] for value in values[1:])
+            ):
+                _fail(f"smooth producer state {input_index} has inconsistent {column}")
+            target.append(np.asarray(values[0], dtype=np.float64))
+
+    expiries64 = np.asarray(retained_expiries, dtype=np.float64)
+    variances64 = np.asarray(retained_variances, dtype=np.float64)
+
+    def interpolated_variance(
+        expiry: float | np.floating[Any],
+    ) -> tuple[np.float64, np.float64]:
+        clipped = np.float64(np.clip(expiry, expiries64[0], expiries64[-1]))
+        return clipped, np.float64(np.interp(clipped, expiries64, variances64))
+
+    expiry_fits: list[np.ndarray[Any, Any]] = []
+    surface_fits: list[np.ndarray[Any, Any]] = []
+    for model_index, input_index in enumerate(retained_indices):
+        group = selected_groups[input_index]
+        strikes32 = group.get_column("normalized_strike").to_numpy().astype(
+            np.float32, copy=False
+        )
+        expiry = expiries64[model_index]
+        expiry_fits.append(
+            np.maximum(
+                np.float32(0.0),
+                expiry_supports[model_index][None, :] - strikes32[:, None],
+            )
+            @ expiry_densities[model_index]
+        )
+        clipped, variance = interpolated_variance(expiry)
+        surface_volatility = math.sqrt(smoothness * variance / clipped)
+        surface_fits.append(
+            _smooth_call_matrix(
+                expiry=expiry,
+                strikes=strikes32,
+                support=surface_supports[model_index],
+                volatility=surface_volatility,
+            )
+            @ surface_densities[model_index]
+        )
+
+    market_fits: list[np.ndarray[Any, Any]] = []
+    market_fit_errors: list[np.ndarray[Any, Any]] = []
+    for group in selected_groups:
+        expiry = np.float32(group.get_column("time_to_expiry_years").item(0))
+        strikes32 = group.get_column("normalized_strike").to_numpy().astype(
+            np.float32, copy=False
+        )
+        bids32 = group.get_column("pure_bid_price").to_numpy().astype(
+            np.float32, copy=False
+        )
+        asks32 = group.get_column("pure_ask_price").to_numpy().astype(
+            np.float32, copy=False
+        )
+        fitted = _smooth_market_fit_prices(
+            expiry=expiry,
+            strikes32=strikes32,
+            smoothness=smoothness,
+            expiries64=expiries64,
+            variances64=variances64,
+            surface_supports=surface_supports,
+            surface_densities=surface_densities,
+        )
+        half_spreads = np.maximum(
+            (asks32 - bids32) / np.float32(2.0),
+            min_half_spread,
+        )
+        errors = (
+            np.maximum(0.0, fitted - asks32)
+            + np.maximum(0.0, bids32 - fitted)
+        ) / half_spreads
+        market_fits.append(fitted)
+        market_fit_errors.append(errors)
+
+    all_errors = np.concatenate(market_fit_errors)
+    positive = all_errors > 0.0
+    return _SmoothProducerReplay(
+        retained_input_indices=retained_indices,
+        expiry_fits=tuple(expiry_fits),
+        surface_fits=tuple(surface_fits),
+        market_fits=tuple(market_fits),
+        market_fit_errors=tuple(market_fit_errors),
+        pcnt_fit=float(np.sum(positive)) / float(len(all_errors)),
+        median_error=float(np.median(all_errors[positive])) if np.any(positive) else 0.0,
+        mean_error=float(np.mean(all_errors[positive])) if np.any(positive) else 0.0,
+        median_total_error=float(np.median(all_errors)),
+        mean_total_error=float(np.mean(all_errors)),
+    )
+
+
+@version("1.0")
 def _float32_ulp(values: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
     """Return a conservative one-ULP radius around finite Float32 values."""
 
@@ -1338,7 +1654,7 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "4.1",
+    "4.2",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
@@ -1353,6 +1669,8 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _black_source_price_residual,
         _black_source_vector_residual,
         _merge_black_vector_residuals,
+        _smooth_producer_replay,
+        _validate_smooth_canonical_market_fit_bridge,
         _validate_fitted_numeric_finiteness,
         _canonical_discrete_dlv_densities,
         _canonical_discrete_dlv_squares,
@@ -2415,82 +2733,108 @@ def validate_fitted_partition(
     smooth_expiry_reconstruction = 0.0
     smooth_surface_fit_reconstruction = 0.0
     smooth_fit_error_reconstruction = 0.0
+    smooth_canonical_market_fit_bridge = 0.0
+    smooth_canonical_surface_fit_bridge = 0.0
     calendar_residual = 0.0
     if smooth_pricer is not None:
         assert smooth_expiry_pricer is not None
-        for model_index, (input_index, expiry) in enumerate(
-            zip(smooth_state_indices, smooth_pricer.expiries, strict=True)
-        ):
-            rows = frame.filter(pl.col("smooth_input_expiry_index") == input_index)
-            observed = np.asarray(smooth_pricer(expiry, rows["normalized_strike"].to_numpy()))
-            smooth_reconstruction = max(
-                smooth_reconstruction,
-                _max_abs(observed, rows["smooth_call_mid"].to_numpy()),
-            )
-            smooth_surface_fit_reconstruction = max(
-                smooth_surface_fit_reconstruction,
-                _max_abs(observed, rows["smooth_surface_fit_price"].to_numpy()),
-            )
-            expiry_observed = np.asarray(
-                smooth_expiry_pricer(
-                    smooth_expiry_pricer.expiries[model_index],
-                    rows["normalized_strike"].to_numpy(),
-                )
-            )
-            smooth_expiry_reconstruction = max(
-                smooth_expiry_reconstruction,
-                _max_abs(expiry_observed, rows["smooth_expiry_fit_price"].to_numpy()),
-            )
-        if smooth_reconstruction > 5.0e-8:
-            _fail(f"{trading_date}: reconstructed smooth fitted prices changed")
-        if smooth_surface_fit_reconstruction > 5.0e-8:
-            _fail(
-                f"{trading_date}: reconstructed serialized smooth surface-fit "
-                "prices changed"
-            )
-        if smooth_expiry_reconstruction > 5.0e-8:
-            _fail(f"{trading_date}: reconstructed smooth expiry-fit prices changed")
-
         selected_groups = [
             frame.filter(pl.Series(selected & (expiry_ids == expiry_id)))
             for expiry_id in selected_expiry_ids_tuple
         ]
-        fit_result = smooth_pricer.compute_market_fit(
-            expiries=np.asarray(
-                [group.get_column("time_to_expiry_years").item(0) for group in selected_groups],
-                dtype=np.float32,
-            ),
-            strikes=[group.get_column("normalized_strike").to_numpy() for group in selected_groups],
-            bids=[group.get_column("pure_bid_price").to_numpy() for group in selected_groups],
-            asks=[group.get_column("pure_ask_price").to_numpy() for group in selected_groups],
-            and_vols=False,
+        producer_replay = _smooth_producer_replay(
+            frame,
+            selected_groups=selected_groups,
+            smoothness=config.surface.smooth_sanos.smoothness,
+            min_half_spread=config.surface.no_arbitrage.min_half_spread,
         )
+        if producer_replay.retained_input_indices != smooth_state_indices:
+            _fail(f"{trading_date}: smooth producer replay indices changed")
+        for model_index, input_index in enumerate(smooth_state_indices):
+            rows = selected_groups[input_index]
+            expiry_observed = producer_replay.expiry_fits[model_index]
+            surface_observed = producer_replay.surface_fits[model_index]
+            smooth_expiry_reconstruction = max(
+                smooth_expiry_reconstruction,
+                _max_abs(
+                    expiry_observed,
+                    rows["smooth_expiry_fit_price"].to_numpy(),
+                ),
+            )
+            smooth_surface_fit_reconstruction = max(
+                smooth_surface_fit_reconstruction,
+                _max_abs(
+                    surface_observed,
+                    rows["smooth_surface_fit_price"].to_numpy(),
+                ),
+            )
+            canonical = np.asarray(
+                smooth_pricer(
+                    smooth_pricer.expiries[model_index],
+                    rows["normalized_strike"].to_numpy(),
+                )
+            )
+            smooth_canonical_surface_fit_bridge = max(
+                smooth_canonical_surface_fit_bridge,
+                _max_abs(canonical, surface_observed),
+            )
+        if smooth_expiry_reconstruction > 1.0e-12:
+            _fail(
+                f"{trading_date}: smooth expiry-fit producer replay changed by "
+                f"{smooth_expiry_reconstruction}"
+            )
+        if smooth_surface_fit_reconstruction > 1.0e-12:
+            _fail(
+                f"{trading_date}: smooth surface-fit producer replay changed by "
+                f"{smooth_surface_fit_reconstruction}"
+            )
+
         for group, fitted_values, fit_errors in zip(
-            selected_groups, fit_result.fits, fit_result.fit_errs, strict=True
+            selected_groups,
+            producer_replay.market_fits,
+            producer_replay.market_fit_errors,
+            strict=True,
         ):
             smooth_reconstruction = max(
                 smooth_reconstruction,
-                _max_abs(np.asarray(fitted_values), group["smooth_call_mid"].to_numpy()),
+                _max_abs(fitted_values, group["smooth_call_mid"].to_numpy()),
             )
             smooth_fit_error_reconstruction = max(
                 smooth_fit_error_reconstruction,
                 _max_abs(
-                    np.asarray(fit_errors),
+                    fit_errors,
                     group["smooth_fit_error_half_spreads"].to_numpy(),
                 ),
             )
-        if smooth_reconstruction > 5.0e-8 or smooth_fit_error_reconstruction > 1.0e-10:
+            expiry = np.float32(group.get_column("time_to_expiry_years").item(0))
+            canonical = np.asarray(
+                smooth_pricer(expiry, group["normalized_strike"].to_numpy())
+            )
+            smooth_canonical_market_fit_bridge = max(
+                smooth_canonical_market_fit_bridge,
+                _max_abs(canonical, fitted_values),
+            )
+        _validate_smooth_canonical_market_fit_bridge(
+            smooth_canonical_market_fit_bridge,
+            label=str(trading_date),
+        )
+        if smooth_reconstruction > 1.0e-12 or smooth_fit_error_reconstruction > 1.0e-12:
             _fail(f"{trading_date}: smooth market-fit values or errors changed")
         summary_fields = {
-            "smooth_pcnt_fit": ("pcnt_fit", "pcnt_fit"),
-            "smooth_median_error": ("median_error", "median_err"),
-            "smooth_mean_error": ("mean_error", "mean_err"),
-            "smooth_median_total_error": ("median_total_error", "median_total_err"),
-            "smooth_mean_total_error": ("mean_total_error", "mean_total_err"),
+            "smooth_pcnt_fit": ("pcnt_fit", producer_replay.pcnt_fit),
+            "smooth_median_error": ("median_error", producer_replay.median_error),
+            "smooth_mean_error": ("mean_error", producer_replay.mean_error),
+            "smooth_median_total_error": (
+                "median_total_error",
+                producer_replay.median_total_error,
+            ),
+            "smooth_mean_total_error": (
+                "mean_total_error",
+                producer_replay.mean_total_error,
+            ),
         }
-        for column, (diagnostic_name, result_name) in summary_fields.items():
+        for column, (diagnostic_name, result_value) in summary_fields.items():
             values = frame.get_column(column).unique().to_list()
-            result_value = float(getattr(fit_result, result_name))
             if (
                 len(values) != 1
                 or values[0] is None
@@ -2594,6 +2938,12 @@ def validate_fitted_partition(
         "smooth_surface_fit_reconstruction": smooth_surface_fit_reconstruction,
         "smooth_fit_error_reconstruction": smooth_fit_error_reconstruction,
         "smooth_reconstruction": smooth_reconstruction,
+        "smooth_canonical_market_fit_bridge": (
+            smooth_canonical_market_fit_bridge
+        ),
+        "smooth_canonical_surface_fit_bridge": (
+            smooth_canonical_surface_fit_bridge
+        ),
         "spot_reference": spot_reference_residual,
         "spot_normalized_strike": spot_strike_residual,
         **{f"initial_expiry_{name}": value for name, value in initial_expiry_residuals.items()},

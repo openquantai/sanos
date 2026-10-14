@@ -439,6 +439,36 @@ both accepted it. Only `approved` may alter reference behavior.
   changes. Validation now models the producer's actual numerical contract
   instead of rejecting valid pilot artifacts at an accidental boundary.
 
+## CD-025 — Distinct smooth fitted-price replay contracts
+
+- **Status:** resolved from the fresh Phase 10 pilot measurement on 2026-10-14.
+- **Evidence:** the copied smooth fitter exposes three related but distinct
+  Float64 observables. Per-expiry `fits1` uses a linear payoff on Float32
+  supports; solver-time `fitsX` uses Float32 listed strikes/supports and the
+  expression `sqrt(smoothness * variance / T)`; the later
+  `compute_market_fit().fits` path uses
+  `sqrt(variance / T) * sqrt(smoothness)` and the copied arbitrary-time
+  interpolation rules. The supports are persisted losslessly in Float64 list
+  columns. A validator that evaluated every field through the canonical
+  Float64 `SanosPricer` falsely rejected 2024-12-23 at `5.798907092013916e-8`.
+  Across all 15 populated pilot dates, exact producer replay has zero maximum
+  error for expiry fit, surface fit, quote-aligned call mid, and fit error. The
+  maximum canonical-Float64 bridge residual is `7.109712970437831e-8` for
+  `fitsX` and `3.155308114788369e-8` for `smooth_call_mid`.
+- **Treatment:** replay and validate `fits1`, `fitsX`, and
+  `compute_market_fit` separately, preserving their Float32 inputs, operation
+  ordering, arbitrary-time behavior, and direct intrinsic return below one
+  model minute. Require each stored producer observable to match its replay
+  within `1e-12`. Keep the canonical Float64 `SanosPricer` unchanged for
+  off-grid consumers, public SANOS state, and the DLV projection. Retain the
+  existing `5e-8` acceptance gate between `smooth_call_mid` and that canonical
+  consumer; record the accumulated `fitsX`-to-canonical difference as a named
+  diagnostic bridge rather than treating it as producer replay.
+- **Expected impact:** no fitted value, support, density, variance, mask,
+  population, SANOS parameter, DLV parameter, or fitted schema changes. The
+  validation schema and validation producer identity change because the three
+  field meanings and two bridge residuals are now explicit.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -447,5 +477,5 @@ CD-016 through CD-019 need a choice only if their preserved compatibility
 behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked. CD-004,
-CD-009 and CD-021 through CD-024 are resolved by their approved or measured
+CD-009 and CD-021 through CD-025 are resolved by their approved or measured
 contracts and regressions.
