@@ -35,6 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 reference = [
   "h5py>=3.10,<4",
+  "scikit-learn>=1.4,<2",
   "torch>=2,<3",
 ]
 wrds = [
@@ -53,6 +54,7 @@ operator = [
   "h5py>=3.10,<4",
   "pandas>=2.2,<4",
   "psycopg2-binary>=2.9,<3",
+  "scikit-learn>=1.4,<2",
   "SQLAlchemy>=2,<3",
   "torch>=2,<3",
   "wrds>=3.2,<4",

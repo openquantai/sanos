@@ -8,8 +8,8 @@ for the guarded reference build.
 ## Install and inspect
 
 Python 3.12 is required. The aggregate operator extra includes WRDS access,
-HDF5 Experiment support, and the Torch runtime used by the pinned legacy
-Experiment consumer comparison:
+HDF5 Experiment support, and the Torch and scikit-learn runtimes used by the
+pinned legacy Experiment consumer comparison:
 
 ```bash
 python -m venv .venv
@@ -21,9 +21,9 @@ sanos config resources
 
 Use `.[dev,operator]` in a source checkout that will run tests. The narrower
 `.[wrds]`, `.[experiment]`, and `.[reference]` extras remain available when the
-complete workflow is not needed. The `reference` extra includes both HDF5 and
-Torch because the exact 891-day migration comparison executes the pinned
-legacy consumer in an isolated CPU-only worker.
+complete workflow is not needed. The `reference` extra includes HDF5, Torch,
+and scikit-learn because the exact 891-day migration comparison executes the
+pinned legacy consumer in an isolated CPU-only worker.
 
 Configure all four lifecycle roots with one general root:
 

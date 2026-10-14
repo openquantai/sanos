@@ -369,7 +369,9 @@ def test_dataset_build_dry_run_is_structured_offline_and_non_mutating(
     )
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payloads = [json.loads(line) for line in result.output.splitlines()]
+    assert all(item["event"] == "warning" for item in payloads[:-1])
+    payload = payloads[-1]
     assert payload["event"] == "dataset_result"
     assert payload["planned_dates"] == 918
     assert payload["built"] is False
