@@ -45,10 +45,21 @@ PAIRED_SCHEMA_VERSION = "widb-daily-paired-v1"
 ENRICHED_SCHEMA_VERSION = "widb-daily-enriched-v1"
 
 
-@version("cdxcore-bs-kernel-2026-10-v1")
+@version("cdxcore-bs-implied-price-tolerance-1e-6-v1")
+def _implied_volatility_price_tolerance() -> float:
+    """Return the explicit cdxcore implied-volatility price tolerance."""
+
+    return 1.0e-6
+
+
+@version(
+    "cdxcore-bs-kernel-2026-10-v2",
+    dependencies=[_implied_volatility_price_tolerance],
+)
 def _black_implied(*args: Any, **kwargs: Any) -> np.ndarray[Any, Any]:
     """Version-owned adapter around the cdxcore Black implied-volatility kernel."""
 
+    kwargs.setdefault("price_tol", _implied_volatility_price_tolerance())
     return np.asarray(bs.implied(*args, **kwargs))
 
 

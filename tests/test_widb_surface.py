@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -846,7 +847,169 @@ def test_two_expiry_fitted_frame_passes_dataset_quantitative_boundary(
     )
     assert statistics.input_expiries == 2
     assert statistics.smooth_retained_expiries == 2
+    assert statistics.residual_maxima["initial_surface_fit_black_roundtrip"] == 0.0
+    assert statistics.residual_maxima["expiry_fit_black_roundtrip"] == 0.0
     assert statistics.residual_maxima["dlv_density_roundtrip"] <= 2.0e-14
+
+
+def test_initial_fit_price_contract_includes_black_tolerance_and_float32_ulp() -> None:
+    persisted = np.asarray([0.5522804856300354], dtype=np.float32)
+    within = np.asarray([0.5522794619202613], dtype=np.float64)
+    residual, excess = internal_dataset_module._black_source_price_residual(
+        within,
+        persisted,
+    )
+    assert residual > 1.0e-6
+    assert excess == 0.0
+
+    outside = within - 2.0e-6
+    _, outside_excess = internal_dataset_module._black_source_price_residual(
+        outside,
+        persisted,
+    )
+    assert outside_excess > 1.0e-6
+
+    center = np.asarray([0.5], dtype=np.float32)
+    allowance = 1.0e-6 + float(internal_dataset_module._float32_ulp(center)[0])
+    rounded_above = center.astype(np.float64) + allowance
+    boundary = np.nextafter(rounded_above, center.astype(np.float64))
+    beyond = np.nextafter(boundary, np.inf)
+    assert float(np.abs(boundary - center.astype(np.float64))[0]) <= allowance
+    assert float(np.abs(beyond - center.astype(np.float64))[0]) > allowance
+    _, boundary_excess = internal_dataset_module._black_source_price_residual(
+        boundary,
+        center,
+    )
+    _, nextafter_excess = internal_dataset_module._black_source_price_residual(
+        beyond,
+        center,
+    )
+    assert boundary_excess == 0.0
+    assert nextafter_excess > 0.0
+
+
+def test_initial_fit_black_replay_rejects_a_coherent_alternate_vector() -> None:
+    strike = np.asarray([0.7527551], dtype=np.float32)
+    time = np.asarray([0.01190476], dtype=np.float32)
+    source_volatility = np.asarray([0.78], dtype=np.float64)
+    source_price = np.asarray(
+        bs.price(
+            k=strike.astype(np.float64),
+            vol=source_volatility,
+            sqrtT=np.sqrt(time.astype(np.float64)),
+            eps=1.0e-8,
+        ),
+        dtype=np.float64,
+    )
+    alternate_volatility = np.asarray([0.775], dtype=np.float64)
+    alternate = bs(
+        k=strike.astype(np.float64),
+        vol=alternate_volatility,
+        sqrtT=np.sqrt(time.astype(np.float64)),
+        eps=1.0e-8,
+        what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
+    )
+    frame = pl.DataFrame(
+        {
+            "normalized_strike": pl.Series(strike, dtype=pl.Float32),
+            "time_to_expiry_years": pl.Series(time, dtype=pl.Float32),
+            "fitX_volatility": pl.Series(alternate_volatility, dtype=pl.Float32),
+            **{
+                f"pure_fitX_{name}": pl.Series(
+                    np.asarray(getattr(alternate, name)),
+                    dtype=pl.Float32,
+                )
+                for name in ("price", "delta", "gamma", "vega", "theta", "dk")
+            },
+        }
+    )
+    scalar_residual, scalar_excess = (
+        internal_dataset_module._black_source_price_residual(
+            source_price,
+            frame.get_column("pure_fitX_price").to_numpy(),
+        )
+    )
+    independent = internal_dataset_module._black_vector_residual(
+        frame,
+        price_column="pure_fitX_price",
+        volatility_column="fitX_volatility",
+        greek_prefix="pure_fitX",
+        strike_was_persisted_input=True,
+        volatility_minimum=0.01,
+        volatility_maximum=5.0,
+    )
+    replay = internal_dataset_module._black_source_vector_residual(
+        frame,
+        source_prices=source_price,
+        price_column="pure_fitX_price",
+        volatility_column="fitX_volatility",
+        greek_prefix="pure_fitX",
+    )
+    assert scalar_residual < 1.0e-6
+    assert scalar_excess == 0.0
+    assert independent.maximum_excess == 0.0
+    assert replay.mismatch_count > 0
+    assert "fitX_volatility" in replay.mismatch_fields
+
+
+def test_dataset_boundary_rejects_coherent_alternate_initial_black_vector(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    row_index = int(
+        np.flatnonzero(
+            fitted.get_column("initial_no_arb_input_expiry_index")
+            .is_not_null()
+            .to_numpy()
+        )[0]
+    )
+    row = fitted.row(row_index, named=True)
+    alternate_volatility = np.nextafter(
+        np.float32(row["fitX_volatility"]),
+        np.float32(np.inf),
+        dtype=np.float32,
+    )
+    values = bs(
+        k=np.asarray([row["normalized_strike"]], dtype=np.float64),
+        vol=np.asarray([alternate_volatility], dtype=np.float64),
+        sqrtT=math.sqrt(float(row["time_to_expiry_years"])),
+        eps=1.0e-8,
+        what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
+    )
+    replacements = {
+        "fitX_volatility": alternate_volatility,
+        **{
+            f"pure_fitX_{name}": np.float32(np.asarray(getattr(values, name))[0])
+            for name in ("price", "delta", "gamma", "vega", "theta", "dk")
+        },
+    }
+    corrupted = fitted.with_row_index("__row").with_columns(
+        *(
+            pl.when(pl.col("__row") == row_index)
+            .then(pl.lit(value, dtype=pl.Float32))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for column, value in replacements.items()
+        )
+    ).drop("__row")
+    config = InternalDatasetConfig(
+        name="coherent-black-vector-corruption",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=DailySurfaceConfig(),
+    )
+    with pytest.raises(DatasetValidationError, match="deterministic Black round-trip"):
+        validate_fitted_partition(
+            corrupted,
+            config=config,
+            trading_date=date(2024, 1, 3),
+            typed_empty_reason=None,
+        )
 
 
 def _solver_event(

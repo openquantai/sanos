@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 from cdxcore.bs import bs
 
+import sanos.widb.daily as daily_module
 from sanos.config import canonical_sha256
 from sanos.widb import (
     ENRICHED_SCHEMA,
@@ -472,3 +473,30 @@ def test_daily_transform_versions_close_over_clock_and_source_contracts() -> Non
         "_enriched_only_schema",
     ):
         assert dependency in enriched
+
+
+def test_black_implied_adapter_owns_the_price_convergence_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def implied(*args: object, **kwargs: object) -> np.ndarray:
+        observed.update(kwargs)
+        return np.asarray([0.2])
+
+    monkeypatch.setattr(daily_module.bs, "implied", implied)
+    result = daily_module._black_implied(
+        np.asarray([1.0]),
+        np.asarray([0.1]),
+    )
+    np.testing.assert_array_equal(result, np.asarray([0.2]))
+    assert observed["price_tol"] == 1.0e-6
+    daily_module._black_implied(
+        np.asarray([1.0]),
+        np.asarray([0.1]),
+        price_tol=2.0e-6,
+    )
+    assert observed["price_tol"] == 2.0e-6
+    assert "_implied_volatility_price_tolerance" in str(
+        daily_module._black_implied.version
+    )

@@ -416,6 +416,29 @@ both accepted it. Only `approved` may alter reference behavior.
   Out-of-domain differences are report-only. Arbitrary-time equivalence is not
   advertised.
 
+## CD-024 — Initial fitted-price Black round-trip tolerance
+
+- **Status:** resolved from the fresh Phase 10 pilot measurement on 2026-10-14.
+- **Evidence:** initial `fits1` and `fitsX` prices are converted to implied
+  volatility and repriced before their reference-compatible Float32 fields are
+  persisted. The copied implementation supplied `eps=1e-8` to the Black kernel
+  but inherited cdxcore's distinct `price_tol=1e-6` implied-volatility stopping
+  tolerance as an unversioned default. Across all 136,737 retained expiry rows
+  in the 16-day pilot, 34 surface values and 36 per-expiry values exceeded a
+  bare `1e-6` reconstruction check. Every value was within `1e-6` plus one
+  Float32 ULP; the maximum observed residual was `1.023709774061743e-6` and its
+  stored-value ULP was `5.960464477539063e-8`.
+- **Treatment:** make `price_tol=1e-6` explicit and version-owned in the cdxcore
+  adapter. Validate the direct fitted state against its persisted Black
+  price using that tolerance plus one conservative Float32 ULP. Replay the
+  version-owned implied-volatility and Black-vector pipeline and require exact
+  Float32 equality for volatility, price, and every Greek; a merely coherent
+  alternative vector is not accepted. Retain the independent Black
+  price/volatility/Greek cell-envelope checks as defense in depth.
+- **Expected impact:** no fitted value, state, mask, population, or schema
+  changes. Validation now models the producer's actual numerical contract
+  instead of rejecting valid pilot artifacts at an accidental boundary.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -424,5 +447,5 @@ CD-016 through CD-019 need a choice only if their preserved compatibility
 behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked. CD-004,
-CD-009, CD-021, CD-022, and CD-023 are resolved by their approved contracts and
-regressions.
+CD-009 and CD-021 through CD-024 are resolved by their approved or measured
+contracts and regressions.

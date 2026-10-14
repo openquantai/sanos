@@ -52,7 +52,12 @@ from sanos.widb.build import (
     read_daily_frame,
 )
 from sanos.widb.calendar import DAYS_PER_YEAR, count_business_days_between, half_days, is_half_day
-from sanos.widb.daily import _black_values, _numerical_tolerances
+from sanos.widb.daily import (
+    _black_implied,
+    _black_values,
+    _implied_volatility_price_tolerance,
+    _numerical_tolerances,
+)
 from sanos.widb.surface import (
     FILTERED_SCHEMA,
     FITTED_SCHEMA,
@@ -866,6 +871,18 @@ class _BlackVectorResiduals:
 
 
 @version("1.0")
+@dataclass(frozen=True, slots=True)
+class _BlackSourceVectorResiduals:
+    """Residuals from replaying a fitted source through its persisted vector."""
+
+    source_price: float
+    source_contract_excess: float
+    float32_max_abs: float
+    mismatch_count: int
+    mismatch_fields: tuple[str, ...]
+
+
+@version("1.0")
 def _float32_ulp(values: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
     """Return a conservative one-ULP radius around finite Float32 values."""
 
@@ -876,6 +893,139 @@ def _float32_ulp(values: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
     return np.maximum(
         center64 - lower.astype(np.float64),
         upper.astype(np.float64) - center64,
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[_float32_ulp, _implied_volatility_price_tolerance],
+)
+def _black_source_price_residual(
+    source_prices: np.ndarray[Any, Any],
+    persisted_prices: np.ndarray[Any, Any],
+) -> tuple[float, float]:
+    """Measure source-to-Black-round-trip error against its exact contract.
+
+    The producer first converts each fitted price to implied volatility with
+    cdxcore's configured price tolerance, reprices it, and then persists the
+    result as Float32.  One full Float32 ULP is a conservative serialization
+    allowance around the stored value.
+    """
+
+    source = np.asarray(source_prices, dtype=np.float64)
+    persisted32 = np.asarray(persisted_prices, dtype=np.float32)
+    persisted = persisted32.astype(np.float64)
+    if source.shape != persisted.shape:
+        _fail(
+            "source and persisted Black prices have inconsistent shapes: "
+            f"{source.shape} != {persisted.shape}"
+        )
+    error = np.abs(source - persisted)
+    allowance = _implied_volatility_price_tolerance() + _float32_ulp(persisted32)
+    return (
+        float(np.max(error, initial=0.0)),
+        float(np.max(np.maximum(error - allowance, 0.0), initial=0.0)),
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        _BlackSourceVectorResiduals,
+        _black_implied,
+        _black_source_price_residual,
+        _black_values,
+        _numerical_tolerances,
+    ],
+)
+def _black_source_vector_residual(
+    frame: pl.DataFrame,
+    *,
+    source_prices: np.ndarray[Any, Any],
+    price_column: str,
+    volatility_column: str,
+    greek_prefix: str,
+) -> _BlackSourceVectorResiduals:
+    """Replay the deterministic source-price-to-Float32 Black vector contract."""
+
+    source = np.asarray(source_prices, dtype=np.float64)
+    if source.shape != (frame.height,):
+        _fail(
+            "source Black prices have the wrong shape for deterministic replay: "
+            f"{source.shape} != {(frame.height,)}"
+        )
+    times = (
+        frame.get_column("time_to_expiry_years")
+        .to_numpy()
+        .astype(np.float64, copy=False)
+    )
+    if not len(times) or np.any(times != times[0]) or times[0] <= 0.0:
+        _fail("deterministic Black replay requires one positive expiry")
+    strikes = (
+        frame.get_column("normalized_strike")
+        .to_numpy()
+        .astype(np.float64, copy=False)
+    )
+    implied_epsilon, greek_epsilon = _numerical_tolerances()
+    volatility = _black_implied(
+        k=strikes,
+        prices=source,
+        sqrtT=math.sqrt(float(times[0])),
+        eps=implied_epsilon,
+        on_exceed_bounds="quiet",
+    )
+    values = _black_values(
+        k=strikes,
+        vol=volatility,
+        sqrtT=math.sqrt(float(times[0])),
+        eps=greek_epsilon,
+        what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
+    )
+    replayed = {
+        volatility_column: volatility,
+        price_column: values.price,
+        **{
+            f"{greek_prefix}_{name}": getattr(values, name)
+            for name in ("delta", "gamma", "vega", "theta", "dk")
+        },
+    }
+    mismatch_count = 0
+    mismatch_fields: list[str] = []
+    maximum = 0.0
+    for column, calculated in replayed.items():
+        observed_series = frame.get_column(column)
+        if observed_series.dtype != pl.Float32 or observed_series.null_count():
+            _fail(f"{column} is not a complete Float32 Black replay vector")
+        observed = observed_series.to_numpy().astype(np.float32, copy=False)
+        expected = np.asarray(calculated, dtype=np.float64).astype(np.float32)
+        if np.any(~np.isfinite(expected)):
+            _fail(f"deterministic Black replay produced non-finite {column}")
+        mismatched = observed.view(np.uint32) != expected.view(np.uint32)
+        count = int(np.sum(mismatched))
+        if count:
+            mismatch_count += count
+            mismatch_fields.append(column)
+            maximum = max(
+                maximum,
+                float(
+                    np.max(
+                        np.abs(
+                            observed[mismatched].astype(np.float64)
+                            - expected[mismatched].astype(np.float64)
+                        )
+                    )
+                ),
+            )
+    source_price, source_contract_excess = _black_source_price_residual(
+        source,
+        frame.get_column(price_column).to_numpy(),
+    )
+    return _BlackSourceVectorResiduals(
+        source_price=source_price,
+        source_contract_excess=source_contract_excess,
+        float32_max_abs=maximum,
+        mismatch_count=mismatch_count,
+        mismatch_fields=tuple(mismatch_fields),
     )
 
 
@@ -1188,7 +1338,7 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "3.9",
+    "4.1",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
@@ -1200,6 +1350,8 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _expiry_state_pricer,
         _validate_support_mask_geometry,
         _black_vector_residual,
+        _black_source_price_residual,
+        _black_source_vector_residual,
         _merge_black_vector_residuals,
         _validate_fitted_numeric_finiteness,
         _canonical_discrete_dlv_densities,
@@ -2119,7 +2271,12 @@ def validate_fitted_partition(
             revalidated_dlv_diagnostics["maximum_bound_excess"]
         )
 
+    initial_surface_fit_reconstruction = 0.0
+    initial_surface_fit_contract_excess = 0.0
+    initial_surface_fit_black_roundtrip = 0.0
     expiry_fit_reconstruction = 0.0
+    expiry_fit_contract_excess = 0.0
+    expiry_fit_black_roundtrip = 0.0
     quote_containment = 0.0
     expiry_quote_containment = 0.0
     fitted_black_vector_residual = _merge_black_vector_residuals()
@@ -2130,18 +2287,61 @@ def validate_fitted_partition(
         observed = np.asarray(
             initial_surface_pricer(expiry, rows["normalized_strike"].to_numpy())
         )
-        expected = rows["pure_fitX_price"].to_numpy()
-        if _max_abs(observed, expected) > 1.0e-6:
-            _fail(f"{trading_date}: reconstructed initial fitted prices changed")
+        surface_replay = _black_source_vector_residual(
+            rows,
+            source_prices=observed,
+            price_column="pure_fitX_price",
+            volatility_column="fitX_volatility",
+            greek_prefix="pure_fitX",
+        )
+        if surface_replay.mismatch_count:
+            _fail(
+                f"{trading_date}: initial surface-fit deterministic Black "
+                f"round-trip changed {surface_replay.mismatch_count} values in "
+                f"{surface_replay.mismatch_fields}"
+            )
+        initial_surface_fit_reconstruction = max(
+            initial_surface_fit_reconstruction,
+            surface_replay.source_price,
+        )
+        initial_surface_fit_contract_excess = max(
+            initial_surface_fit_contract_excess,
+            surface_replay.source_contract_excess,
+        )
+        initial_surface_fit_black_roundtrip = max(
+            initial_surface_fit_black_roundtrip,
+            surface_replay.float32_max_abs,
+        )
         expiry_observed = np.asarray(
             initial_expiry_pricer(
                 initial_expiry_pricer.expiries[model_index],
                 rows["normalized_strike"].to_numpy(),
             )
         )
+        expiry_replay = _black_source_vector_residual(
+            rows,
+            source_prices=expiry_observed,
+            price_column="pure_fit1_price",
+            volatility_column="fit1_volatility",
+            greek_prefix="pure_fit1",
+        )
+        if expiry_replay.mismatch_count:
+            _fail(
+                f"{trading_date}: initial expiry-fit deterministic Black "
+                f"round-trip changed {expiry_replay.mismatch_count} values in "
+                f"{expiry_replay.mismatch_fields}"
+            )
         expiry_fit_reconstruction = max(
             expiry_fit_reconstruction,
-            _max_abs(expiry_observed, rows["pure_fit1_price"].to_numpy()),
+            expiry_replay.source_price,
+        )
+        expiry_fit_contract_excess = max(
+            expiry_fit_contract_excess,
+            expiry_replay.source_contract_excess,
+        )
+        expiry_fit_black_roundtrip = max(
+            expiry_fit_black_roundtrip,
+            expiry_replay.float32_max_abs,
         )
         fitted_black_vector_residual = _merge_black_vector_residuals(
             fitted_black_vector_residual,
@@ -2186,10 +2386,17 @@ def validate_fitted_partition(
                     )
                 ),
             )
-    if expiry_fit_reconstruction > 1.0e-6:
+    if initial_surface_fit_contract_excess > 0.0:
         _fail(
-            f"{trading_date}: reconstructed initial expiry-fit prices changed by "
-            f"{expiry_fit_reconstruction}"
+            f"{trading_date}: reconstructed initial surface-fit prices exceed "
+            "the implied-volatility/Float32 round-trip contract by "
+            f"{initial_surface_fit_contract_excess}"
+        )
+    if expiry_fit_contract_excess > 0.0:
+        _fail(
+            f"{trading_date}: reconstructed initial expiry-fit prices exceed "
+            "the implied-volatility/Float32 round-trip contract by "
+            f"{expiry_fit_contract_excess}"
         )
     if fitted_black_vector_residual.maximum_excess > 0.0:
         _fail(
@@ -2369,11 +2576,20 @@ def validate_fitted_partition(
         "dlv_density_roundtrip": dlv_density_error,
         "expiry_fit_quote_containment": expiry_quote_containment,
         "expiry_fit_reconstruction": expiry_fit_reconstruction,
+        "expiry_fit_contract_excess": expiry_fit_contract_excess,
+        "expiry_fit_black_roundtrip": expiry_fit_black_roundtrip,
         "forward_over_spot": forward_residual,
         "normalized_strike": strike_residual,
         "previous_spot_over_spot": previous_spot_residual,
         "put_call_parity": put_call_residual,
         "quote_containment": quote_containment,
+        "initial_surface_fit_reconstruction": initial_surface_fit_reconstruction,
+        "initial_surface_fit_contract_excess": (
+            initial_surface_fit_contract_excess
+        ),
+        "initial_surface_fit_black_roundtrip": (
+            initial_surface_fit_black_roundtrip
+        ),
         "smooth_expiry_reconstruction": smooth_expiry_reconstruction,
         "smooth_surface_fit_reconstruction": smooth_surface_fit_reconstruction,
         "smooth_fit_error_reconstruction": smooth_fit_error_reconstruction,
