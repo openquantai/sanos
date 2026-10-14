@@ -1,0 +1,36 @@
+# Tested Phase 11 CPython 3.12 operator/developer stack (2026-10-14).
+#
+# This is a constraints file, not a cross-platform lock or an artifact identity.
+# Install from a source checkout with:
+#   python -m pip install -c constraints/phase11-tested-py312.txt -e '.[dev,operator]'
+# The immutable runtime fingerprint remains authoritative for its closed
+# numerical package set, solvers, Python/host, BLAS/LAPACK, CPU, and threads.
+
+build==1.6.1
+cdxcore==0.1.96
+clarabel==0.11.1
+click==8.5.0
+cvxpy==1.9.3
+filelock==3.32.7
+h5py==3.16.0
+highspy==1.15.1
+ipython==9.8.0
+jax==0.11.2
+jaxlib==0.11.2
+mypy==1.20.2
+numpy==2.5.4
+pandas==2.2.3
+pandas-market-calendars==5.5.0
+polars==2.0.0
+psycopg2-binary==2.9.13
+pyarrow==26.0.0
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.17.0
+scikit-learn==1.9.1
+scipy==1.18.1
+SQLAlchemy==2.0.51
+threadpoolctl==3.7.0
+torch==2.14.1
+wheel==0.48.0
+wrds==3.5.0

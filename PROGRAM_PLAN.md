@@ -12,6 +12,12 @@ review on 2026-10-13. Exact numerical-runtime evidence binding was added and
 passed independent code and quantitative review on 2026-10-14. Public
 redistribution approval remains a separate human/legal action.
 
+The dedicated Phase 11 CPython 3.12 environment now passes dependency, doctor,
+full offline test, lint, resource, and zero-network Raw-plan gates. Its reviewed
+direct package versions are checked in as a constraints file; the runtime
+fingerprint continues to bind its closed numerical package set, solvers,
+Python/host identity, numerical libraries, CPU availability, and thread controls.
+
 An evidence-bound `reference approval-document` command is implemented and
 independently reviewed. It cannot infer or grant approval: it requires an
 explicit owner attestation and metadata, reopens both physical evidence sides,

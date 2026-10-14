@@ -25,6 +25,7 @@ WHEEL_RESOURCES = {
 SDIST_PREFIXES = (
     ".github/",
     "configs/",
+    "constraints/",
     "docs/",
     "reference/",
     "reviews/",
@@ -81,6 +82,7 @@ def _extract_sdist(path: Path, destination: Path) -> Path:
             "PROGRAM_PLAN.md",
             "PORTING.md",
             "README.md",
+            "constraints/phase11-tested-py312.txt",
             "pyproject.toml",
             "setup.py",
             "tests/fixtures/reference_numerics_v1.json",

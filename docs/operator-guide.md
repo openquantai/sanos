@@ -14,7 +14,7 @@ pinned legacy Experiment consumer comparison:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install '.[operator]'
+python -m pip install -c constraints/phase11-tested-py312.txt '.[operator]'
 sanos --help
 sanos config resources
 ```
@@ -24,6 +24,17 @@ Use `.[dev,operator]` in a source checkout that will run tests. The narrower
 complete workflow is not needed. The `reference` extra includes HDF5, Torch,
 and scikit-learn because the exact 891-day migration comparison executes the
 pinned legacy consumer in an isolated CPU-only worker.
+
+The checked-in constraints reproduce the direct package versions of the
+reviewed CPython 3.12 Phase 11 environment; they are not a universal or
+transitive lock. The production runtime fingerprint records and binds its
+closed numerical package set, solvers, Python/host identity, numerical
+libraries, CPU availability, and thread controls. Development checkouts use the
+same constraints:
+
+```bash
+python -m pip install -c constraints/phase11-tested-py312.txt -e '.[dev,operator]'
+```
 
 Configure all four lifecycle roots with one general root:
 

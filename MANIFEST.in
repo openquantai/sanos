@@ -5,6 +5,7 @@ include README.md
 include pyproject.toml
 include setup.py
 recursive-include configs *
+recursive-include constraints *.txt
 recursive-include docs *
 recursive-include reference *
 recursive-include reviews *

@@ -14,6 +14,19 @@ owner gate. WRDS connection opens are governed by the host-local account-scoped
 monitor: they are serialized, and a fourth failed or interrupted attempt in a
 rolling 15-minute window is blocked before network access.
 
+Prepare a dedicated CPython 3.12 environment from the reviewed source checkout:
+
+```bash
+python -m venv /path/to/dedicated/sanos-phase11-environment
+/path/to/dedicated/sanos-phase11-environment/bin/python -m pip install \
+  -c constraints/phase11-tested-py312.txt -e '.[dev,operator]'
+```
+
+The constraints reproduce the tested direct package versions but do not replace
+the immutable runtime fingerprint captured below, which binds its closed
+numerical package set, solvers, Python/host identity, numerical libraries, CPU
+availability, and thread controls.
+
 ## 1. Freeze paths and source state
 
 Run from the repository root. Choose a durable writable parent on the target
@@ -94,10 +107,10 @@ env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --dry-run --lo
 ```
 
 `pip check` must report `No broken requirements found`. Rebuild the environment
-from the repository's `.[dev,operator]` installation if it reports an
-incompatible dependency; that combination supplies the live operator,
-reference-consumer, offline-test and JAX requirements. Do not use a failing
-interpreter for the production run.
+with the checked-in constraint command above if it reports an incompatible
+dependency; `.[dev,operator]` supplies the live operator, reference-consumer,
+offline-test and JAX requirements. Do not use a failing interpreter for the
+production run.
 
 Every `gpuctl resources` check must be `OK`. A command failure, local fallback,
 `WARN`, `STOP`, `UNAVAILABLE`, or `ERROR` blocks material work. The Raw plan

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import tomllib
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
@@ -33,6 +35,43 @@ from sanos.runtime import runtime_fingerprint
 from sanos.widb.calendar import business_dates
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _requirement_name(requirement: str) -> str:
+    match = re.match(r"^[A-Za-z0-9_.-]+", requirement)
+    assert match is not None
+    return match.group(0).lower().replace("_", "-")
+
+
+def test_phase11_tested_constraints_cover_dev_operator_requirements() -> None:
+    project = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    required = {
+        _requirement_name(requirement)
+        for group in (
+            project["dependencies"],
+            project["optional-dependencies"]["dev"],
+            project["optional-dependencies"]["operator"],
+        )
+        for requirement in group
+    }
+    constraints: dict[str, str] = {}
+    for line in (
+        ROOT / "constraints" / "phase11-tested-py312.txt"
+    ).read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        assert stripped.count("==") == 1
+        name, pinned_version = stripped.split("==")
+        normalized = _requirement_name(name)
+        assert normalized not in constraints
+        assert pinned_version
+        constraints[normalized] = pinned_version
+
+    assert required <= constraints.keys()
+    assert {"clarabel", "ipython", "jaxlib"} <= constraints.keys()
 
 
 def _read(path: Path) -> dict[str, object]:

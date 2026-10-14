@@ -41,6 +41,18 @@ python -m sanos doctor
 pytest
 ```
 
+For the guarded Phase 11 production workflow, resolve the tested CPython 3.12
+operator/developer stack rather than whatever versions happen to be newest:
+
+```bash
+python -m pip install -c constraints/phase11-tested-py312.txt -e '.[dev,operator]'
+```
+
+This constraints file is not a universal lock. The production runtime
+fingerprint remains the authoritative record of its closed numerical package
+set, CVXPY solvers, Python/host identity, numerical libraries, CPU availability,
+and thread settings.
+
 The raw workflow is documented in the [WRDS runbook](docs/wrds-runbook.md).
 Generated raw data, intermediates, datasets, experiments, logs, and temporary
 files must remain outside this Git working tree.
@@ -53,6 +65,7 @@ files must remain outside this Git working tree.
 - `reference/quant_data/`: exact, non-installed migration snapshot with filtered
   source history; never a runtime or data dependency.
 - `configs/`: checked-in portable dataset and experiment configurations.
+- `constraints/`: reviewed version constraints for guarded production runs.
 - `docs/`: architecture, data contracts, compatibility decisions, and runbooks.
 - `PORTING.md`: source revisions and migration provenance.
 

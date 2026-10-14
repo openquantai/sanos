@@ -89,9 +89,8 @@ the final quantitative re-review passed.
 
 This evidence does not authorize Phase 11. Production remains blocked until
 the owner explicitly classifies the 2025-01-02 and 2025-01-03 pilot differences
-and the accepted pilot has no unexplained discrepancy. The current `vqdata`
-interpreter also fails `pip check` against WRDS 3.5.0 because its IPython,
-pandas and SQLAlchemy versions are too new; the runbook requires a compatible
-environment before material work. `gpuctl resources --json` reported healthy
-local measurements but an unreachable daemon, which is also a material-work
-blocker under the runbook.
+and the accepted pilot has no unexplained discrepancy. The shared `vqdata`
+interpreter incompatibility and sandbox-local resource-daemon observation above
+were subsequently resolved without changing that owner gate: a dedicated
+environment passes `pip check`, and authoritative daemon-backed resource checks
+are all `OK`. See [environment-readiness-evidence.md](environment-readiness-evidence.md).
