@@ -38,10 +38,12 @@ from sanos.datasets.promotion import (
     promote_reference_dataset,
     validate_reference_promotion,
 )
+from sanos.production import PHASE11_EVIDENCE_INDEX_SCHEMA
 from sanos.reference import (
     EXPERIMENT_REFERENCE_REPORT_SCHEMA,
     REFERENCE_REPORT_SCHEMA,
 )
+from sanos.runtime import runtime_fingerprint
 
 
 def _locations(root: Path) -> StorageLocations:
@@ -92,6 +94,9 @@ def _write_evidence_index(
     source_revision: str,
     artifact_binding: dict[str, object],
 ) -> dict[str, object]:
+    runtime = runtime_fingerprint()
+    runtime_path = path.parent / "runtime-fingerprint.json"
+    atomic_write_json(runtime_path, runtime)
     public_pointer = ArtifactPointer(
         StorageClass.DATASET,
         "sanos/public-candidate/name-reference-test",
@@ -117,12 +122,16 @@ def _write_evidence_index(
         "experiment_comparison",
     )
     body: dict[str, object] = {
-        "schema": "sanos-phase11-evidence-index-v2",
+        "schema": PHASE11_EVIDENCE_INDEX_SCHEMA,
         "run_id": "test-run",
         "source_revision": source_revision,
         "network_accessed_during_validation": False,
         "source_generation": "default-v1",
-        "resolved_versions": {},
+        "resolved_versions": {
+            "public_plan": "test-public-plan-v1",
+            "experiment_plan": "test-experiment-plan-v1",
+            "runtime_fingerprint": runtime["fingerprint_id"],
+        },
         "coverage": {},
         "artifacts": {
             "public_candidate": {
@@ -134,6 +143,14 @@ def _write_evidence_index(
         "evidence": {
             name: {"file": f"{name}.json", "sha256": "9" * 64, "bytes": 1}
             for name in evidence_names
+        }
+        | {
+            "runtime_fingerprint": {
+                "file": runtime_path.name,
+                "sha256": _sha256(runtime_path),
+                "bytes": runtime_path.stat().st_size,
+                "identity": runtime["fingerprint_id"],
+            }
         },
     }
     index = {"evidence_id": canonical_sha256(body), **body}
@@ -409,10 +426,14 @@ def test_promotion_is_output_first_self_contained_and_wildcard_reusable(
     )
     plan = plan_reference_promotion(config)
     old_spec = plan.spec.with_producer_version("old-reviewed-producer-v1")
+    evidence_records = cast(dict[str, Any], evidence_index["evidence"])
+    runtime_record = cast(dict[str, Any], evidence_records["runtime_fingerprint"])
     promotion = {
         "schema": PROMOTION_SCHEMA,
         "canonical_promotion_ready": True,
         **{key: value for key, value in config.to_document().items() if key != "name"},
+        "runtime_fingerprint_id": runtime_record["identity"],
+        "runtime_fingerprint_sha256": runtime_record["sha256"],
         "validation": {
             "dataset_shallow_semantic": "passed",
             "dataset_deep_lineage": "passed",
@@ -432,6 +453,9 @@ def test_promotion_is_output_first_self_contained_and_wildcard_reusable(
         builder.copy_file("daily-comparison.json", daily_path)
         builder.copy_file("experiment-comparison.json", experiment_path)
         builder.copy_file("evidence-index.json", evidence_path)
+        builder.copy_file(
+            "runtime-fingerprint.json", evidence / "runtime-fingerprint.json"
+        )
         builder.copy_file("code-review.json", code_path)
         builder.copy_file("quantitative-review.json", quant_path)
     source_path = dataset.path
@@ -539,10 +563,89 @@ def test_promotion_build_is_concurrent_atomic_and_rejects_stale_evidence(
             evidence_index_path=stale_path,
         )
 
+    legacy_index = json.loads(paths["evidence"].read_text(encoding="utf-8"))
+    legacy_index["schema"] = "sanos-phase11-evidence-index-v2"
+    legacy_body = {key: value for key, value in legacy_index.items() if key != "evidence_id"}
+    legacy_index["evidence_id"] = canonical_sha256(legacy_body)
+    legacy_path = paths["evidence"].with_name("legacy-evidence-index.json")
+    atomic_write_json(legacy_path, legacy_index)
+    with pytest.raises(ReferencePromotionError, match="schema changed"):
+        create_review_attestation(
+            store,
+            role="code",
+            reviewer="code-reviewer",
+            review_date=date(2026, 10, 13),
+            review_reference="review://code/legacy",
+            dataset=config.dataset,
+            daily_report_path=paths["daily"],
+            experiment_report_path=paths["experiment"],
+            evidence_index_path=legacy_path,
+        )
+
+    mismatched_runtime_index = json.loads(
+        paths["evidence"].read_text(encoding="utf-8")
+    )
+    mismatched_runtime_index["resolved_versions"]["runtime_fingerprint"] = "0" * 64
+    mismatched_body = {
+        key: value
+        for key, value in mismatched_runtime_index.items()
+        if key != "evidence_id"
+    }
+    mismatched_runtime_index["evidence_id"] = canonical_sha256(mismatched_body)
+    mismatched_path = paths["evidence"].with_name("mismatched-runtime-index.json")
+    atomic_write_json(mismatched_path, mismatched_runtime_index)
+    with pytest.raises(ReferencePromotionError, match="runtime identity differs"):
+        create_review_attestation(
+            store,
+            role="code",
+            reviewer="code-reviewer",
+            review_date=date(2026, 10, 13),
+            review_reference="review://code/runtime-mismatch",
+            dataset=config.dataset,
+            daily_report_path=paths["daily"],
+            experiment_report_path=paths["experiment"],
+            evidence_index_path=mismatched_path,
+        )
+
+    runtime_path = paths["evidence"].with_name("runtime-fingerprint.json")
+    runtime_bytes = runtime_path.read_bytes()
+    runtime_path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ReferencePromotionError, match="Runtime fingerprint is invalid"):
+        create_review_attestation(
+            store,
+            role="code",
+            reviewer="code-reviewer",
+            review_date=date(2026, 10, 13),
+            review_reference="review://code/runtime-tamper",
+            dataset=config.dataset,
+            daily_report_path=paths["daily"],
+            experiment_report_path=paths["experiment"],
+            evidence_index_path=paths["evidence"],
+        )
+    with pytest.raises(ReferencePromotionError, match="Runtime fingerprint is invalid"):
+        create_promotion_config(
+            store,
+            name=config.name,
+            dataset=config.dataset,
+            daily_report_path=paths["daily"],
+            experiment_report_path=paths["experiment"],
+            evidence_index_path=paths["evidence"],
+            code_review_path=paths["code"],
+            quantitative_review_path=paths["quant"],
+        )
+    runtime_path.write_bytes(runtime_bytes)
+
     promoted_index = results[0].path / "evidence-index.json"
+    promoted_index_bytes = promoted_index.read_bytes()
     promoted_index.write_text("{}\n", encoding="utf-8")
     with pytest.raises(ArtifactError):
         validate_reference_promotion(store, results[0].artifact)
+    promoted_index.write_bytes(promoted_index_bytes)
+
+    promoted_runtime = results[1].path / "runtime-fingerprint.json"
+    promoted_runtime.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ArtifactError):
+        validate_reference_promotion(store, results[1].artifact)
 
 
 def test_review_attestation_is_exactly_evidence_bound() -> None:
@@ -605,3 +708,10 @@ def test_review_attestation_is_exactly_evidence_bound() -> None:
             evidence_index_id="f" * 64,
             evidence_index_sha256="0" * 64,
         )
+
+
+def test_promotion_versions_bind_runtime_evidence() -> None:
+    for function in (promote_reference_dataset, validate_reference_promotion):
+        versioned = cast(Any, function)
+        assert "_verified_runtime_evidence" in dict(versioned.version.dependencies[1])
+        assert str(versioned.version)

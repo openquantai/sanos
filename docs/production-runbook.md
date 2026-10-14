@@ -7,7 +7,10 @@ Dataset, or Experiment artifact. The legacy 891-date HDF5 collection and
 hash-pinned `quant_data` code are read-only comparison oracles.
 
 Do not start until the guarded Phase 10 pilot has passed code and quantitative
-review. WRDS connection opens are governed by the host-local account-scoped
+review, the owner has explicitly classified the 2025-01-02 and 2025-01-03
+cross-expiry discrepancies, and the accepted pilot report contains no
+`unexplained_discrepancy`. Diagnostic-review approval alone does not clear this
+owner gate. WRDS connection opens are governed by the host-local account-scoped
 monitor: they are serialized, and a fourth failed or interrupted attempt in a
 rolling 15-minute window is blocked before network access.
 
@@ -21,6 +24,12 @@ configuration key; replace the placeholder before running anything.
 ```bash
 set -o pipefail
 export SANOS_RUNS_ROOT=/path/to/writable/sanos
+export SANOS_PYTHON=/absolute/path/to/the/project/python
+export SANOS_REPOSITORY="$(pwd -P)"
+export PYTHONPATH="$SANOS_REPOSITORY/src"
+test -x "$SANOS_PYTHON"
+test "$("$SANOS_PYTHON" -c 'import pathlib, sanos; print(pathlib.Path(sanos.__file__).resolve())')" = \
+  "$SANOS_REPOSITORY/src/sanos/__init__.py"
 mkdir -p "$SANOS_RUNS_ROOT"
 test -d "$SANOS_RUNS_ROOT" && test -w "$SANOS_RUNS_ROOT"
 export PRODUCTION_ROOT="$SANOS_RUNS_ROOT/phase-11/data"
@@ -42,7 +51,20 @@ git --git-dir=.git-real --work-tree=. rev-parse HEAD \
 git --git-dir=.git-real --work-tree=. status --porcelain=v1 \
   > "$PRODUCTION_EVIDENCE/sanos-status.txt"
 test ! -s "$PRODUCTION_EVIDENCE/sanos-status.txt"
+
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --log-format json \
+  production runtime-fingerprint \
+  --output "$PRODUCTION_EVIDENCE/runtime-fingerprint.json" \
+  | tee "$PRODUCTION_EVIDENCE/runtime-fingerprint-initial.jsonl"
 ```
+
+Run the commands from the clean SANOS repository root. Use this exact
+`SANOS_PYTHON` and exported checkout `PYTHONPATH` for every command in the run;
+the import assertion prevents an installed or namespace package from silently
+replacing the reviewed checkout. The immutable, path-free runtime fingerprint
+records Python, numerical package, CVXPY solver, BLAS/LAPACK, and thread-setting
+identities. It contains neither hostnames nor credentials and refuses
+conflicting reuse.
 
 If the root exists, do not delete or reuse it as a fresh attempt. Inspect it,
 preserve its evidence, and choose a separately named attempt. An interrupted
@@ -51,22 +73,31 @@ accepted run resumes its same root and immutable identities.
 ## 2. Offline preflight
 
 ```bash
+"$SANOS_PYTHON" -m pip check \
+  | tee "$PRODUCTION_EVIDENCE/pip-check.log"
+
 env PYTHONPATH=src WRDS_OFF=1 PYTHONDONTWRITEBYTECODE=1 \
-  python -m pytest -q -p no:cacheprovider \
+  "$SANOS_PYTHON" -m pytest -q -p no:cacheprovider \
   2>&1 | tee "$PRODUCTION_EVIDENCE/offline-tests.log"
 
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   doctor --strict-locations | tee "$PRODUCTION_EVIDENCE/doctor.jsonl"
 
 gpuctl resources --json | tee "$PRODUCTION_EVIDENCE/resources-before.json"
 
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
   raw download --source optionmetrics --ticker SPX \
   --start-date 2022-01-03 --end-date 2025-08-29 \
   --source-generation default-v1 \
   --max-wrds-connections 2 --retry-attempts 1 \
   | tee "$PRODUCTION_EVIDENCE/raw-plan.jsonl"
 ```
+
+`pip check` must report `No broken requirements found`. Rebuild the environment
+from the repository's `.[dev,operator]` installation if it reports an
+incompatible dependency; that combination supplies the live operator,
+reference-consumer, offline-test and JAX requirements. Do not use a failing
+interpreter for the production run.
 
 Every `gpuctl resources` check must be `OK`. A command failure, local fallback,
 `WARN`, `STOP`, `UNAVAILABLE`, or `ERROR` blocks material work. The Raw plan
@@ -81,7 +112,7 @@ Prove the empty root cannot silently access WRDS:
 
 ```bash
 set +e
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   raw download --source optionmetrics --ticker SPX \
   --start-date 2022-01-03 --end-date 2025-08-29 \
   --source-generation default-v1 --cache-only \
@@ -110,7 +141,7 @@ gpuctl resources --json | tee "$PRODUCTION_EVIDENCE/resources-pre-live.json"
 Run exactly one live command, with two connections and one query attempt:
 
 ```bash
-env -u WRDS_OFF sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env -u WRDS_OFF "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   raw download --source optionmetrics --ticker SPX \
   --start-date 2022-01-03 --end-date 2025-08-29 \
   --source-generation default-v1 \
@@ -126,7 +157,7 @@ partitions and queries only misses.
 Disable WRDS and validate the completed Raw set:
 
 ```bash
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   raw download --source optionmetrics --ticker SPX \
   --start-date 2022-01-03 --end-date 2025-08-29 \
   --source-generation default-v1 --cache-only \
@@ -142,26 +173,26 @@ Require 3,676 reused, zero missing, zero downloaded, and
 Every remaining build and comparison command runs with `WRDS_OFF=1`.
 
 ```bash
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
   intermediate build --config configs/widb-spx-reference.json \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
   --through fitted-day --include-half-days --source optionmetrics \
   --source-generation default-v1 --max-workers 2 \
   | tee "$PRODUCTION_EVIDENCE/intermediate-plan.jsonl"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   intermediate build --config configs/widb-spx-reference.json \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
   --through fitted-day --include-half-days --source optionmetrics \
   --source-generation default-v1 --max-workers 2 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/intermediate-build.jsonl"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   dataset build --config configs/widb-spx-reference.json \
   --require-existing-intermediates --max-workers 2 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/dataset-build.jsonl"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   dataset validate --config configs/widb-spx-reference.json --deep-lineage \
   2>&1 | tee "$PRODUCTION_EVIDENCE/dataset-validation.jsonl"
 ```
@@ -174,7 +205,7 @@ exact immutable identity and records their canonical digests.
 ## 5. Full daily migration comparison
 
 ```bash
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   reference compare-daily --config configs/widb-spx-reference.json \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
   --source optionmetrics --source-generation default-v1 \
@@ -198,7 +229,7 @@ The checked templates are portable policy documents. Bind them mechanically to
 the actual internal Dataset and write the canonical final documents once:
 
 ```bash
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   production finalize-configs \
   --dataset-name widb-spx-2022-2025-reference \
   --dataset-artifact-id <dataset-id> \
@@ -215,12 +246,12 @@ public until the rights-gated workflow in
 [public-datasets.md](public-datasets.md) is complete:
 
 ```bash
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   dataset public build \
   --config "$PRODUCTION_EVIDENCE/final-configs/public-candidate.json" \
   2>&1 | tee "$PRODUCTION_EVIDENCE/public-candidate-build.jsonl"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   dataset public validate \
   --config "$PRODUCTION_EVIDENCE/final-configs/public-candidate.json" \
   --deep-lineage \
@@ -234,19 +265,19 @@ capabilities, and exact source projection. Do not run `approval-template` or
 Build, deeply validate, and compare the disposable Experiment:
 
 ```bash
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   experiment build \
   --config "$PRODUCTION_EVIDENCE/final-configs/experiment.json" \
   --max-workers 2 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/experiment-build.jsonl"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   experiment validate \
   --config "$PRODUCTION_EVIDENCE/final-configs/experiment.json" \
   --deep-lineage \
   2>&1 | tee "$PRODUCTION_EVIDENCE/experiment-validation.jsonl"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   reference compare-experiment \
   --config "$PRODUCTION_EVIDENCE/final-configs/experiment.json" \
   --legacy-root "$LEGACY_MARKET_ROOT" \
@@ -269,10 +300,16 @@ fingerprint.
 Build the immutable evidence index before requesting either review:
 
 ```bash
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --log-format json \
+  production runtime-fingerprint \
+  --output "$PRODUCTION_EVIDENCE/runtime-fingerprint.json" \
+  | tee "$PRODUCTION_EVIDENCE/runtime-fingerprint-final.jsonl"
+
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   production evidence-index \
   --run-id "$PRODUCTION_RUN_ID" \
   --source-revision "$(tr -d '\n' < "$PRODUCTION_EVIDENCE/sanos-revision.txt")" \
+  --runtime-fingerprint "$PRODUCTION_EVIDENCE/runtime-fingerprint.json" \
   --raw-preflight "$PRODUCTION_EVIDENCE/raw-plan.jsonl" \
   --raw-validation "$PRODUCTION_EVIDENCE/raw-cache-validation.jsonl" \
   --dataset-validation "$PRODUCTION_EVIDENCE/dataset-validation.jsonl" \
@@ -285,7 +322,9 @@ env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
   | tee "$PRODUCTION_EVIDENCE/evidence-index.jsonl"
 ```
 
-This command requires the initial plan to contain 3,676 misses and no reuse,
+The final fingerprint command must report reuse of the byte-identical initial
+document. A changed runtime blocks indexing. The evidence-index command
+requires the initial plan to contain 3,676 misses and no reuse,
 the final Raw validation to contain 3,676 unique complete artifacts, the exact
 three boundary dependencies, deep validation of all three materializations,
 the exact 26-gap/one-typed-empty comparison contract, and consistent Dataset
@@ -300,7 +339,7 @@ evidence, including `evidence-index.json` and its named files.
 Only after both have approved it should the operator materialize attestations:
 
 ```bash
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   dataset reference review-template \
   --role code --reviewer <code-reviewer> --review-date <YYYY-MM-DD> \
   --review-reference <durable-code-review-reference> \
@@ -311,7 +350,7 @@ env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
   --evidence-index "$PRODUCTION_EVIDENCE/evidence-index.json" \
   --output "$PRODUCTION_EVIDENCE/code-review.json"
 
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   dataset reference review-template \
   --role quantitative --reviewer <quant-reviewer> --review-date <YYYY-MM-DD> \
   --review-reference <durable-quant-review-reference> \
@@ -322,7 +361,7 @@ env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
   --evidence-index "$PRODUCTION_EVIDENCE/evidence-index.json" \
   --output "$PRODUCTION_EVIDENCE/quantitative-review.json"
 
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   dataset reference promotion-template \
   --name spx-2022-2025-reference \
   --dataset-name widb-spx-2022-2025-reference \
@@ -334,7 +373,7 @@ env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
   --quantitative-review "$PRODUCTION_EVIDENCE/quantitative-review.json" \
   --output "$PRODUCTION_EVIDENCE/promotion-config.json"
 
-env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
   dataset reference promote \
   --config "$PRODUCTION_EVIDENCE/promotion-config.json" \
   --daily-report "$PRODUCTION_EVIDENCE/daily-comparison.json" \
@@ -346,15 +385,16 @@ env WRDS_OFF=1 sanos -v --root "$PRODUCTION_ROOT" --log-format json \
 ```
 
 Promotion revalidates Dataset lineage and the Experiment, binds all 918 Dataset
-partitions to the fitted artifacts in the daily report, and atomically publishes
-a self-contained immutable designation. It does not alter the Dataset or grant
+partitions to the fitted artifacts in the daily report, retains the exact
+runtime fingerprint beside the evidence index, and atomically publishes a
+self-contained immutable designation. It does not alter the Dataset or grant
 redistribution rights.
 
 Validate by exact designation ID. Shallow validation needs no upstream
 artifacts; `--deep-lineage` deliberately reopens them:
 
 ```bash
-env WRDS_OFF=1 sanos --root "$PRODUCTION_ROOT" --log-format json \
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   dataset reference validate --name spx-2022-2025-reference \
   --artifact-id <promotion-id>
 ```

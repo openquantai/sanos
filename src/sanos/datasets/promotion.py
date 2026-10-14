@@ -31,11 +31,12 @@ from sanos.reference import (
     EXPERIMENT_REFERENCE_REPORT_SCHEMA,
     REFERENCE_REPORT_SCHEMA,
 )
+from sanos.runtime import RuntimeFingerprintError, load_runtime_fingerprint
 
 PROMOTION_CONFIG_SCHEMA = "sanos-canonical-reference-promotion-config-v2"
-PROMOTION_SCHEMA = "sanos-canonical-reference-promotion-v2"
+PROMOTION_SCHEMA = "sanos-canonical-reference-promotion-v3"
 REVIEW_ATTESTATION_SCHEMA = "sanos-canonical-reference-review-v2"
-_PHASE11_EVIDENCE_INDEX_SCHEMA = "sanos-phase11-evidence-index-v2"
+_PHASE11_EVIDENCE_INDEX_SCHEMA = "sanos-phase11-evidence-index-v3"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -110,7 +111,7 @@ def _verified_report(path: Path, *, schema: str, label: str) -> tuple[dict[str, 
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         _digest,
         _load_json,
@@ -160,6 +161,7 @@ def _verified_evidence_index(
     if index.get("source_revision") != expected_binding.get("dataset_source_revision"):
         raise ReferencePromotionError("Phase 11 evidence index source revision differs")
     expected_evidence = {
+        "runtime_fingerprint",
         "raw_preflight",
         "raw_validation",
         "dataset_validation",
@@ -179,6 +181,27 @@ def _verified_evidence_index(
         for value in evidence.values()
     ):
         raise ReferencePromotionError("Phase 11 evidence file inventory is malformed")
+    runtime_evidence = evidence["runtime_fingerprint"]
+    if (
+        set(runtime_evidence) != {"file", "sha256", "bytes", "identity"}
+        or runtime_evidence.get("file") != "runtime-fingerprint.json"
+        or _HEX_64.fullmatch(str(runtime_evidence.get("identity"))) is None
+    ):
+        raise ReferencePromotionError("Phase 11 runtime evidence is malformed")
+    resolved_versions = cast(Mapping[str, Any], index["resolved_versions"])
+    if (
+        set(resolved_versions)
+        != {"public_plan", "experiment_plan", "runtime_fingerprint"}
+        or any(
+            not isinstance(item, str) or not item
+            for item in resolved_versions.values()
+        )
+        or resolved_versions.get("runtime_fingerprint")
+        != runtime_evidence.get("identity")
+    ):
+        raise ReferencePromotionError(
+            "Phase 11 resolved runtime identity differs from runtime evidence"
+        )
     evidence_id = _digest(index.get("evidence_id"), "Phase 11 evidence_id")
     body = {key: value for key, value in index.items() if key != "evidence_id"}
     if canonical_sha256(body) != evidence_id:
@@ -255,6 +278,39 @@ def _verified_evidence_index(
                 f"Phase 11 evidence index does not bind exact {name}"
             )
     return index, _promotion_sha256_file(path)
+
+
+@version(
+    "1.0",
+    dependencies=[_promotion_sha256_file, load_runtime_fingerprint],
+)
+def _verified_runtime_evidence(
+    index: Mapping[str, Any], evidence_index_path: Path
+) -> tuple[dict[str, Any], Path, str]:
+    """Verify the runtime file named and hashed by a checked evidence index."""
+
+    evidence = index.get("evidence")
+    runtime_record = (
+        evidence.get("runtime_fingerprint") if isinstance(evidence, Mapping) else None
+    )
+    if not isinstance(runtime_record, Mapping):
+        raise ReferencePromotionError("Phase 11 index has no runtime fingerprint")
+    file_name = runtime_record.get("file")
+    if file_name != "runtime-fingerprint.json":
+        raise ReferencePromotionError("Phase 11 runtime filename changed")
+    path = evidence_index_path.parent / file_name
+    try:
+        fingerprint = load_runtime_fingerprint(path)
+    except RuntimeFingerprintError as exc:
+        raise ReferencePromotionError(f"Runtime fingerprint is invalid: {exc}") from exc
+    sha256 = _promotion_sha256_file(path)
+    if (
+        runtime_record.get("identity") != fingerprint.get("fingerprint_id")
+        or runtime_record.get("sha256") != sha256
+        or runtime_record.get("bytes") != path.stat().st_size
+    ):
+        raise ReferencePromotionError("Runtime fingerprint differs from evidence index")
+    return fingerprint, path, sha256
 
 
 @version("1.1")
@@ -575,7 +631,7 @@ def _daily_approvals_sha256(report: Mapping[str, Any]) -> str | None:
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactStore,
         CanonicalReferencePromotionConfig,
@@ -587,6 +643,7 @@ def _daily_approvals_sha256(report: Mapping[str, Any]) -> str | None:
         _promotion_sha256_file,
         _validate_review,
         _verified_evidence_index,
+        _verified_runtime_evidence,
     ],
 )
 def create_promotion_config(
@@ -640,6 +697,7 @@ def create_promotion_config(
             "experiment_report_sha256": experiment_sha,
         },
     )
+    _verified_runtime_evidence(evidence_index, evidence_index_path)
     evidence_index_id = cast(str, evidence_index["evidence_id"])
     identity = _review_identity(
         dataset=dataset,
@@ -723,7 +781,7 @@ def _partition_binding(
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactStore,
         _daily_approvals_sha256,
@@ -786,7 +844,7 @@ def validate_reference_evidence_binding(
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactStore,
         _experiment_report_pointer,
@@ -797,6 +855,7 @@ def validate_reference_evidence_binding(
         _report_evidence,
         make_review_attestation,
         _verified_evidence_index,
+        _verified_runtime_evidence,
     ],
 )
 def create_review_attestation(
@@ -851,6 +910,7 @@ def create_review_attestation(
             "experiment_report_sha256": experiment_sha,
         },
     )
+    _verified_runtime_evidence(evidence_index, evidence_index_path)
     return make_review_attestation(
         role=role,
         reviewer=reviewer,
@@ -883,6 +943,7 @@ def create_review_attestation(
         _promotion_sha256_file,
         _validate_review,
         _verified_evidence_index,
+        _verified_runtime_evidence,
     ],
 )
 def _config_matches_evidence(
@@ -894,7 +955,13 @@ def _config_matches_evidence(
     evidence_index_path: Path,
     code_path: Path,
     quantitative_path: Path,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
     manifest_sha, configuration_id, source_revision = _manifest_identity(
         dataset_artifact, "Dataset"
     )
@@ -946,6 +1013,7 @@ def _config_matches_evidence(
         or evidence_index_sha != config.evidence_index_sha256
     ):
         raise ReferencePromotionError("Phase 11 evidence index differs from promotion config")
+    _verified_runtime_evidence(evidence_index, evidence_index_path)
     identity = _review_identity(
         dataset=config.dataset,
         dataset_manifest_sha256=config.dataset_manifest_sha256,
@@ -965,10 +1033,10 @@ def _config_matches_evidence(
         raise ReferencePromotionError("Code review bytes differ from promotion config")
     if _promotion_sha256_file(quantitative_path) != config.quantitative_review_sha256:
         raise ReferencePromotionError("Quantitative review bytes differ from promotion config")
-    return daily, experiment, code, quantitative
+    return daily, experiment, code, quantitative, evidence_index
 
 
-@version("1.1", dependencies=[CanonicalReferencePromotionConfig])
+@version("1.2", dependencies=[CanonicalReferencePromotionConfig])
 def _promotion_readme(config: CanonicalReferencePromotionConfig) -> str:
     return f"""# Canonical SANOS reference designation: {config.name}
 
@@ -976,7 +1044,8 @@ This immutable evidence artifact designates Dataset `{config.dataset.artifact_id
 canonical SANOS research reference after full fresh-WRDS validation, 891-date migration
 comparison, Experiment tensor comparison, and independent code and quantitative reviews.
 The exact Phase 11 evidence index reviewed by both reviewers is included and bound by
-identity and checksum.
+identity and checksum. The exact solver and numerical runtime fingerprint is retained
+beside it and independently revalidated.
 It does not modify or replace the Dataset and it grants no redistribution rights.
 
 Validate it without upstream artifacts using `sanos dataset reference validate`; add
@@ -985,7 +1054,7 @@ Validate it without upstream artifacts using `sanos dataset reference validate`;
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactSpec,
         CanonicalReferencePromotionConfig,
@@ -1003,7 +1072,7 @@ def reference_promotion_producer_version() -> str:
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactSpec,
         CanonicalReferencePromotionConfig,
@@ -1030,7 +1099,7 @@ def plan_reference_promotion(
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactStore,
         CanonicalReferencePromotionConfig,
@@ -1038,6 +1107,7 @@ def plan_reference_promotion(
         _config_matches_evidence,
         _partition_binding,
         _promotion_readme,
+        _verified_runtime_evidence,
         plan_reference_promotion,
         validate_experiment,
         validate_internal_dataset,
@@ -1100,7 +1170,7 @@ def promote_reference_dataset(
     code_path = cast(Path, code_review_path)
     quantitative_path = cast(Path, quantitative_review_path)
     dataset_artifact = store.validate(config.dataset)
-    daily, _experiment, _code, _quantitative = _config_matches_evidence(
+    daily, _experiment, _code, _quantitative, evidence_index = _config_matches_evidence(
         config,
         dataset_artifact=dataset_artifact,
         daily_path=daily_path,
@@ -1108,6 +1178,9 @@ def promote_reference_dataset(
         evidence_index_path=evidence_path,
         code_path=code_path,
         quantitative_path=quantitative_path,
+    )
+    runtime, runtime_path, runtime_sha256 = _verified_runtime_evidence(
+        evidence_index, evidence_path
     )
     dataset_summary = validate_internal_dataset(
         store,
@@ -1149,6 +1222,8 @@ def promote_reference_dataset(
         "experiment_report_sha256": config.experiment_report_sha256,
         "evidence_index_id": config.evidence_index_id,
         "evidence_index_sha256": config.evidence_index_sha256,
+        "runtime_fingerprint_id": runtime["fingerprint_id"],
+        "runtime_fingerprint_sha256": runtime_sha256,
         "code_review_sha256": config.code_review_sha256,
         "quantitative_review_sha256": config.quantitative_review_sha256,
         "validation": {
@@ -1167,6 +1242,7 @@ def promote_reference_dataset(
         "daily_report_id": config.daily_report_id,
         "experiment_report_id": config.experiment_report_id,
         "evidence_index_id": config.evidence_index_id,
+        "runtime_fingerprint_id": runtime["fingerprint_id"],
         "partition_count": binding["partition_count"],
         "validation_outcome": "passed",
     }
@@ -1179,6 +1255,7 @@ def promote_reference_dataset(
             staging.copy_file("daily-comparison.json", daily_path)
             staging.copy_file("experiment-comparison.json", experiment_path)
             staging.copy_file("evidence-index.json", evidence_path)
+            staging.copy_file("runtime-fingerprint.json", runtime_path)
             staging.copy_file("code-review.json", code_path)
             staging.copy_file("quantitative-review.json", quantitative_path)
     except ArtifactExistsError:
@@ -1216,12 +1293,13 @@ def _parse_promotion_config(value: object) -> CanonicalReferencePromotionConfig:
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         _parse_promotion_config,
         _report_evidence,
         _validate_review,
         _verified_evidence_index,
+        _verified_runtime_evidence,
         canonical_value,
         validate_experiment,
         validate_internal_dataset,
@@ -1265,6 +1343,8 @@ def validate_reference_promotion(
         "experiment_report_sha256",
         "evidence_index_id",
         "evidence_index_sha256",
+        "runtime_fingerprint_id",
+        "runtime_fingerprint_sha256",
         "code_review_sha256",
         "quantitative_review_sha256",
         "validation",
@@ -1326,6 +1406,14 @@ def validate_reference_promotion(
         or evidence_index_sha != config.evidence_index_sha256
     ):
         raise ReferencePromotionError("Copied Phase 11 evidence index differs")
+    runtime, _runtime_path, runtime_sha256 = _verified_runtime_evidence(
+        evidence_index, evidence_index_path
+    )
+    if (
+        promotion.get("runtime_fingerprint_id") != runtime.get("fingerprint_id")
+        or promotion.get("runtime_fingerprint_sha256") != runtime_sha256
+    ):
+        raise ReferencePromotionError("Copied runtime fingerprint evidence differs")
     identity = _review_identity(
         dataset=config.dataset,
         dataset_manifest_sha256=config.dataset_manifest_sha256,

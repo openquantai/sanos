@@ -14,11 +14,18 @@ checks are implemented offline. The current authoritative completion reviews
 are under `reviews/program/`; earlier design blockers in phase reviews are
 historical unless they are also listed in the compatibility decision register.
 
-No live WRDS pilot or fresh 2022--2025 production build has run. Those remain
-guarded by the account-scoped connection-attempt monitor, the account-concurrency
-check, and a daemon-backed all-OK resource result. The separately identified
-Direct-200 neural training producer remains deferred experiment work; it is not
-part of the daily-front HDF5 parity gate and does not define the SANOS Dataset.
+A fresh-WRDS 16-session pilot has run. Twelve dates match, 2024-12-24 is the
+declared oracle gap, 2025-01-08 is the typed-empty policy day, and 2025-01-02/03
+remain unexplained differences in the final cross-expiry `MkArbFree` solve.
+The full fresh 2022--2025 production build has not run and remains blocked on
+owner classification of those two dates plus the monitored safety gates. The
+separately identified Direct-200 neural training producer remains deferred
+experiment work; it is not part of the daily-front HDF5 parity gate and does
+not define the SANOS Dataset. Phase 11 evidence and canonical promotion bind an
+immutable runtime fingerprint covering the exact Python, numerical packages,
+CVXPY solvers, BLAS/LAPACK runtime, CPU availability and numerical thread
+controls; the fingerprint was independently code- and quantitatively reviewed
+on 2026-10-14.
 
 Actions mean:
 

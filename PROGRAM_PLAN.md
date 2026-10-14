@@ -1,13 +1,16 @@
 # SANOS standalone program plan
 
 Status: implementation in progress; Phases 0 through 9 are complete with dual
-review. Phase 10's offline prerequisites are complete, and Phase 11/12 offline
-production, packaging, and operator-readiness work passed final code and
-quantitative review on 2026-10-13.
-Public redistribution approval remains a separate human/legal action. The
-account-scoped attempt monitor is implemented and offline-tested; the live pilot
-remains pending exact-commit preflight evidence and a healthy daemon-backed
-resource gate. No live WRDS access has occurred.
+review. A fresh-WRDS 16-session Phase 10 pilot completed: 12 dates match the
+legacy oracle, 2024-12-24 is the expected oracle gap, 2025-01-08 is the expected
+policy-empty day, and 2025-01-02/03 remain unexplained cross-expiry solve
+discrepancies. The code and quantitative reviewers approved that diagnosis but
+not a numerical-policy change. Phase 11 remains blocked on the owner's explicit
+classification of those two dates. Phase 11/12 offline production, packaging,
+and operator-readiness tooling otherwise passed final code and quantitative
+review on 2026-10-13. Exact numerical-runtime evidence binding was added and
+passed independent code and quantitative review on 2026-10-14. Public
+redistribution approval remains a separate human/legal action.
 
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
@@ -517,9 +520,12 @@ change has an approved compatibility decision and adapter.
 
 ### Phase 10 — Fresh-download pilot
 
-Offline prerequisite status: implemented, tested, and approved independently by
-the code and quantitative reviewers. The operational pilot and its external
-evidence review are still pending; Phase 11 remains blocked.
+Pilot status: the fresh-WRDS 16-session representative pilot completed. Twelve
+dates match, one declared oracle gap and one typed-empty policy day behave as
+expected, and 2025-01-02/03 differ in the final cross-expiry `MkArbFree` solve.
+Independent code and quantitative review approved the diagnosis. Owner approval
+is still required before those two differences can be classified; Phase 11
+remains blocked.
 
 - Run `gpuctl resources --json` as required by host policy before material work.
 - Enforce the account-scoped connection-attempt monitor immediately before each
@@ -537,8 +543,11 @@ docs are complete; discrepancies are explained or approved.
 Offline contract status: the exact full-range comparator, Experiment tensor
 comparator, deterministic downstream-config finalizer, indexed evidence
 contract, canonical designation, and human runbook are implemented, tested, and
-independently approved. Live execution remains blocked by the Phase 10 pilot
-and monitored safety gates.
+independently approved. Live execution remains blocked by the unresolved Phase
+10 owner classification and monitored safety gates. The accepted evidence
+index and canonical-reference designation additionally bind a closed,
+path-free fingerprint of the exact Python, package, solver, BLAS/LAPACK, CPU
+availability, and numerical-thread runtime.
 
 - Through the connection-attempt monitor, download every required raw partition
   fresh. Do not read old raw/intermediate data as an input.

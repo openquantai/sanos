@@ -26,10 +26,15 @@ from sanos.reference.compare import (
     REFERENCE_REPORT_SCHEMA,
 )
 from sanos.reference.experiment_compare import EXPERIMENT_REFERENCE_REPORT_SCHEMA
+from sanos.runtime import (
+    RuntimeFingerprintError,
+    load_runtime_fingerprint,
+    runtime_fingerprint,
+)
 from sanos.widb.calendar import business_dates
 
 PHASE11_CONFIG_BUNDLE_SCHEMA = "sanos-phase11-downstream-config-bundle-v1"
-PHASE11_EVIDENCE_INDEX_SCHEMA = "sanos-phase11-evidence-index-v2"
+PHASE11_EVIDENCE_INDEX_SCHEMA = "sanos-phase11-evidence-index-v3"
 PHASE11_DATASET_NAMESPACE = "widb/internal/name-widb-spx-2022-2025-reference"
 PHASE11_START_DATE = "2022-01-03"
 PHASE11_END_DATE = "2025-08-29"
@@ -270,7 +275,7 @@ def write_phase11_downstream_configs(output_directory: Path, bundle: Mapping[str
 
 
 @version(
-    f"1.2-plans-{_DOWNSTREAM_PLAN_VERSION_SHA256}",
+    f"1.3-plans-{_DOWNSTREAM_PLAN_VERSION_SHA256}",
     dependencies=[
         _read_json,
         _read_jsonl,
@@ -279,15 +284,19 @@ def write_phase11_downstream_configs(output_directory: Path, bundle: Mapping[str
         _one_event,
         _production_pointer,
         _require_fields,
+        canonical_json,
         canonical_sha256,
         business_dates,
         finalize_phase11_downstream_configs,
+        load_runtime_fingerprint,
+        runtime_fingerprint,
     ],
 )
 def build_phase11_evidence_index(
     *,
     run_id: str,
     source_revision: str,
+    runtime_fingerprint_path: Path,
     raw_preflight_path: Path,
     raw_validation_path: Path,
     dataset_validation_path: Path,
@@ -303,6 +312,16 @@ def build_phase11_evidence_index(
         raise Phase11EvidenceError("run_id must be a portable 1-128 character label")
     if _HEX_40.fullmatch(source_revision) is None:
         raise Phase11EvidenceError("source_revision must be exact lowercase 40-hex")
+
+    try:
+        runtime = load_runtime_fingerprint(runtime_fingerprint_path)
+        current_runtime = runtime_fingerprint()
+    except RuntimeFingerprintError as exc:
+        raise Phase11EvidenceError(f"Runtime fingerprint is invalid: {exc}") from exc
+    if canonical_json(runtime) != canonical_json(current_runtime):
+        raise Phase11EvidenceError(
+            "Runtime fingerprint differs from the active evidence-index environment"
+        )
 
     preflight_events = _read_jsonl(raw_preflight_path, "Raw preflight")
     preflight_plan = _one_event(preflight_events, "raw_plan", "Raw preflight")
@@ -674,6 +693,7 @@ def build_phase11_evidence_index(
                 "resolved_versions": {
                     "public_plan": _PUBLIC_PLAN_VERSION,
                     "experiment_plan": _EXPERIMENT_PLAN_VERSION,
+                    "runtime_fingerprint": runtime["fingerprint_id"],
                 },
                 "coverage": {
                     "ticker": "SPX",
@@ -702,6 +722,10 @@ def build_phase11_evidence_index(
                 },
                 "artifact_binding": None,
                 "evidence": {
+                    "runtime_fingerprint": _file_evidence(
+                        runtime_fingerprint_path,
+                        identity=str(runtime["fingerprint_id"]),
+                    ),
                     "raw_preflight": _file_evidence(raw_preflight_path),
                     "raw_validation": _file_evidence(raw_validation_path),
                     "dataset_validation": _file_evidence(
@@ -730,7 +754,7 @@ def build_phase11_evidence_index(
     return {"evidence_id": canonical_sha256(body), **body}
 
 
-@version("1.0", dependencies=[_production_pointer])
+@version("1.1", dependencies=[_production_pointer])
 def validate_phase11_public_candidate_binding(
     index: Mapping[str, Any],
     *,
@@ -767,7 +791,7 @@ def validate_phase11_public_candidate_binding(
     }
 
 
-@version("1.1", dependencies=[canonical_sha256])
+@version("1.2", dependencies=[canonical_sha256])
 def attach_phase11_artifact_binding(
     index: Mapping[str, Any], binding: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -838,7 +862,7 @@ def attach_phase11_artifact_binding(
     return {"evidence_id": canonical_sha256(body), **body}
 
 
-@version("1.1", dependencies=[atomic_write_json])
+@version("1.2", dependencies=[atomic_write_json])
 def write_phase11_evidence_index(output: Path, index: Mapping[str, Any]) -> bool:
     """Write once, or shallowly reuse an identical complete evidence index."""
 

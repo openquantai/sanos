@@ -93,6 +93,11 @@ from sanos.reference import (
     write_experiment_comparison_report,
 )
 from sanos.resources import reference_catalog_path, runtime_resource_inventory
+from sanos.runtime import (
+    RuntimeFingerprintError,
+    runtime_fingerprint,
+    write_runtime_fingerprint,
+)
 from sanos.widb.build import IntermediateBuildRequest, build_intermediates
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.wrds import (
@@ -485,6 +490,7 @@ def status(context: CliContext) -> None:
         reference_compare_daily_available=True,
         reference_compare_experiment_available=True,
         phase11_config_finalization_available=True,
+        phase11_runtime_fingerprint_available=True,
         phase11_evidence_index_available=True,
         live_wrds_verified=False,
         network_accessed=False,
@@ -543,6 +549,40 @@ def config_resources(context: CliContext) -> None:
 @main.group()
 def production() -> None:
     """Finalize and validate the frozen Phase 11 production evidence."""
+
+
+@production.command("runtime-fingerprint")
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Immutable canonical JSON runtime evidence path.",
+)
+@click.pass_obj
+def production_runtime_fingerprint(context: CliContext, output: Path) -> None:
+    """Capture or verify the exact path-free numerical runtime identity."""
+
+    try:
+        fingerprint = runtime_fingerprint()
+        created = (
+            False
+            if context.dry_run
+            else write_runtime_fingerprint(output, fingerprint)
+        )
+    except (OSError, RuntimeFingerprintError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "production_runtime_fingerprint_result",
+        status="planned" if context.dry_run else "passed",
+        fingerprint_id=fingerprint["fingerprint_id"],
+        output=None if context.dry_run else output,
+        created=created,
+        reused=not context.dry_run and not created,
+        dry_run=context.dry_run,
+        network_accessed=False,
+        filesystem_modified=created,
+    )
 
 
 @production.command("finalize-configs")
@@ -627,6 +667,11 @@ def production_finalize_configs(
     help="Exact 40-hex revision; defaults to packaged or clean-checkout provenance.",
 )
 @click.option(
+    "--runtime-fingerprint",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+)
+@click.option(
     "--raw-preflight",
     type=click.Path(path_type=Path, dir_okay=False, exists=True),
     required=True,
@@ -677,6 +722,7 @@ def production_evidence_index(
     context: CliContext,
     run_id: str,
     source_revision: str | None,
+    runtime_fingerprint: Path,
     raw_preflight: Path,
     raw_validation: Path,
     dataset_validation: Path,
@@ -695,6 +741,7 @@ def production_evidence_index(
         index = build_phase11_evidence_index(
             run_id=run_id,
             source_revision=resolved_revision,
+            runtime_fingerprint_path=runtime_fingerprint,
             raw_preflight_path=raw_preflight,
             raw_validation_path=raw_validation,
             dataset_validation_path=dataset_validation,

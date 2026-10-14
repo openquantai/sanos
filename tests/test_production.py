@@ -5,6 +5,7 @@ import json
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -28,6 +29,7 @@ from sanos.reference.compare import (
     REFERENCE_REPORT_SCHEMA,
 )
 from sanos.reference.experiment_compare import EXPERIMENT_REFERENCE_REPORT_SCHEMA
+from sanos.runtime import runtime_fingerprint
 from sanos.widb.calendar import business_dates
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +136,7 @@ def _evidence_files(tmp_path: Path) -> dict[str, Path]:
     paths = {
         name: tmp_path / name
         for name in (
+            "runtime-fingerprint.json",
             "raw-preflight.jsonl",
             "raw-validation.jsonl",
             "dataset-validation.jsonl",
@@ -144,6 +147,7 @@ def _evidence_files(tmp_path: Path) -> dict[str, Path]:
             "experiment-report.json",
         )
     }
+    _write_json(paths["runtime-fingerprint.json"], runtime_fingerprint())
     _write_jsonl(
         paths["raw-preflight.jsonl"],
         [
@@ -316,6 +320,7 @@ def _build_index(paths: dict[str, Path]) -> dict[str, object]:
     index = build_phase11_evidence_index(
         run_id="fresh-reference-20261013",
         source_revision="d" * 40,
+        runtime_fingerprint_path=paths["runtime-fingerprint.json"],
         raw_preflight_path=paths["raw-preflight.jsonl"],
         raw_validation_path=paths["raw-validation.jsonl"],
         dataset_validation_path=paths["dataset-validation.jsonl"],
@@ -369,6 +374,9 @@ def test_phase11_evidence_index_binds_complete_offline_chain(tmp_path: Path) -> 
     paths = _evidence_files(tmp_path)
     index = _build_index(paths)
     assert index["schema"] == PHASE11_EVIDENCE_INDEX_SCHEMA
+    assert index["resolved_versions"]["runtime_fingerprint"] == (  # type: ignore[index]
+        runtime_fingerprint()["fingerprint_id"]
+    )
     assert index["artifacts"] == {
         "internal_dataset": {
             **_dataset_pointer().as_dict(),
@@ -400,12 +408,20 @@ def test_phase11_evidence_index_binds_complete_offline_chain(tmp_path: Path) -> 
     with pytest.raises(Phase11EvidenceError, match="other content"):
         write_phase11_evidence_index(output, changed)
 
+    versioned = cast(Any, build_phase11_evidence_index)
+    dependencies = set(dict(versioned.version.dependencies[1]))
+    assert {"canonical_json", "load_runtime_fingerprint", "runtime_fingerprint"} <= (
+        dependencies
+    )
+    assert str(versioned.version)
+
 
 def test_phase11_public_candidate_binding_rejects_stale_manifest(tmp_path: Path) -> None:
     paths = _evidence_files(tmp_path)
     index = build_phase11_evidence_index(
         run_id="fresh-reference-20261013",
         source_revision="d" * 40,
+        runtime_fingerprint_path=paths["runtime-fingerprint.json"],
         raw_preflight_path=paths["raw-preflight.jsonl"],
         raw_validation_path=paths["raw-validation.jsonl"],
         dataset_validation_path=paths["dataset-validation.jsonl"],
@@ -461,4 +477,31 @@ def test_phase11_evidence_rejects_raw_reuse_in_fresh_preflight(tmp_path: Path) -
     events[0]["missing"] = 3675
     _write_jsonl(paths["raw-preflight.jsonl"], events)
     with pytest.raises(Phase11EvidenceError, match="Raw preflight plan"):
+        _build_index(paths)
+
+
+def test_phase11_evidence_rejects_missing_malformed_and_stale_runtime(
+    tmp_path: Path,
+) -> None:
+    paths = _evidence_files(tmp_path)
+    runtime_path = paths["runtime-fingerprint.json"]
+    runtime_path.unlink()
+    with pytest.raises(Phase11EvidenceError, match="Runtime fingerprint is invalid"):
+        _build_index(paths)
+
+    _write_json(runtime_path, {})
+    with pytest.raises(Phase11EvidenceError, match="Runtime fingerprint is invalid"):
+        _build_index(paths)
+
+    stale = runtime_fingerprint()
+    stale["python"]["compiler"] = "stale-compiler"  # type: ignore[index]
+    stale_body = {key: value for key, value in stale.items() if key != "fingerprint_id"}
+    stale["fingerprint_id"] = canonical_sha256(stale_body)
+    _write_json(runtime_path, stale)
+    with pytest.raises(Phase11EvidenceError, match="differs from the active"):
+        _build_index(paths)
+
+    stale["python"]["compiler"] = "tampered-compiler"  # type: ignore[index]
+    _write_json(runtime_path, stale)
+    with pytest.raises(Phase11EvidenceError, match="Runtime fingerprint is invalid"):
         _build_index(paths)

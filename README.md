@@ -217,6 +217,8 @@ and legacy-parity details.
 After the complete fresh Dataset and Experiment pass the full-range daily and
 consumer comparisons, independent code and quantitative reviews are bound into
 an immutable designation with `sanos dataset reference`. The designation is
-self-contained, shallow-validatable without lineage, and does not alter the
-internal Dataset or grant redistribution rights. The exact operator sequence is
-in the [fresh production runbook](docs/production-runbook.md).
+self-contained, retains the exact numerical-runtime fingerprint reviewed with
+the evidence index, is shallow-validatable without lineage, and does not alter
+the internal Dataset or grant redistribution rights. Capture it with `sanos
+production runtime-fingerprint`; the exact operator sequence is in the [fresh
+production runbook](docs/production-runbook.md).

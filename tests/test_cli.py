@@ -95,6 +95,7 @@ def test_status_json_reports_daily_intermediate_capability(tmp_path: Path) -> No
     assert payload["experiment_build_available"] is True
     assert payload["experiment_validate_available"] is True
     assert payload["phase11_config_finalization_available"] is True
+    assert payload["phase11_runtime_fingerprint_available"] is True
     assert payload["phase11_evidence_index_available"] is True
     assert payload["live_wrds_verified"] is False
 
@@ -143,8 +144,91 @@ def test_production_help_lists_frozen_operator_contract() -> None:
     result = CliRunner().invoke(main, ["production", "--help"])
 
     assert result.exit_code == 0, result.output
+    assert "runtime-fingerprint" in result.output
     assert "finalize-configs" in result.output
     assert "evidence-index" in result.output
+
+
+def test_runtime_fingerprint_cli_is_offline_rootless_reusable_and_dry_run_safe(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "runtime-fingerprint.json"
+    arguments = [
+        "--log-format",
+        "json",
+        "production",
+        "runtime-fingerprint",
+        "--output",
+        str(output),
+    ]
+    runner = CliRunner()
+    first = runner.invoke(
+        main,
+        arguments,
+        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-appear"},
+    )
+    assert first.exit_code == 0, first.output
+    first_payload = json.loads(first.output)
+    assert first_payload["created"] is True
+    assert first_payload["reused"] is False
+    assert first_payload["network_accessed"] is False
+    assert first_payload["fingerprint_id"] == json.loads(
+        output.read_text(encoding="utf-8")
+    )["fingerprint_id"]
+    assert "must-not-appear" not in output.read_text(encoding="utf-8")
+
+    second = runner.invoke(main, arguments, env={"WRDS_OFF": "1"})
+    assert second.exit_code == 0, second.output
+    second_payload = json.loads(second.output)
+    assert second_payload["created"] is False
+    assert second_payload["reused"] is True
+
+    dry_output = tmp_path / "dry-runtime-fingerprint.json"
+    dry = runner.invoke(
+        main,
+        [
+            "--dry-run",
+            "--log-format",
+            "json",
+            "production",
+            "runtime-fingerprint",
+            "--output",
+            str(dry_output),
+        ],
+        env={"WRDS_OFF": "1"},
+    )
+    assert dry.exit_code == 0, dry.output
+    dry_payload = json.loads(dry.output)
+    assert dry_payload["status"] == "planned"
+    assert dry_payload["filesystem_modified"] is False
+    assert not dry_output.exists()
+
+
+def test_runtime_fingerprint_cli_rejects_conflicting_existing_output(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "runtime-fingerprint.json"
+    runner = CliRunner()
+    arguments = [
+        "--log-format",
+        "json",
+        "production",
+        "runtime-fingerprint",
+        "--output",
+        str(output),
+    ]
+    first = runner.invoke(main, arguments, env={"WRDS_OFF": "1"})
+    assert first.exit_code == 0, first.output
+    conflicting = json.loads(output.read_text(encoding="utf-8"))
+    conflicting["python"]["compiler"] = "conflicting-compiler"
+    body = {key: value for key, value in conflicting.items() if key != "fingerprint_id"}
+    conflicting["fingerprint_id"] = canonical_sha256(body)
+    output.write_text(json.dumps(conflicting) + "\n", encoding="utf-8")
+
+    result = runner.invoke(main, arguments, env={"WRDS_OFF": "1"})
+    assert result.exit_code == 4, result.output
+    payload = json.loads(result.output)
+    assert "already exists with other content" in payload["message"]
 
 
 def test_explicit_bad_config_uses_stable_configuration_exit(tmp_path: Path) -> None:
