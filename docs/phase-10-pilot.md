@@ -215,6 +215,55 @@ an immutable record binding the exact date, fields, fresh artifact/data
 digests, legacy file digest, explanation, approver, date and durable reference.
 Fresh values are never changed to force oracle equality.
 
+### Materializing an explicit owner decision
+
+This step is permitted only after both reviewers have accepted the discrepancy
+diagnosis and the owner has explicitly approved the exact dates. It records a
+technical migration-discrepancy decision; it is **not** approval to redistribute
+the internal or public Dataset. The CLI cannot authenticate the approver or
+prove that the external reviews occurred.
+
+For the reviewed 2025-01-02/03 solver-runtime discrepancies, set non-secret
+owner metadata and create the document from the immutable blocked report:
+
+```bash
+export OWNER_NAME='owner identity'
+export OWNER_APPROVAL_DATE='YYYY-MM-DD'
+export OWNER_DECISION_REFERENCE='durable non-secret decision reference'
+export PILOT_APPROVALS="$PILOT_EVIDENCE/daily-comparison-approvals.json"
+
+env WRDS_OFF=1 sanos --root "$PILOT_ROOT" --log-format json \
+  reference approval-document \
+  --comparison-report "$PILOT_EVIDENCE/daily-comparison.json" \
+  --legacy-root "$LEGACY_MARKET_ROOT" \
+  --date 2025-01-02 --date 2025-01-03 \
+  --explanation 'Owner accepts these exact validated solver-runtime discrepancies; no model, tolerance, population, or legacy-value substitution is approved.' \
+  --approver "$OWNER_NAME" \
+  --approval-date "$OWNER_APPROVAL_DATE" \
+  --approval-reference "$OWNER_DECISION_REFERENCE" \
+  --acknowledge-owner-approved-exact-discrepancies \
+  --output "$PILOT_APPROVALS"
+```
+
+Do not place a username, password, OTP, credential path, private filesystem
+path, or proprietary value in the immutable explanation, approver, or decision
+reference. The command reopens the exact fresh artifacts and physical legacy
+files, revalidates the fitted partitions, recomputes the selected comparisons,
+and refuses re-signed widened or contradictory evidence. It never replaces an
+existing output.
+
+Rerun the comparison with the same arguments as above plus:
+
+```bash
+  --approvals "$PILOT_APPROVALS"
+```
+
+Approval of only one date deliberately leaves the report blocked. For the
+reviewed two-date decision, the required result is 12 `match`, two
+`approved_discrepancy`, one `oracle_gap`, one `policy_empty`, and zero
+`unexplained_discrepancy`. Both reviewers must review this new passing report
+before Phase 11 begins.
+
 ## 7. Evidence redaction and review gate
 
 Inspect logs before sharing or committing any summary. Evidence must not

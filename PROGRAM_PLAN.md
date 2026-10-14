@@ -12,6 +12,13 @@ review on 2026-10-13. Exact numerical-runtime evidence binding was added and
 passed independent code and quantitative review on 2026-10-14. Public
 redistribution approval remains a separate human/legal action.
 
+An evidence-bound `reference approval-document` command is implemented and
+independently reviewed. It cannot infer or grant approval: it requires an
+explicit owner attestation and metadata, reopens both physical evidence sides,
+recomputes the selected discrepancies exactly, and writes a separate immutable
+technical decision. No approval document has been created for the pilot; the
+owner gate is unchanged.
+
 Initial review anchors are paper commit
 `15e07d4ab0652f837883550d555f601836685db9` and clean `quant_data` commit
 `de15be96d2f283b6c31e60d3ea47325a0c093ff0`. Phase 0 must reconfirm them.
@@ -526,6 +533,14 @@ expected, and 2025-01-02/03 differ in the final cross-expiry `MkArbFree` solve.
 Independent code and quantitative review approved the diagnosis. Owner approval
 is still required before those two differences can be classified; Phase 11
 remains blocked.
+
+The reviewed `sanos reference approval-document` workflow can record that
+decision without hand-copying fields or hashes. It accepts only an offline,
+no-build, blocked report with no prior approval overlay; revalidates the exact
+fresh fitted artifacts and legacy HDF5 files; reproduces each selected
+comparison; and atomically creates a date-, field-, and digest-scoped document.
+This tooling is not an owner decision and is unrelated to redistribution
+approval.
 
 - Run `gpuctl resources --json` as required by host policy before material work.
 - Enforce the account-scoped connection-attempt monitor immediately before each

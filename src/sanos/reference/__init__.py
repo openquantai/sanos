@@ -1,5 +1,13 @@
 """Read-only adapters for the pinned legacy parity references."""
 
+from sanos.reference.approvals import (
+    build_comparison_approval_document,
+    load_comparison_report_for_approval,
+    preflight_comparison_approval_output,
+    validate_comparison_approval_document,
+    validate_comparison_report_for_approval,
+    write_comparison_approval_document,
+)
 from sanos.reference.compare import (
     APPROVAL_SCHEMA,
     ORACLE_GAP_DECLARATION_SCHEMA,
@@ -46,14 +54,20 @@ __all__ = [
     "ReferenceComparisonError",
     "ReferenceFormatError",
     "catalog_legacy_market",
+    "build_comparison_approval_document",
     "compare_daily_artifacts",
     "compare_experiment_artifact",
     "compare_populated_day",
     "load_comparison_approvals",
+    "load_comparison_report_for_approval",
     "load_oracle_gap_declaration",
     "load_reference_catalog",
     "read_legacy_pytree_hdf5",
+    "preflight_comparison_approval_output",
     "repository_source_revision",
     "write_comparison_report",
+    "validate_comparison_report_for_approval",
+    "validate_comparison_approval_document",
+    "write_comparison_approval_document",
     "write_experiment_comparison_report",
 ]

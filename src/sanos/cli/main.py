@@ -85,10 +85,13 @@ from sanos.reference import (
     DailyComparisonRequest,
     ExperimentComparisonRequest,
     ReferenceComparisonError,
+    build_comparison_approval_document,
     compare_daily_artifacts,
     compare_experiment_artifact,
     load_oracle_gap_declaration,
+    preflight_comparison_approval_output,
     repository_source_revision,
+    write_comparison_approval_document,
     write_comparison_report,
     write_experiment_comparison_report,
 )
@@ -803,6 +806,116 @@ def production_evidence_index(
 @main.group()
 def reference() -> None:
     """Compare existing SANOS artifacts with read-only migration oracles."""
+
+
+@reference.command("approval-document")
+@click.option(
+    "--comparison-report",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Immutable blocked daily comparison report that was independently reviewed.",
+)
+@click.option(
+    "--legacy-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    help="Read-only root containing the exact legacy HDF5 evidence.",
+)
+@click.option(
+    "--date",
+    "approval_dates",
+    required=True,
+    multiple=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Exact unresolved populated date approved by the owner; repeat as needed.",
+)
+@click.option(
+    "--explanation",
+    required=True,
+    help="Owner-approved technical explanation; never include credentials or private paths.",
+)
+@click.option("--approver", required=True, help="Owner identity authorizing this decision.")
+@click.option(
+    "--approval-date",
+    required=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="ISO date on which the owner made the decision.",
+)
+@click.option(
+    "--approval-reference",
+    required=True,
+    help="Durable non-secret reference to the recorded owner decision.",
+)
+@click.option(
+    "--acknowledge-owner-approved-exact-discrepancies",
+    is_flag=True,
+    help=(
+        "Attest that the owner approved these exact migration discrepancies; this is "
+        "not redistribution approval."
+    ),
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="New immutable approval JSON outside the legacy root and Git working tree.",
+)
+@click.pass_obj
+def reference_approval_document(
+    context: CliContext,
+    comparison_report: Path,
+    legacy_root: Path,
+    approval_dates: tuple[datetime, ...],
+    explanation: str,
+    approver: str,
+    approval_date: datetime,
+    approval_reference: str,
+    acknowledge_owner_approved_exact_discrepancies: bool,
+    output: Path,
+) -> None:
+    """Materialize an owner's exact technical migration-discrepancy decision."""
+
+    try:
+        if not acknowledge_owner_approved_exact_discrepancies:
+            raise ValueError(
+                "--acknowledge-owner-approved-exact-discrepancies is required; "
+                "the CLI cannot infer or authenticate owner approval"
+            )
+        locations = context.locations.require_complete()
+        document = build_comparison_approval_document(
+            locations,
+            comparison_report=comparison_report,
+            legacy_root=legacy_root,
+            approval_dates=tuple(value.date() for value in approval_dates),
+            explanation=explanation,
+            approver=approver,
+            approval_date=approval_date.date(),
+            approval_reference=approval_reference,
+        )
+        preflight_comparison_approval_output(output, legacy_root=legacy_root)
+        if not context.dry_run:
+            write_comparison_approval_document(
+                output,
+                document,
+                legacy_root=legacy_root,
+            )
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, ReferenceComparisonError, RuntimeError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "reference_approval_document_result",
+        status="passed",
+        approval_count=len(document["approvals"]),
+        output=None if context.dry_run else output,
+        dry_run=context.dry_run,
+        network_accessed=False,
+        artifacts_built=False,
+        filesystem_modified=not context.dry_run,
+        authority="owner-approved-exact-migration-discrepancies",
+        redistribution_approval=False,
+    )
 
 
 @reference.command("compare-daily")

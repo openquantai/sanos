@@ -141,6 +141,13 @@ artifact identities, summary metrics, classifications, digests, and first
 mismatch keys—not raw vendor rows or values. See the
 [Phase 10 pilot runbook](docs/phase-10-pilot.md) for the mandatory live gate.
 
+If an independently reviewed comparison is blocked only by exact populated
+migration discrepancies, `sanos reference approval-document` can materialize a
+separate owner decision without hand-copying field lists or digests. It reopens
+both fresh and legacy evidence, recomputes each selected comparison, requires
+an explicit owner-attestation flag, and is unrelated to public-redistribution
+approval.
+
 ## Internal Dataset publication
 
 Build the complete internal research Dataset offline from fresh Raw artifacts:
