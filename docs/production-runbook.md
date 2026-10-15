@@ -244,16 +244,17 @@ the actual internal Dataset and write the canonical final documents once:
 ```bash
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   production finalize-configs \
-  --dataset-name widb-spx-2022-2025-reference \
-  --dataset-artifact-id <dataset-id> \
+  --dataset-config configs/widb-spx-reference.json \
   --public-template configs/sanos-public-candidate-reference.json \
   --experiment-template configs/dysanos-daily-front-reference.json \
   --output-directory "$PRODUCTION_EVIDENCE/final-configs" \
   | tee "$PRODUCTION_EVIDENCE/config-finalization.jsonl"
 ```
 
-`final-configs/bundle.json` binds both canonical configuration digests to the
-internal Dataset pointer. The command refuses to overwrite its output. Build
+`final-configs/bundle.json` binds the public projection to the internal Dataset
+and the DySANOS Experiment to the derived public-candidate pointer. The command
+resolves both identities from the dependency graph and refuses to overwrite its
+output. Build
 and deeply validate the separate technical public candidate; it is not legally
 public until the rights-gated workflow in
 [public-datasets.md](public-datasets.md) is complete:

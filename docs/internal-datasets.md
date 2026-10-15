@@ -92,6 +92,14 @@ as required by SANOS support geometry. Rows sharing coarser session/expiry
 geometry retain their original multiplicity and stable source order;
 publication does not sort, group, or deduplicate the fitted-day frame.
 
+The headline price coordinates are explicit: `normalized_strike = K/F`, while
+`pure_bid_price` and `pure_ask_price` are driftless call-equivalent prices
+`C/(DF*F)`. No-arbitrage, smooth SANOS, and finite-DLV fitted prices use that
+same coordinate system. The public projection takes each retained side's
+half-spread from its side-specific `pure_market_call_*` or
+`pure_market_put_*` interval, again in `C/(DF*F)`, without carrying spot,
+forward, or discount-factor levels.
+
 The Dataset also contains:
 
 - `README.md`: human-readable source, unit, coverage, and operation contract;
@@ -112,13 +120,10 @@ Intermediate. Its direct upstream tuple is the exact deduplicated Raw closure;
 its configuration also commits to the date/role mapping so deduplication cannot
 erase current-versus-previous spot roles.
 
-The Phase 11 continuation directly reuses four completed, checksum-pinned
-fitted-day artifacts for 2022-01-03 through 2022-01-06. They keep their
-original immutable identities; SANOS neither rewrites their diagnostics nor
-publishes them under a current-fit identity. `lineage.json`, the Dataset
-manifest, and each partition record preserve their artifact, data, manifest,
-producer, stage, configuration, and diagnostic-schema evidence. Shallow
-validation therefore remains complete after those Intermediates are removed.
+Canonical builds reuse only the exact current fitted-day identity or recompute
+it from Raw. Historical reviewed fits remain recognizable for validation of
+older migration evidence, but their mere presence never changes a new
+Dataset's payload. This keeps publication independent of cache topology.
 
 ## Coverage policy
 

@@ -167,12 +167,13 @@ def _template_policy_id(document: Mapping[str, Any], section: str) -> str:
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         PublicProjectionConfig,
         ExperimentConfig,
         _template_policy_id,
         canonical_sha256,
+        plan_public_candidate,
     ],
 )
 def finalize_phase11_downstream_configs(
@@ -181,7 +182,7 @@ def finalize_phase11_downstream_configs(
     public_template: Mapping[str, Any],
     experiment_template: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Bind portable downstream templates to one exact internal Dataset."""
+    """Bind public projection to internal data and Experiment to that projection."""
 
     if (
         dataset.storage_class is not StorageClass.DATASET
@@ -205,8 +206,9 @@ def finalize_phase11_downstream_configs(
     if not isinstance(experiment_document.get("experiment"), dict):
         raise ValueError("Experiment template has no experiment section")
     public_document["public_dataset"]["source_dataset"] = dataset.as_dict()
-    experiment_document["experiment"]["source_dataset"] = dataset.as_dict()
     public_config = PublicProjectionConfig.from_document(public_document)
+    public_pointer = plan_public_candidate(public_config).dataset_spec.pointer
+    experiment_document["experiment"]["source_dataset"] = public_pointer.as_dict()
     experiment_config = ExperimentConfig.from_document(experiment_document)
     public_final = public_config.to_document()
     experiment_final = experiment_config.to_document()
@@ -581,7 +583,8 @@ def build_phase11_evidence_index(
     )
     if (
         public_config.source_dataset != dataset_pointer
-        or experiment_config.source_dataset.pointer != dataset_pointer
+        or experiment_config.source_dataset.pointer
+        != plan_public_candidate(public_config).dataset_spec.pointer
         or public_section.get("configuration_id")
         != canonical_sha256(public_config.to_document())
         or experiment_section.get("configuration_id")
@@ -680,7 +683,7 @@ def build_phase11_evidence_index(
         or _production_pointer(
             experiment_record.get("source_dataset"), "Experiment report source"
         )
-        != dataset_pointer
+        != public_pointer
     ):
         raise Phase11EvidenceError("Experiment report is not bound to final artifacts")
 

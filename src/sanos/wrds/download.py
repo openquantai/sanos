@@ -356,9 +356,8 @@ def _write_parquet_durable(frame: pl.DataFrame, path: Path) -> None:
 
 
 @version(
-    "1.0",
+    "1.1",
     dependencies=[
-        ArtifactStore,
         RawArtifactRequest,
         RawQuery,
         _write_parquet_durable,
@@ -546,7 +545,6 @@ def _partition_label(partition: RawPartition) -> str:
         build_raw_query,
         inspect_optionmetrics,
         normalize_raw_frame,
-        raw_artifact_request,
         security_secid,
     ],
 )

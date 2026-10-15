@@ -763,7 +763,7 @@ def test_wildcard_reports_actual_reused_artifact_and_stored_version(tmp_path: Pa
     assert wildcard.reuses[0].warning is not None
 
 
-def test_dataset_reuses_exact_reviewed_fit_without_republishing_or_rerunning(
+def test_dataset_recomputes_current_fit_when_a_reviewed_legacy_fit_exists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -867,42 +867,32 @@ def test_dataset_reuses_exact_reviewed_fit_without_republishing_or_rerunning(
     )
     assert result.daily_summary is not None
     assert result.daily_summary.total == 2
-    assert result.daily_summary.reused == 1
-    assert result.daily_summary.completed == 1
+    assert result.daily_summary.reused == 0
+    assert result.daily_summary.completed == 2
     assert result.daily_summary.failed == 0
-    daily_events = [
-        json.loads(line)
-        for line in result.daily_summary.journal_path.read_text(encoding="utf-8").splitlines()
-    ]
-    reused_event = next(item for item in daily_events if item["event"] == "unit_reused")
-    assert reused_event["artifact"] == legacy.pointer.as_dict()
-    assert target_store.resolve(expected) is None
+    assert target_store.resolve(expected) is not None
     dataset = open_internal_dataset(target_store, result.artifact)
-    assert dataset.load_day(trading_date).equals(legacy_frame)
+    assert not dataset.load_day(trading_date).equals(legacy_frame)
     assert dataset.load_day(next_trading_date).height > 0
     lineage = json.loads(
         (dataset.artifact.path / "lineage.json").read_text(encoding="utf-8")
     )
     records = lineage["reviewed_fitted_artifacts"]
-    assert len(records) == 1
-    assert records[0]["artifact"] == legacy.pointer.as_dict()
-    assert records[0]["data_sha256"] == source_data_sha256
-    assert records[0]["manifest_sha256"] == source_manifest_sha256
+    assert records == []
     assert dataset.artifact.manifest["metadata"]["reviewed_fitted_artifacts"] == records
-    forged_chain = (
+    regenerated_chain = (
         expected.pointer,
         plan.daily_artifacts[1].fitted.pointer,
     )
-    with pytest.raises(
-        internal_dataset_module.DatasetValidationError,
-        match="reviewed fitted evidence is incomplete",
-    ):
+    assert (
         internal_dataset_module._validated_reviewed_fitted_records(
             [],
             config=config,
-            chain_fitted=forged_chain,
+            chain_fitted=regenerated_chain,
             partitions=dataset.partitions,
         )
+        == ()
+    )
 
     shutil.rmtree(target_locations.intermediate)
     assert validate_internal_dataset(target_store, result.artifact) == result.validation

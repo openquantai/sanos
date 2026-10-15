@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import date
 from pathlib import Path
@@ -149,6 +150,83 @@ def test_production_help_lists_frozen_operator_contract() -> None:
     assert "runtime-fingerprint" in result.output
     assert "finalize-configs" in result.output
     assert "evidence-index" in result.output
+
+
+def _finalize_arguments(tmp_path: Path) -> list[str]:
+    root = Path(__file__).parents[1]
+    return [
+        "--root",
+        str(tmp_path / "data"),
+        "--log-format",
+        "json",
+        "production",
+        "finalize-configs",
+        "--dataset-config",
+        str(root / "configs" / "widb-spx-reference.json"),
+        "--public-template",
+        str(root / "configs" / "sanos-public-candidate-reference.json"),
+        "--experiment-template",
+        str(root / "configs" / "dysanos-daily-front-reference.json"),
+        "--output-directory",
+        str(tmp_path / "final-configs"),
+    ]
+
+
+def test_finalize_configs_resolves_dataset_graph_from_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_module = importlib.import_module("sanos.cli.main")
+    monkeypatch.setattr(cli_module.ArtifactStore, "validate", lambda *_args, **_kwargs: None)
+    result = CliRunner().invoke(
+        main,
+        ["--dry-run", *_finalize_arguments(tmp_path)],
+        env={"WRDS_OFF": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["event"] == "phase11_configs_finalized"
+    assert payload["dry_run"] is True
+    assert not (tmp_path / "final-configs").exists()
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ([], "Provide --dataset-config"),
+        (
+            ["--dataset-name", "widb-spx-2022-2025-reference", "--dataset-artifact-id", "a" * 64],
+            "Use --dataset-config",
+        ),
+    ],
+)
+def test_finalize_configs_rejects_ambiguous_dataset_selection(
+    tmp_path: Path,
+    extra: list[str],
+    message: str,
+) -> None:
+    arguments = _finalize_arguments(tmp_path)
+    if not extra:
+        index = arguments.index("--dataset-config")
+        del arguments[index : index + 2]
+    else:
+        arguments.extend(extra)
+    result = CliRunner().invoke(main, arguments, env={"WRDS_OFF": "1"})
+
+    assert result.exit_code == 4, result.output
+    assert message in json.loads(result.output)["message"]
+
+
+def test_finalize_configs_requires_the_planned_dataset_to_exist(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        main,
+        _finalize_arguments(tmp_path),
+        env={"WRDS_OFF": "1"},
+    )
+
+    assert result.exit_code == 4, result.output
+    assert "does not exist" in json.loads(result.output)["message"].lower()
 
 
 def test_runtime_fingerprint_cli_is_offline_rootless_reusable_and_dry_run_safe(

@@ -589,10 +589,14 @@ def production_runtime_fingerprint(context: CliContext, output: Path) -> None:
 
 
 @production.command("finalize-configs")
-@click.option("--dataset-name", required=True, help="Exact internal Dataset name.")
+@click.option(
+    "--dataset-config",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Resolve the completed internal Dataset directly from its strict config.",
+)
+@click.option("--dataset-name", help="Exact internal Dataset name.")
 @click.option(
     "--dataset-artifact-id",
-    required=True,
     help="Exact 64-hex internal Dataset artifact identity.",
 )
 @click.option(
@@ -616,20 +620,35 @@ def production_runtime_fingerprint(context: CliContext, output: Path) -> None:
 @click.pass_obj
 def production_finalize_configs(
     context: CliContext,
-    dataset_name: str,
-    dataset_artifact_id: str,
+    dataset_config: Path | None,
+    dataset_name: str | None,
+    dataset_artifact_id: str | None,
     public_template: Path,
     experiment_template: Path,
     output_directory: Path,
 ) -> None:
-    """Bind downstream configurations to one exact published internal Dataset."""
+    """Bind public and Experiment configs to the completed Dataset graph."""
 
     try:
-        dataset_pointer = ArtifactPointer(
-            StorageClass.DATASET,
-            f"widb/internal/name-{dataset_name}",
-            dataset_artifact_id,
-        )
+        if dataset_config is not None:
+            if dataset_name is not None or dataset_artifact_id is not None:
+                raise ValueError(
+                    "Use --dataset-config or the --dataset-name/--dataset-artifact-id pair"
+                )
+            dataset_pointer = plan_internal_dataset(
+                _read_dataset_config(dataset_config)
+            ).dataset_spec.pointer
+        else:
+            if dataset_name is None or dataset_artifact_id is None:
+                raise ValueError(
+                    "Provide --dataset-config or both --dataset-name and "
+                    "--dataset-artifact-id"
+                )
+            dataset_pointer = ArtifactPointer(
+                StorageClass.DATASET,
+                f"widb/internal/name-{dataset_name}",
+                dataset_artifact_id,
+            )
         ArtifactStore(context.locations.require_complete()).validate(dataset_pointer)
         public_document = json.loads(public_template.read_text(encoding="utf-8"))
         experiment_document = json.loads(experiment_template.read_text(encoding="utf-8"))

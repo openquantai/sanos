@@ -110,6 +110,17 @@ def test_phase11_downstream_config_finalization_is_exact_and_immutable(
     bundle = _bundle()
     assert bundle["schema"] == PHASE11_CONFIG_BUNDLE_SCHEMA
     assert bundle["source_dataset"] == _dataset_pointer().as_dict()
+    public_config = PublicProjectionConfig.from_document(
+        bundle["public_candidate"]["configuration"]  # type: ignore[index]
+    )
+    experiment_config = ExperimentConfig.from_document(
+        bundle["experiment"]["configuration"]  # type: ignore[index]
+    )
+    assert public_config.source_dataset == _dataset_pointer()
+    assert (
+        experiment_config.source_dataset.pointer
+        == plan_public_candidate(public_config).dataset_spec.pointer
+    )
     assert bundle["bundle_id"] == canonical_sha256(
         {key: value for key, value in bundle.items() if key != "bundle_id"}
     )
@@ -125,6 +136,9 @@ def test_phase11_downstream_config_finalization_is_exact_and_immutable(
         assert _read(output / file_name) == value["configuration"]
     with pytest.raises(Phase11EvidenceError, match="already exists"):
         write_phase11_downstream_configs(output, bundle)
+
+    dependencies = dict(finalize_phase11_downstream_configs.version.dependencies[1])
+    assert "plan_public_candidate" in dependencies
 
 
 def test_phase11_downstream_config_finalization_rejects_policy_edits() -> None:
@@ -342,7 +356,7 @@ def _evidence_files(tmp_path: Path) -> dict[str, Path]:
         "experiment": {
             "artifact": experiment,
             "manifest_sha256": "3" * 64,
-            "source_dataset": dataset,
+            "source_dataset": public,
         },
         "phase11_contract": {"passed": True},
         "network_accessed": False,

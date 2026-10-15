@@ -4265,7 +4265,12 @@ def _validated_reviewed_fitted_records(
         _pointer_from_value(record["artifact"], "reviewed fitted artifact").artifact_id
         for record in normalized
     }
-    required_ids = {artifact_id for artifact_id, _ in required.values()}
+    chain_ids = {pointer.artifact_id for pointer in chain_fitted}
+    required_ids = {
+        artifact_id
+        for artifact_id, _ in required.values()
+        if artifact_id in chain_ids
+    }
     if recorded_ids != required_ids:
         _fail("Dataset reviewed fitted evidence is incomplete")
     return tuple(normalized)
@@ -4959,7 +4964,7 @@ def _required_reviewed_fitted_sources(
 
 
 @version(
-    "1.1",
+    "1.2",
     dependencies=[
         ArtifactPointer,
         ArtifactStore,
@@ -4977,7 +4982,7 @@ def _validated_reviewed_fitted_sources(
     config: InternalDatasetConfig,
     plan: InternalDatasetPlan,
 ) -> dict[date, ValidatedArtifact]:
-    """Resolve exact accepted fits without republishing them under a new identity."""
+    """Resolve available exact accepted fits without making them build inputs."""
 
     reviewed: dict[date, ValidatedArtifact] = {}
     required_sources = _required_reviewed_fitted_sources(config)
@@ -4992,10 +4997,7 @@ def _validated_reviewed_fitted_sources(
             artifact_id,
         )
         if not store.path_for(pointer).exists():
-            _fail(
-                f"{item.trading_date}: exact reviewed fitted source is missing; "
-                "the accepted successful fit must not be silently recomputed"
-            )
+            continue
         source = store.validate(
             pointer,
             expected=item.fitted,
@@ -5363,12 +5365,11 @@ def _publish_internal_dataset(
 
 
 @version(
-    "1.2",
+    "1.3",
     dependencies=[
         InternalDatasetBuildResult,
         plan_internal_dataset,
         build_intermediates,
-        _validated_reviewed_fitted_sources,
         publish_raw_lineage_catalog,
         _validate_fitted_sources,
         _publish_internal_dataset,
@@ -5438,14 +5439,7 @@ def build_internal_dataset(
     )
     daily_summary: DailyRunSummary | None = None
     try:
-        reviewed_sources = _validated_reviewed_fitted_sources(store, config, plan)
-        if reviewed_sources:
-            journal.emit(
-                "reviewed_fitted_artifacts_reused",
-                plan_id=plan.plan_id,
-                completed=len(reviewed_sources),
-                total=len(plan.expected_dates),
-            )
+        reviewed_sources: dict[date, ValidatedArtifact] = {}
         if not options.require_existing_intermediates:
             daily_result = build_intermediates(
                 locations,
@@ -5463,10 +5457,6 @@ def build_internal_dataset(
                 config.daily,
                 config.surface,
                 progress=progress,
-                _completion_overrides={
-                    trading_date: artifact.pointer
-                    for trading_date, artifact in reviewed_sources.items()
-                },
             )
             daily_summary = daily_result.summary
         fitted_artifacts, statistics, reviewed_records = _validate_fitted_sources(

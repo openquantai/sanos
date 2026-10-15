@@ -198,13 +198,23 @@ Project the complete internal Dataset into the flat scalar, driftless
 SANOS/DLV research contract:
 
 ```bash
+sanos --root /path/to/quant-data production finalize-configs \
+  --dataset-config configs/widb-spx-reference.json \
+  --public-template configs/sanos-public-candidate-reference.json \
+  --experiment-template configs/dysanos-daily-front-reference.json \
+  --output-directory /path/to/run-configs
 sanos --root /path/to/quant-data --dry-run dataset public build \
-  --config configs/sanos-public-candidate-reference.json
+  --config /path/to/run-configs/public-candidate.json
 sanos --root /path/to/quant-data dataset public build \
-  --config configs/sanos-public-candidate-reference.json
+  --config /path/to/run-configs/public-candidate.json
 sanos --root /path/to/quant-data dataset public validate \
-  --config configs/sanos-public-candidate-reference.json
+  --config /path/to/run-configs/public-candidate.json
 ```
+
+The checked public and DySANOS JSON files are policy templates. The finalizer
+resolves the internal Dataset identity from its config, derives the canonical
+public-candidate identity, and binds DySANOS to that public Dataset; no artifact
+ID is copied by hand.
 
 The output is a self-contained `public_candidate`, not a redistribution
 approval. It contains discounted driftless returns, SANOS/DLV state and
@@ -230,11 +240,11 @@ DySANOS daily-front HDF5 input:
 
 ```bash
 sanos --root /path/to/quant-data --dry-run dysanos build \
-  --config configs/dysanos-daily-front-reference.json
+  --config /path/to/run-configs/experiment.json
 sanos --root /path/to/quant-data dysanos build \
-  --config configs/dysanos-daily-front-reference.json --max-workers 2
+  --config /path/to/run-configs/experiment.json --max-workers 2
 sanos --root /path/to/quant-data dysanos validate \
-  --config configs/dysanos-daily-front-reference.json
+  --config /path/to/run-configs/experiment.json
 ```
 
 This Experiment reconstructs model-centred books from public smooth-SANOS mids

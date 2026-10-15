@@ -8,13 +8,19 @@ and capability checks, but it is **not approved for redistribution**.
 
 ## Build without WRDS
 
-The checked reference configuration names an exact internal Dataset pointer:
+The checked reference configuration is a policy template. After building the
+internal Dataset, resolve the graph and emit run-specific immutable configs:
 
 ```console
+sanos --root /path/to/quant-data production finalize-configs \
+  --dataset-config configs/widb-spx-reference.json \
+  --public-template configs/sanos-public-candidate-reference.json \
+  --experiment-template configs/dysanos-daily-front-reference.json \
+  --output-directory /path/to/run-configs
 sanos --root /path/to/quant-data --dry-run dataset public build \
-  --config configs/sanos-public-candidate-reference.json
+  --config /path/to/run-configs/public-candidate.json
 sanos --root /path/to/quant-data -v dataset public build \
-  --config configs/sanos-public-candidate-reference.json
+  --config /path/to/run-configs/public-candidate.json
 ```
 
 Dry-run planning is location-independent, writes nothing, and does not open the
@@ -38,7 +44,7 @@ Validate by configuration or by exact identity:
 
 ```console
 sanos --root /path/to/quant-data dataset public validate \
-  --config configs/sanos-public-candidate-reference.json
+  --config /path/to/run-configs/public-candidate.json
 sanos --root /path/to/quant-data dataset public validate \
   --name sanos-spx-2022-2025-public-candidate \
   --artifact-id <sha256>

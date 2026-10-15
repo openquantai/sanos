@@ -34,8 +34,9 @@ research reference. DySANOS 1.1 derives a disposable HDF5 **Experiment** only
 from the completed public Dataset for the all-history DySANOS
 daily-front consumer. Deleting an Experiment never changes its source Dataset.
 
-The checked-in profile is `configs/dysanos-daily-front-reference.json`. It
-documents the expected public Dataset identity and the recovered selector and
+The checked-in `configs/dysanos-daily-front-reference.json` is a policy
+template. `production finalize-configs` binds it to the public candidate derived
+from the completed internal Dataset. It documents the recovered selector and
 model geometry: smoothness 0.25, literal zero- and
 0.2-business-day exclusions, inclusive NMS `[-3,2]`, 18 business-DTE model
 nodes, 200 inner strike coordinates, and a distinct 0.125-business-day
@@ -56,7 +57,7 @@ WRDS:
 
 ```bash
 sanos --root /path/to/quant-data --dry-run --log-format json \
-  dysanos build --config configs/dysanos-daily-front-reference.json
+  dysanos build --config /path/to/run-configs/experiment.json
 ```
 
 Build after the pinned public Dataset exists. Raw, Intermediate, the internal
@@ -64,7 +65,7 @@ Dataset, and WRDS are not consulted:
 
 ```bash
 sanos --root /path/to/quant-data dysanos build \
-  --config configs/dysanos-daily-front-reference.json \
+  --config /path/to/run-configs/experiment.json \
   --max-workers 2
 ```
 
@@ -85,7 +86,7 @@ Validate the completed artifact without requiring its source:
 
 ```bash
 sanos --root /path/to/quant-data dysanos validate \
-  --config configs/dysanos-daily-front-reference.json
+  --config /path/to/run-configs/experiment.json
 ```
 
 Add `--deep-lineage` only when the source Dataset is still present and should

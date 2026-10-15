@@ -744,7 +744,8 @@ def test_raw_producer_version_closes_over_content_and_safety_contracts() -> None
     assert "_query_optionmetrics_libraries" in content
     assert "_query_optionmetrics_tables" in content
     assert "security_secid" in content
-    assert "_safe_ticker_label" in content
     assert "_date_literal" in content
     assert "WrdsConnectionLease" not in content
     assert "WrdsConnectionAttemptMonitor" not in content
+    assert "ArtifactStore" not in content
+    assert "_validate_lineage" not in content
