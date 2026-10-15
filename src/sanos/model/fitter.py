@@ -9,6 +9,7 @@ import math
 import warnings as warnings
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 import cvxpy as cp
 import numpy as np
@@ -22,7 +23,7 @@ from sanos.model.constants import DAYS_PER_YEAR, ONE_MINUTE, one_minute_year_fra
 from sanos.model.tools import SanosLPSolver, SanosPricer, warn_and_fix_density
 
 
-@version("1.0", dependencies=[SanosLPSolver])
+@version("1.1", dependencies=[SanosLPSolver])
 @dataclass(frozen=True)
 class _StrictSanosLPSolver(SanosLPSolver):
     """HiGHS adapter for the dedicated, strictly feasible DLV projection."""
@@ -40,10 +41,17 @@ class _StrictSanosLPSolver(SanosLPSolver):
             ),
         )
 
-    def _lp_solver_settings(self, *, for_expiry: bool, is_fallback: bool) -> tuple[str, dict]:
+    def _lp_solver_settings(
+        self,
+        *,
+        for_expiry: bool,
+        is_fallback: bool,
+        attempt_algorithm: Literal["simplex", "ipm", "clarabel"] | None = None,
+    ) -> tuple[str, dict]:
         solver, options = super()._lp_solver_settings(
             for_expiry=for_expiry,
             is_fallback=is_fallback,
+            attempt_algorithm=attempt_algorithm,
         )
         if solver == "HIGHS":
             options["highs_options"]["kkt_tolerance"] = self.kkt_tolerance

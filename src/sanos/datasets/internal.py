@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import polars as pl
@@ -249,16 +249,18 @@ def _reason_counts(frame: pl.DataFrame) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-@version("1.0")
+@version("1.1")
 @dataclass(frozen=True, slots=True)
 class _SolverCall:
-    """One logical solve, including an optional adjacent fallback event."""
+    """One logical solve, including its authenticated ordered attempts."""
 
     stage: str
     input_expiry_index: int | None
     expiry_attempt: int | None
     terminal_status: str
     used_fallback: bool
+    terminal_solver: str
+    terminal_algorithm: str
 
 
 @version("1.0", dependencies=[_SolverCall])
@@ -270,8 +272,16 @@ class _TerminalSolverEvidence:
     terminal_solver_call: _SolverCall
 
 
-@version("1.1", dependencies=[_SolverCall])
-def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
+_SolverPolicy = Literal["legacy_two_tier", "smooth_three_tier", "no_fallback"]
+
+
+@version("1.3", dependencies=[_SolverCall])
+def _solver_calls(
+    events: list[Any],
+    label: str,
+    *,
+    solver_policy: _SolverPolicy,
+) -> list[_SolverCall]:
     """Parse and validate the exact diagnostic event and fallback grammar."""
 
     expiry_stages = {"expiry_soft", "expiry_hard"}
@@ -304,16 +314,32 @@ def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
         )
         if set(event) != expected_fields:
             _fail(f"{label} diagnostics {stage} event fields changed")
-        if event.get("algorithm") != "simplex":
-            _fail(f"{label} diagnostics {stage} solver algorithm changed")
+        solver = event.get("solver")
+        algorithm = event.get("algorithm")
         is_fallback = event.get("is_fallback")
         for_expiry = event.get("for_expiry")
         if not isinstance(is_fallback, bool) or not isinstance(for_expiry, bool):
             _fail(f"{label} diagnostics {stage} has invalid boolean fields")
         if for_expiry is not is_expiry:
             _fail(f"{label} diagnostics {stage} has inconsistent expiry scope")
-        expected_solver = "CLARABEL" if is_fallback else "HIGHS"
-        if event.get("solver") != expected_solver:
+        solver_identity = (solver, algorithm, is_fallback)
+        allowed_identities = {("HIGHS", "simplex", False)}
+        if solver_policy == "legacy_two_tier":
+            # Historical two-tier records labeled CLARABEL with the primary
+            # simplex algorithm even though CLARABEL performed the attempt.
+            allowed_identities.add(("CLARABEL", "simplex", True))
+        elif solver_policy == "smooth_three_tier":
+            allowed_identities.update(
+                {
+                    ("HIGHS", "ipm", True),
+                    ("CLARABEL", "clarabel", True),
+                    # Accept already-published historical smooth diagnostics.
+                    ("CLARABEL", "simplex", True),
+                }
+            )
+        elif solver_policy != "no_fallback":
+            _fail(f"{label} diagnostics has an unknown solver policy")
+        if solver_identity not in allowed_identities:
             _fail(f"{label} diagnostics {stage} has inconsistent solver identity")
         status = event.get("status")
         if not isinstance(status, str) or not status:
@@ -364,15 +390,42 @@ def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
                 attempt,
             ):
                 _fail(f"{label} diagnostics has a mismatched fallback event")
+            if fallback["solver"] == "CLARABEL" and fallback["algorithm"] == "clarabel":
+                _fail(f"{label} diagnostics skipped the IPM fallback attempt")
             terminal = fallback
             used_fallback = True
             position += 1
+            if fallback["solver"] == "HIGHS" and fallback["algorithm"] == "ipm":
+                if fallback["status"] in retry_triggers:
+                    if position + 1 >= len(events):
+                        _fail(f"{label} diagnostics has a dangling IPM fallback trigger")
+                    final = events[position + 1]
+                    final_key = validate_event(final)
+                    if (
+                        not final["is_fallback"]
+                        or final["solver"] != "CLARABEL"
+                        or final["algorithm"] != "clarabel"
+                        or final_key != (stage, input_index, attempt)
+                    ):
+                        _fail(f"{label} diagnostics has a mismatched CLARABEL fallback event")
+                    terminal = final
+                    position += 1
+                elif position + 1 < len(events):
+                    possible_final = events[position + 1]
+                    if (
+                        isinstance(possible_final, Mapping)
+                        and possible_final.get("is_fallback") is True
+                        and possible_final.get("stage") == stage
+                    ):
+                        _fail(f"{label} diagnostics retries after terminal IPM status")
         calls.append(
             _SolverCall(
                 stage=stage,
                 input_expiry_index=input_index,
                 expiry_attempt=attempt,
                 terminal_status=cast(str, terminal["status"]),
+                terminal_solver=cast(str, terminal["solver"]),
+                terminal_algorithm=cast(str, terminal["algorithm"]),
                 used_fallback=used_fallback,
             )
         )
@@ -381,7 +434,7 @@ def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
 
 
 @version(
-    "5.3",
+    "5.5",
     dependencies=[
         _solver_calls,
         _strict_dlv_fit_rejections_are_valid,
@@ -392,6 +445,7 @@ def _terminal_solver_events(
     value: Mapping[str, Any],
     label: str,
     *,
+    solver_policy: _SolverPolicy,
     expected_expiry_indices: tuple[int, ...] | None,
     retained_expiry_indices: tuple[int, ...] | None = None,
 ) -> _TerminalSolverEvidence:
@@ -406,7 +460,7 @@ def _terminal_solver_events(
     hard_fallback = successful | {"infeasible", "infeasible_inaccurate"}
 
     if expected_expiry_indices is None:
-        calls = _solver_calls(events, label)
+        calls = _solver_calls(events, label, solver_policy=solver_policy)
         fit_mode = value.get("fit_mode")
         fallback_reason = value.get("fallback_reason")
         strict_fit_rejections = value.get("strict_fit_rejections")
@@ -480,7 +534,11 @@ def _terminal_solver_events(
         )
         if decision_position is None:
             _fail(f"{label} diagnostics expiry {input_index} has no decision event")
-        history = _solver_calls(events[cursor:decision_position], label)
+        history = _solver_calls(
+            events[cursor:decision_position],
+            label,
+            solver_policy=solver_policy,
+        )
         if any(call.input_expiry_index != input_index for call in history):
             _fail(f"{label} diagnostics expiry solve order/count changed")
         decision = events[decision_position]
@@ -569,7 +627,11 @@ def _terminal_solver_events(
             and support_attempt == 1
         ):
             relaxed_support.add(input_index)
-    surface_calls = _solver_calls(events[cursor:], label)
+    surface_calls = _solver_calls(
+        events[cursor:],
+        label,
+        solver_policy=solver_policy,
+    )
     if (
         len(surface_calls) != 1
         or surface_calls[0].stage != "surface"
@@ -799,7 +861,7 @@ def _validate_pricer_state(
     }
 
 
-@version("2.0", dependencies=[SanosLPSolver, _SolverCall])
+@version("2.1", dependencies=[SanosLPSolver, _SolverCall])
 def _surface_calendar_acceptance_tolerance(
     terminal_solver_call: _SolverCall,
     label: str,
@@ -811,12 +873,22 @@ def _surface_calendar_acceptance_tolerance(
         "optimal_inaccurate",
     }:
         _fail(f"{label} diagnostics has no accepted surface solve")
+    if terminal_solver_call.terminal_solver == "HIGHS":
+        _, settings = SanosLPSolver()._lp_solver_settings(
+            for_expiry=False,
+            is_fallback=terminal_solver_call.used_fallback,
+            attempt_algorithm=cast(
+                Literal["simplex", "ipm"], terminal_solver_call.terminal_algorithm
+            ),
+        )
+        return float(settings["highs_options"]["kkt_tolerance"])
+    if terminal_solver_call.terminal_solver != "CLARABEL":
+        _fail(f"{label} diagnostics has an unknown terminal solver")
     _, settings = SanosLPSolver()._lp_solver_settings(
         for_expiry=False,
-        is_fallback=terminal_solver_call.used_fallback,
+        is_fallback=True,
+        attempt_algorithm="clarabel",
     )
-    if not terminal_solver_call.used_fallback:
-        return float(settings["highs_options"]["kkt_tolerance"])
     key = (
         "tol_feas"
         if terminal_solver_call.terminal_status == "optimal"
@@ -2287,6 +2359,7 @@ def validate_fitted_partition(
     initial_solver_evidence = _terminal_solver_events(
         no_arb,
         "no-arbitrage",
+        solver_policy="legacy_two_tier",
         expected_expiry_indices=no_arb_solver_indices,
         retained_expiry_indices=initial_retained_indices,
     )
@@ -2315,6 +2388,7 @@ def validate_fitted_partition(
         smooth_solver_evidence = _terminal_solver_events(
             smooth,
             "smooth",
+            solver_policy="smooth_three_tier",
             expected_expiry_indices=smooth_solver_indices,
             retained_expiry_indices=smooth_retained_indices,
         )
@@ -2322,6 +2396,7 @@ def validate_fitted_partition(
         _terminal_solver_events(
             normalized_dlv_diagnostics,
             "discrete-DLV",
+            solver_policy="no_fallback",
             expected_expiry_indices=None,
         )
     _validate_support_mask_geometry(

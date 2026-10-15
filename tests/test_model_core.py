@@ -627,6 +627,83 @@ def test_lp_solver_forced_primary_user_limit_uses_fallback(
     ]
 
 
+def test_lp_solver_smooth_policy_uses_ipm_before_clarabel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def reject_simplex(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        highs = kwargs.get("highs_options", {})
+        if kwargs.get("solver") == "HIGHS" and highs.get("solver") == "simplex":
+            raise ValueError("Cannot unpack invalid solution")
+        return original_solve(problem, *args, **kwargs)
+
+    monkeypatch.setattr(cp.Problem, "solve", reject_simplex)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="ipm fallback solver"):
+        success, status, fell_back = SanosLPSolver(
+            timeout_seconds=10.0,
+            fallback_algorithms=("ipm", "clarabel"),
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert success and fell_back
+    assert status in {"optimal", "optimal_inaccurate"}
+    assert [(event["solver"], event["algorithm"], event["status"]) for event in events] == [
+        ("HIGHS", "simplex", "invalid_solution"),
+        ("HIGHS", "ipm", status),
+    ]
+
+
+@pytest.mark.parametrize("ipm_failure", ["solver_error", "invalid_solution", "user_limit"])
+def test_lp_solver_ipm_retry_trigger_reaches_clarabel(
+    monkeypatch: pytest.MonkeyPatch,
+    ipm_failure: str,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def force_retries(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        highs = kwargs.get("highs_options", {})
+        if kwargs.get("solver") == "HIGHS" and highs.get("solver") == "simplex":
+            raise SolverError("forced simplex failure")
+        if kwargs.get("solver") == "HIGHS" and highs.get("solver") == "ipm":
+            if ipm_failure == "solver_error":
+                raise SolverError("forced IPM failure")
+            if ipm_failure == "invalid_solution":
+                raise ValueError("Cannot unpack invalid solution")
+            problem._status = "user_limit"
+            return 0.0
+        return original_solve(problem, *args, **kwargs)
+
+    monkeypatch.setattr(cp.Problem, "solve", force_retries)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning) as caught:
+        success, status, fell_back = SanosLPSolver(
+            timeout_seconds=10.0,
+            fallback_algorithms=("ipm", "clarabel"),
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert len(caught) == 2
+    assert success and fell_back
+    assert status in {"optimal", "optimal_inaccurate"}
+    assert [(event["solver"], event["algorithm"], event["status"]) for event in events] == [
+        ("HIGHS", "simplex", "solver_error"),
+        ("HIGHS", "ipm", ipm_failure),
+        ("CLARABEL", "clarabel", status),
+    ]
+
+
 def test_lp_solver_terminal_user_limit_is_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -655,6 +732,61 @@ def test_lp_solver_terminal_user_limit_is_reported(
     ] == [
         ("HIGHS", "user_limit", False),
         ("CLARABEL", "user_limit", True),
+    ]
+
+
+def test_lp_solver_direct_clarabel_user_limit_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def force_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> float:
+        del args, kwargs
+        problem._status = "user_limit"
+        return 0.0
+
+    monkeypatch.setattr(cp.Problem, "solve", force_limit)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    success, status, fell_back = SanosLPSolver(
+        timeout_seconds=10.0,
+        algorithm="clarabel",
+    )(
+        objective=variable,
+        constraints=[variable >= 1.0],
+        variables=[(variable, np.asarray(0.0))],
+        diagnostic_sink=lambda event: events.append(dict(event)),
+        verbose=cast(Any, Context).quiet,
+    )
+    assert (success, status, fell_back) == (False, "user_limit", False)
+    assert [(event["solver"], event["is_fallback"]) for event in events] == [
+        ("CLARABEL", False)
+    ]
+
+
+def test_lp_solver_direct_clarabel_error_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def force_error(problem: cp.Problem, *args: Any, **kwargs: Any) -> None:
+        nonlocal calls
+        del problem, args, kwargs
+        calls += 1
+        raise SolverError("forced direct CLARABEL failure")
+
+    monkeypatch.setattr(cp.Problem, "solve", force_error)
+    variable = cp.Variable()
+    events: list[dict[str, object]] = []
+    with pytest.raises(SolverError, match="forced direct CLARABEL failure"):
+        SanosLPSolver(timeout_seconds=10.0, algorithm="clarabel")(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(0.0))],
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert calls == 1
+    assert [(event["solver"], event["is_fallback"]) for event in events] == [
+        ("CLARABEL", False)
     ]
 
 
@@ -760,7 +892,7 @@ def test_numerical_components_have_resolved_versions() -> None:
         "warn_and_fix_density",
     }
     assert "1.0-blocked-cd013" in str(getattr(SanosPricer, "version"))
-    assert str(getattr(SanosLPSolver, "version")).startswith("1.1")
+    assert str(getattr(SanosLPSolver, "version")).startswith("1.2")
 
 
 def test_defective_reference_jax_optimizer_is_explicitly_blocked() -> None:

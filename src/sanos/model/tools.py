@@ -623,11 +623,12 @@ class SanosPricer:
         return xdensities
 
 
-@version("1.1")
+@version("1.2")
 @dataclass(frozen=True)
 class SanosLPSolver:
     timeout_seconds: float = 60 * 5.0  # timeout in seconds
     algorithm: Literal["simplex", "ipm", "clarabel"] = "simplex"
+    fallback_algorithms: tuple[Literal["ipm", "clarabel"], ...] = ("clarabel",)
     simplex_strategy: int = 1
     _debug_verbose_cvxpy: set[str] | bool | None = (
         None  # Turn 'verbose' on for cvxpy, optionally scoped by solver mode
@@ -642,6 +643,13 @@ class SanosLPSolver:
             0 <= self.simplex_strategy <= 4,
             lambda: f"HiGHS simplex strategy must lie in [0,4], found {self.simplex_strategy}",
         )
+        verify_inp(
+            self.fallback_algorithms in {("clarabel",), ("ipm", "clarabel"), ()},
+            lambda: (
+                "'fallback_algorithms' must be (), ('clarabel',), or "
+                f"('ipm', 'clarabel'), found {self.fallback_algorithms!r}"
+            ),
+        )
 
     def __call__(
         self,
@@ -652,6 +660,8 @@ class SanosLPSolver:
         message_context: callable | str | None = None,
         for_expiry: bool = False,
         is_fallback: bool = False,
+        _attempt_algorithm: Literal["simplex", "ipm", "clarabel"] | None = None,
+        _remaining_fallbacks: tuple[Literal["ipm", "clarabel"], ...] | None = None,
         diagnostic_sink: Callable[[Mapping[str, object]], None] | None = None,
         verbose: Context = Context.quiet,
     ) -> tuple[bool, str, bool]:
@@ -673,18 +683,34 @@ class SanosLPSolver:
                 msg = str(message_context)
             return (msg + ": ") if msg != "" else ""
 
+        attempt_algorithm = (
+            "clarabel"
+            if is_fallback and _attempt_algorithm is None
+            else self.algorithm if _attempt_algorithm is None else _attempt_algorithm
+        )
+        remaining_fallbacks = (
+            (
+                ()
+                if is_fallback or attempt_algorithm == "clarabel"
+                else self.fallback_algorithms
+            )
+            if _remaining_fallbacks is None
+            else _remaining_fallbacks
+        )
+
         def emit(status: str, objective_value: float | None = None) -> None:
             if diagnostic_sink is not None:
                 if objective_value is not None and not math.isfinite(objective_value):
                     objective_value = None
                 diagnostic_sink(
                     {
-                        "solver": (
-                            "CLARABEL"
-                            if is_fallback or self.algorithm == "clarabel"
-                            else "HIGHS"
+                        "solver": "CLARABEL" if attempt_algorithm == "clarabel" else "HIGHS",
+                        "algorithm": (
+                            self.algorithm
+                            if attempt_algorithm == "clarabel"
+                            and self.fallback_algorithms == ("clarabel",)
+                            else attempt_algorithm
                         ),
-                        "algorithm": self.algorithm,
                         "status": status,
                         "is_fallback": is_fallback,
                         "for_expiry": for_expiry,
@@ -716,14 +742,20 @@ class SanosLPSolver:
             )
             try:
                 prob = cp.Problem(cp.Minimize(objective), constraints)
-                slv, opt = self._lp_solver_settings(for_expiry=for_expiry, is_fallback=is_fallback)
+                slv, opt = self._lp_solver_settings(
+                    for_expiry=for_expiry,
+                    is_fallback=is_fallback,
+                    attempt_algorithm=attempt_algorithm,
+                )
                 prob.solve(solver=slv, **opt)
                 prob_status = str(prob.status)
             except SolverError as e:
                 emit("solver_error")
-                if not is_fallback and self.algorithm != "clarabel":
+                if remaining_fallbacks:
+                    next_algorithm, *rest = remaining_fallbacks
                     warnings.warn(
-                        f"{message()}Solver error: {str(e)}. Attempting to solve with fallback solver."
+                        f"{message()}{attempt_algorithm} solver error: {str(e)}. "
+                        f"Attempting {next_algorithm} fallback solver."
                     )
                     return self(
                         objective=objective,
@@ -732,6 +764,8 @@ class SanosLPSolver:
                         message_context=message_context,
                         for_expiry=for_expiry,
                         is_fallback=True,
+                        _attempt_algorithm=next_algorithm,
+                        _remaining_fallbacks=tuple(rest),
                         diagnostic_sink=diagnostic_sink,
                         verbose=verbose,
                     )
@@ -739,28 +773,35 @@ class SanosLPSolver:
             except RuntimeWarning as e:
                 prob_status = f"overflow error ({str(e.__class__.__name__)})"
             except Exception as e:
-                if not is_fallback:
-                    msg = str(e)
-                    if "Cannot unpack invalid solution" in msg:
-                        emit("invalid_solution")
-                        return self(
-                            objective=objective,
-                            constraints=constraints,
-                            variables=variables,
-                            message_context=message_context,
-                            for_expiry=for_expiry,
-                            is_fallback=True,
-                            diagnostic_sink=diagnostic_sink,
-                            verbose=verbose,
-                        )
+                msg = str(e)
+                if "Cannot unpack invalid solution" in msg and remaining_fallbacks:
+                    next_algorithm, *rest = remaining_fallbacks
+                    emit("invalid_solution")
+                    warnings.warn(
+                        f"{message()}{attempt_algorithm} returned an invalid solution. "
+                        f"Attempting {next_algorithm} fallback solver."
+                    )
+                    return self(
+                        objective=objective,
+                        constraints=constraints,
+                        variables=variables,
+                        message_context=message_context,
+                        for_expiry=for_expiry,
+                        is_fallback=True,
+                        _attempt_algorithm=next_algorithm,
+                        _remaining_fallbacks=tuple(rest),
+                        diagnostic_sink=diagnostic_sink,
+                        verbose=verbose,
+                    )
                 emit("unexpected_error")
                 raise type(e)(f"{message()}Unexpected error: {str(e)}.") from e
 
-            if prob_status == "user_limit" and not is_fallback and self.algorithm != "clarabel":
+            if prob_status == "user_limit" and remaining_fallbacks:
+                next_algorithm, *rest = remaining_fallbacks
                 emit(prob_status, None if prob.value is None else float(prob.value))
                 warnings.warn(
-                    f"{message()}Primary solver reached its limit. "
-                    "Attempting to solve with fallback solver."
+                    f"{message()}{attempt_algorithm} solver reached its limit. "
+                    f"Attempting {next_algorithm} fallback solver."
                 )
                 return self(
                     objective=objective,
@@ -769,6 +810,8 @@ class SanosLPSolver:
                     message_context=message_context,
                     for_expiry=for_expiry,
                     is_fallback=True,
+                    _attempt_algorithm=next_algorithm,
+                    _remaining_fallbacks=tuple(rest),
                     diagnostic_sink=diagnostic_sink,
                     verbose=verbose,
                 )
@@ -776,7 +819,13 @@ class SanosLPSolver:
             emit(prob_status, None if prob.value is None else float(prob.value))
         return success, prob_status, is_fallback
 
-    def _lp_solver_settings(self, *, for_expiry: bool, is_fallback: bool) -> tuple[str, dict]:
+    def _lp_solver_settings(
+        self,
+        *,
+        for_expiry: bool,
+        is_fallback: bool,
+        attempt_algorithm: Literal["simplex", "ipm", "clarabel"] | None = None,
+    ) -> tuple[str, dict]:
         """Return lp solver settings"""
         if isinstance(self._debug_verbose_cvxpy, bool):
             verbose = self._debug_verbose_cvxpy
@@ -785,17 +834,24 @@ class SanosLPSolver:
         else:
             verbose = ("expiry" if for_expiry else "surface") in self._debug_verbose_cvxpy
 
-        if not is_fallback and self.algorithm != "clarabel":
+        attempt_algorithm = (
+            "clarabel"
+            if is_fallback and attempt_algorithm is None
+            else self.algorithm if attempt_algorithm is None else attempt_algorithm
+        )
+        if attempt_algorithm != "clarabel":
             highs_options = {
-                "solver": self.algorithm,
+                "solver": attempt_algorithm,
                 "presolve": "on",
                 "threads": 0,
                 "kkt_tolerance": 1e-7,
                 "time_limit": self.timeout_seconds,
             }
-            if self.algorithm == "simplex":
+            if attempt_algorithm == "simplex":
                 # Preserve SANOS's established serial dual-simplex default.
                 highs_options["simplex_strategy"] = self.simplex_strategy
+            else:
+                highs_options["run_crossover"] = "on"
             solver = "HIGHS"
             options = dict(warm_start=True, highs_options=highs_options, verbose=verbose)
         else:

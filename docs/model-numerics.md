@@ -163,11 +163,16 @@ constraints. Returned masks remain aligned to the original input books and
 `input_index` identifies any retained subset of input expiries.
 
 The default LP backend is HiGHS serial dual simplex (`simplex_strategy=1`),
-with presolve, KKT tolerance `1e-7`, and the configured timeout. Solver errors
-or limit exits fall back to CLARABEL with the reference tolerances. `optimal`
-and `optimal_inaccurate` are accepted; infeasible, unbounded, limit, and other
-statuses are surfaced by the fitting layer as explicit failures. The timeout
-identity question remains open under CD-006.
+with presolve, KKT tolerance `1e-7`, and the configured timeout. The shared
+solver's compatibility default remains simplex then CLARABEL. The production
+smooth-SANOS surface opts into simplex, then HiGHS IPM with crossover enabled,
+then CLARABEL. Each retry uses the identical LP and incumbent values and occurs
+only after `solver_error`, the recognized `invalid_solution`, or `user_limit`;
+successful, infeasible, unbounded, and unexpected outcomes are not retried.
+The timeout applies per attempt, so a three-attempt failure may consume three
+configured timeout intervals. HiGHS IPM retains the `1e-7` calendar gate;
+CLARABEL retains its status-dependent reference tolerances. Initial
+no-arbitrage and discrete-DLV fits do not opt into the IPM tier.
 
 Small numerical violations in density mass, positivity, or first moment are
 repaired by the L2 projection onto their joint feasible set. Larger violations

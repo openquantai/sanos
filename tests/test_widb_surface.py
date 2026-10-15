@@ -1381,16 +1381,18 @@ def test_masked_quote_band_residual_ignores_unretained_rows() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "used_fallback", "expected"),
+    ("status", "solver", "algorithm", "used_fallback", "expected"),
     [
-        ("optimal", False, 1.0e-7),
-        ("optimal_inaccurate", False, 1.0e-7),
-        ("optimal", True, 1.0e-6),
-        ("optimal_inaccurate", True, 5.0e-5),
+        ("optimal", "HIGHS", "simplex", False, 1.0e-7),
+        ("optimal", "HIGHS", "ipm", True, 1.0e-7),
+        ("optimal", "CLARABEL", "clarabel", True, 1.0e-6),
+        ("optimal_inaccurate", "CLARABEL", "clarabel", True, 5.0e-5),
     ],
 )
 def test_surface_calendar_tolerance_tracks_validated_terminal_solver_accuracy(
     status: str,
+    solver: str,
+    algorithm: str,
     used_fallback: bool,
     expected: float,
 ) -> None:
@@ -1400,6 +1402,8 @@ def test_surface_calendar_tolerance_tracks_validated_terminal_solver_accuracy(
         expiry_attempt=None,
         terminal_status=status,
         used_fallback=used_fallback,
+        terminal_solver=solver,
+        terminal_algorithm=algorithm,
     )
     assert (
         internal_dataset_module._surface_calendar_acceptance_tolerance(call, "test")
@@ -1422,6 +1426,7 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
     evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "test",
+        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(0,),
     )
@@ -1431,6 +1436,8 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
         expiry_attempt=None,
         terminal_status="optimal",
         used_fallback=True,
+        terminal_solver="CLARABEL",
+        terminal_algorithm="simplex",
     )
     assert (
         internal_dataset_module._surface_calendar_acceptance_tolerance(
@@ -1439,6 +1446,57 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
         )
         == 1.0e-6
     )
+
+
+def test_surface_ipm_fallback_is_authenticated_and_keeps_highs_tolerance() -> None:
+    events = [
+        _solver_event(
+            "expiry_soft",
+            "optimal",
+            input_expiry_index=0,
+            expiry_attempt=1,
+        ),
+        _expiry_decision(0, retained=True, support_attempt=1),
+        _solver_event("surface", "invalid_solution"),
+        {
+            **_solver_event("surface", "optimal", fallback=True),
+            "solver": "HIGHS",
+            "algorithm": "ipm",
+        },
+    ]
+    evidence = internal_dataset_module._terminal_solver_events(
+        {"outcome": "completed", "solver_events": events},
+        "test IPM",
+        solver_policy="smooth_three_tier",
+        expected_expiry_indices=(0,),
+        retained_expiry_indices=(0,),
+    )
+    call = evidence.terminal_solver_call
+    assert (call.terminal_solver, call.terminal_algorithm, call.used_fallback) == (
+        "HIGHS",
+        "ipm",
+        True,
+    )
+    assert internal_dataset_module._surface_calendar_acceptance_tolerance(
+        call, "test IPM"
+    ) == 1.0e-7
+
+    skipped = [
+        _solver_event("surface", "invalid_solution"),
+        {
+            **_solver_event("surface", "optimal", fallback=True),
+            "algorithm": "clarabel",
+        },
+    ]
+    with pytest.raises(
+        internal_dataset_module.DatasetValidationError,
+        match="skipped the IPM fallback",
+    ):
+        internal_dataset_module._solver_calls(
+            skipped,
+            "test skipped IPM",
+            solver_policy="smooth_three_tier",
+        )
 
 
 @pytest.mark.parametrize(
@@ -1451,6 +1509,8 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
                 expiry_attempt=1,
                 terminal_status="optimal",
                 used_fallback=False,
+                terminal_solver="HIGHS",
+                terminal_algorithm="simplex",
             ),
             "accepted surface solve",
         ),
@@ -1461,6 +1521,8 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
                 expiry_attempt=None,
                 terminal_status="invalid_solution",
                 used_fallback=False,
+                terminal_solver="HIGHS",
+                terminal_algorithm="simplex",
             ),
             "accepted surface solve",
         ),
@@ -1958,6 +2020,7 @@ def test_previous_v4_dlv_envelopes_normalize_to_authenticated_v5(
     evidence = internal_dataset_module._terminal_solver_events(
         normalized,
         "test v4 DLV",
+        solver_policy="no_fallback",
         expected_expiry_indices=None,
     )
     assert evidence.terminal_solver_call.stage == events[-1]["stage"]
@@ -1991,6 +2054,7 @@ def test_dataset_rejects_unauthenticated_strict_fit_rejections(
                 ],
             },
             "test malformed DLV",
+            solver_policy="no_fallback",
             expected_expiry_indices=None,
         )
 
@@ -2036,6 +2100,7 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
     evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "test",
+        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(0,),
     )
@@ -2047,6 +2112,7 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
             "solver_events": [_solver_event("discrete_dlv_strict", "optimal")],
         },
         "test DLV",
+        solver_policy="no_fallback",
         expected_expiry_indices=None,
     )
     assert dlv_evidence.relaxed_support == frozenset()
@@ -2062,6 +2128,7 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
             ],
         },
         "test fallback DLV",
+        solver_policy="no_fallback",
         expected_expiry_indices=None,
     )
     assert fallback_evidence.relaxed_support == frozenset()
@@ -2085,6 +2152,7 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
     dropped_evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": dropped},
         "dropped test",
+        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(),
     )
@@ -2257,6 +2325,7 @@ def test_mkarbfree_hard_fit_branches_match_diagnostic_population_contract(
     observed_evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "scripted MkArbFree",
+        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0, 1),
         retained_expiry_indices=retained_indices,
     )
@@ -2328,7 +2397,34 @@ def test_solver_call_parser_rejects_malformed_sequences() -> None:
     ]
     for expected, events in cases:
         with pytest.raises(DatasetValidationError, match=expected):
-            internal_dataset_module._solver_calls(events, "test")
+            internal_dataset_module._solver_calls(
+                events,
+                "test",
+                solver_policy="legacy_two_tier",
+            )
+
+
+@pytest.mark.parametrize("stage", ["expiry_soft", "surface"])
+def test_initial_solver_policy_rejects_ipm_fallback(stage: str) -> None:
+    expiry_fields = (
+        {"input_expiry_index": 0, "expiry_attempt": 1}
+        if stage == "expiry_soft"
+        else {}
+    )
+    events = [
+        _solver_event(stage, "solver_error", **expiry_fields),
+        {
+            **_solver_event(stage, "optimal", fallback=True, **expiry_fields),
+            "solver": "HIGHS",
+            "algorithm": "ipm",
+        },
+    ]
+    with pytest.raises(DatasetValidationError, match="inconsistent solver identity"):
+        internal_dataset_module._solver_calls(
+            events,
+            "initial no-arbitrage",
+            solver_policy="legacy_two_tier",
+        )
 
 
 def test_solver_event_contract_rejects_failed_or_misordered_solves() -> None:
@@ -2412,6 +2508,7 @@ def test_solver_event_contract_rejects_failed_or_misordered_solves() -> None:
             internal_dataset_module._terminal_solver_events(
                 diagnostics,
                 "test",
+                solver_policy="legacy_two_tier",
                 expected_expiry_indices=(0,),
                 retained_expiry_indices=(0,),
             )
@@ -2464,6 +2561,7 @@ def test_solver_event_contract_rejects_malformed_decisions() -> None:
             internal_dataset_module._terminal_solver_events(
                 {"outcome": "completed", "solver_events": events},
                 "test",
+                solver_policy="legacy_two_tier",
                 expected_expiry_indices=(0,),
                 retained_expiry_indices=retained,
             )
@@ -2480,6 +2578,7 @@ def test_solver_event_contract_rejects_malformed_decisions() -> None:
                 "solver_events": fallback_dlv,
             },
             "test DLV",
+            solver_policy="no_fallback",
             expected_expiry_indices=None,
         )
 

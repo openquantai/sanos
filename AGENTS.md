@@ -307,6 +307,19 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   diagnostics-schema fingerprints. Preserve that acceptance evidence in the
   self-contained Dataset after Intermediate cleanup.
 
+## Smooth-SANOS solver restart policy
+
+- Keep serial HiGHS dual simplex as the primary solver for smooth SANOS so
+  every successful primary result retains the established numerical path.
+- Only the smooth-SANOS stage uses the ordered fallback chain HiGHS IPM then
+  CLARABEL, and only after `solver_error`, the recognized `invalid_solution`,
+  or `user_limit`. Authenticated infeasible/unbounded statuses and unexpected
+  runtime errors remain fatal. Initial no-arbitrage and discrete-DLV stages
+  retain their existing solver policies.
+- Record every attempted solver and algorithm in order. HiGHS simplex and IPM
+  use the `1e-7` calendar gate; CLARABEL uses its status-dependent feasibility
+  gate. The configured timeout applies separately to each attempt.
+
 ## CLI requirements
 
 - Provide one installed `sanos` command, also invocable as `python -m sanos`.

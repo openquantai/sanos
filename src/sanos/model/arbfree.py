@@ -30,6 +30,7 @@ from __future__ import annotations
 import math
 import warnings as warnings
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 import cvxpy as cp
 import numpy as np
@@ -551,7 +552,7 @@ class ArbFreePricer(PrettyObject):
 
 
 @version(
-    "0.53",
+    "0.54",
     dependencies=[
         ArbFreePricer,
         SanosLPSolver,
@@ -610,6 +611,7 @@ class MkArbFree:
     _eps_density: float = 1e-7
     _eps_dens_1: float = 1e-4  #: (expert use only) What passes as ``sum(p)==1`` and ``p@K==1`` for the fitted density.
     _eps_no_arb: float = 0.01  #: % half spread to tighten fit.
+    _solver_fallback_algorithms: tuple[Literal["ipm", "clarabel"], ...] = ("clarabel",)
     _solver_diagnostic_sink: callable | None = None
 
     def __post_init__(self):
@@ -1406,7 +1408,9 @@ class MkArbFree:
                 CXs.append(CX)
 
             success, status, fell_back = SanosLPSolver(
-                timeout_seconds=self.timeout_seconds, _debug_verbose_cvxpy=self._debug_verbose_cvxpy
+                timeout_seconds=self.timeout_seconds,
+                fallback_algorithms=self._solver_fallback_algorithms,
+                _debug_verbose_cvxpy=self._debug_verbose_cvxpy,
             )(
                 objective=objective,
                 variables=variables,

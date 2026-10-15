@@ -647,6 +647,31 @@ both accepted it. Only `approved` may alter reference behavior.
   may differ from legacy warm-started training and require explicit numerical
   review rather than hidden checkpoint reuse.
 
+## CD-033 — Smooth-SANOS HiGHS IPM recovery tier
+
+- **Status:** resolved from the exact fresh-input failure and independent code
+  and quantitative reviews on 2026-10-15.
+- **Evidence:** the fresh and checksum-pinned legacy 2022-02-01 smooth-fit
+  inputs are bit-for-bit identical: 21 expiries, 2,314 listed strikes, and all
+  expiry, strike, bid, and ask values. The legacy surface solve completed in
+  204.219 seconds. In the pinned current runtime, serial dual simplex returned
+  `invalid_solution` and CLARABEL reached its 300-second limit; the identical
+  LP solved with HiGHS IPM in 42.868 seconds with objective
+  `0.00926219080319645`.
+- **Treatment:** preserve serial dual simplex as the smooth-fit primary. Only
+  after `solver_error`, recognized `invalid_solution`, or `user_limit`, retry
+  with HiGHS IPM and explicit crossover; on the same closed trigger set only,
+  retry with CLARABEL. Preserve incumbents and the identical objective and
+  constraints. Authenticate the complete ordered attempt sequence and select
+  calendar tolerance from the terminal solver. The timeout is per attempt.
+  Initial no-arbitrage and discrete-DLV policies are unchanged.
+- **Expected impact:** all successful simplex results keep their existing
+  numerical path. Dates requiring IPM can differ from a legacy or CLARABEL
+  optimum within a degenerate solution set, so validate prices, objective,
+  masks, and structural invariants rather than density bytes. The fitted-stage
+  producer identity changes and canonical fitted artifacts must be rebuilt
+  consistently; Raw and pre-fit Intermediate artifacts remain reusable.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -657,4 +682,5 @@ configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked. CD-004,
 CD-009 and CD-021 through CD-028 are resolved historical contracts; CD-029,
 CD-030, CD-031, and CD-032 supersede their public-unit/layout, return,
-zero-DTE population, and downstream-model organization portions respectively.
+zero-DTE population, and downstream-model organization portions respectively;
+CD-033 owns the smooth-surface runtime recovery policy.
