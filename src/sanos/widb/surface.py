@@ -37,6 +37,17 @@ SOLVER_TIMEOUT_SECONDS = 300.0
 _IMPLIED_VOL_CALC_EPS, _GREEK_CALC_EPS = _numerical_tolerances()
 
 
+class _StrictDlvFitQualityError(DailyDataError):
+    """A nominally solved strict DLV fit that violates its imposed bands."""
+
+    def __init__(self, failures: list[str]) -> None:
+        self.failures = tuple(failures)
+        super().__init__(
+            "Strict discrete-DLV fit violated its feasibility bands: "
+            + ", ".join(failures)
+        )
+
+
 @version("widb-no-arb-day-v2")
 def _no_arb_only_schema() -> dict[str, pl.DataType]:
     return {
@@ -879,27 +890,71 @@ def _strict_dlv_fit_is_infeasible(solver_events: list[dict[str, object]]) -> boo
     )
 
 
-@version("1.0", dependencies=[_is_discrete_dlv_solver_event])
+@version("1.0")
+def _strict_dlv_fit_rejections_are_valid(values: tuple[str, ...]) -> bool:
+    """Authenticate the closed, canonical strict-band rejection vocabulary."""
+
+    allowed = {
+        "post_stabilization_fit_cap",
+        "post_stabilization_target_band",
+        "post_stabilization_target_iv",
+        "pre_stabilization_fit_cap",
+        "pre_stabilization_target_band",
+        "pre_stabilization_target_iv",
+    }
+    return (
+        tuple(sorted(values)) == values
+        and len(set(values)) == len(values)
+        and set(values) <= allowed
+    )
+
+
+@version(
+    "1.2",
+    dependencies=[
+        _is_discrete_dlv_solver_event,
+        _strict_dlv_fit_rejections_are_valid,
+    ],
+)
 def _discrete_dlv_solver_path_is_valid(
     solver_events: list[dict[str, object]],
     fit_mode: str,
+    fallback_reason: str | None,
+    strict_fit_rejections: tuple[str, ...],
 ) -> bool:
     """Validate the closed strict-or-L1 discrete-DLV solver grammar."""
 
     successful = frozenset({"optimal", "optimal_inaccurate"})
     if fit_mode == "strict_feasible":
-        return len(solver_events) == 1 and _is_discrete_dlv_solver_event(
-            solver_events[0],
-            stage="discrete_dlv_strict",
-            statuses=successful,
-        )
-    if fit_mode == "uniform_l1_fallback":
         return (
-            len(solver_events) == 2
+            fallback_reason is None
+            and not strict_fit_rejections
+            and len(solver_events) == 1
             and _is_discrete_dlv_solver_event(
                 solver_events[0],
                 stage="discrete_dlv_strict",
-                statuses=frozenset({"infeasible", "infeasible_inaccurate"}),
+                statuses=successful,
+            )
+        )
+    if fit_mode == "uniform_l1_fallback":
+        authenticated_rejections = _strict_dlv_fit_rejections_are_valid(
+            strict_fit_rejections
+        )
+        strict_statuses = (
+            frozenset({"infeasible", "infeasible_inaccurate"})
+            if fallback_reason == "solver_infeasible"
+            else successful
+        )
+        return (
+            fallback_reason in {"solver_infeasible", "strict_fit_quality"}
+            and authenticated_rejections
+            and bool(strict_fit_rejections)
+            == (fallback_reason == "strict_fit_quality")
+            and len(solver_events) == 2
+            and _is_discrete_dlv_solver_event(
+                solver_events[0],
+                stage="discrete_dlv_strict",
+                statuses=strict_statuses,
             )
             and _is_discrete_dlv_solver_event(
                 solver_events[1],
@@ -911,7 +966,7 @@ def _discrete_dlv_solver_path_is_valid(
 
 
 @version(
-    "1.8",
+    "1.9",
     dependencies=[
         SanosPricer,
         DiscreteDlvConfig,
@@ -940,6 +995,8 @@ def _validate_discrete_dlv_projection(
     solver_events: list[dict[str, object]],
     solver_warnings: list[str],
     fit_mode: str,
+    fallback_reason: str | None,
+    strict_fit_rejections: tuple[str, ...],
     stabilization: Mapping[str, float],
     pre_state_metrics: Mapping[str, float | int],
     config: DiscreteDlvConfig,
@@ -975,7 +1032,12 @@ def _validate_discrete_dlv_projection(
         for value in stabilization.values()
     ):
         raise DailyDataError("Discrete-DLV stabilization diagnostics are invalid")
-    if not _discrete_dlv_solver_path_is_valid(solver_events, fit_mode):
+    if not _discrete_dlv_solver_path_is_valid(
+        solver_events,
+        fit_mode,
+        fallback_reason,
+        strict_fit_rejections,
+    ):
         raise DailyDataError(
             "Discrete-DLV solver path is invalid: "
             f"fit_mode={fit_mode!r}, events={solver_events!r}"
@@ -1376,8 +1438,8 @@ def _validate_discrete_dlv_projection(
     fit_quality_rejections = sorted(
         name for name, failed in fit_quality_failures.items() if failed
     )
-    if fit_mode == "strict_feasible" and any(
-        fit_quality_failures[name]
+    strict_band_rejections = sorted(
+        name
         for name in (
             "pre_stabilization_fit_cap",
             "post_stabilization_fit_cap",
@@ -1386,16 +1448,17 @@ def _validate_discrete_dlv_projection(
             "pre_stabilization_target_band",
             "post_stabilization_target_band",
         )
-    ):
-        raise DailyDataError(
-            "Strict discrete-DLV fit violated its feasibility bands: "
-            + ", ".join(fit_quality_rejections)
-        )
+        if fit_quality_failures[name]
+    )
+    if fit_mode == "strict_feasible" and strict_band_rejections:
+        raise _StrictDlvFitQualityError(strict_band_rejections)
     return {
-        "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
+        "schema": "sanos-discrete-dlv-projection-diagnostics-v5",
         "outcome": "completed",
         "source": "smooth_sanos_surface",
         "fit_mode": fit_mode,
+        "fallback_reason": fallback_reason,
+        "strict_fit_rejections": list(strict_fit_rejections),
         "fit_quality": {
             "accepted": not fit_quality_rejections,
             "failures": fit_quality_rejections,
@@ -1492,7 +1555,7 @@ def _validate_discrete_dlv_projection(
 
 
 @version(
-    "1.7",
+    "1.8",
     dependencies=[
         SanosFitter,
         SanosPricer,
@@ -1555,6 +1618,69 @@ def _fit_discrete_dlv_projection(
         for source_index in source_indices
     ]
     solver_events: list[dict[str, object]] = []
+
+    def stabilize_and_measure(
+        candidate: SanosPricer,
+    ) -> tuple[
+        SanosPricer,
+        list[np.ndarray[Any, Any]],
+        np.ndarray[Any, Any],
+        Mapping[str, float | int],
+        dict[str, float],
+    ]:
+        pre_fitted = np.asarray(candidate(expiries[:, None], inner), dtype=np.float64)
+        pre_metrics = _discrete_dlv_state_metrics(
+            candidate,
+            _canonical_discrete_dlv_squares(candidate),
+            config,
+        )
+        stabilized, squares, stabilization_base = _stabilize_discrete_dlv_state(
+            candidate
+        )
+        post_fitted = np.asarray(
+            stabilized(expiries[:, None], inner), dtype=np.float64
+        )
+        pre_band_metrics = _projection_target_band_metrics(
+            smooth=smooth,
+            expiries=expiries,
+            inner=inner,
+            fitted_calls=pre_fitted,
+            bounds=fit_price_bounds,
+            config=config,
+        )
+        post_band_metrics = _projection_target_band_metrics(
+            smooth=smooth,
+            expiries=expiries,
+            inner=inner,
+            fitted_calls=post_fitted,
+            bounds=fit_price_bounds,
+            config=config,
+        )
+        metrics = {
+            **stabilization_base,
+            "pre_target_call_max_abs": float(
+                np.max(np.abs(pre_fitted - target_calls))
+            ),
+            "post_target_call_max_abs": float(
+                np.max(np.abs(post_fitted - target_calls))
+            ),
+            "pre_target_iv_max_abs": float(
+                pre_band_metrics["maximum_absolute_iv_error"]
+            ),
+            "post_target_iv_max_abs": float(
+                post_band_metrics["maximum_absolute_iv_error"]
+            ),
+            "pre_target_band_max_violation": float(
+                pre_band_metrics["maximum_violation"]
+            ),
+            "post_target_band_max_violation": float(
+                post_band_metrics["maximum_violation"]
+            ),
+        }
+        return stabilized, squares, post_fitted, pre_metrics, metrics
+
+    fallback_reason: str | None = None
+    strict_fit_rejections: tuple[str, ...] = ()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
@@ -1605,60 +1731,18 @@ def _fit_discrete_dlv_projection(
                 if not _strict_dlv_fit_is_infeasible(strict_events):
                     raise
                 fit_mode = "uniform_l1_fallback"
+                fallback_reason = "solver_infeasible"
                 discrete = solve(
                     stage="discrete_dlv_l1",
                     impose_fit_bounds=False,
                 )
-            pre_stabilization_fitted_calls = np.asarray(
-                discrete(expiries[:, None], inner),
-                dtype=np.float64,
-            )
-            pre_state_metrics = _discrete_dlv_state_metrics(
+            (
                 discrete,
-                _canonical_discrete_dlv_squares(discrete),
-                config,
-            )
-            discrete, dlv_squares, stabilization_base = _stabilize_discrete_dlv_state(
-                discrete
-            )
-            fitted_calls = np.asarray(discrete(expiries[:, None], inner), dtype=np.float64)
-            pre_target_band_metrics = _projection_target_band_metrics(
-                smooth=smooth,
-                expiries=expiries,
-                inner=inner,
-                fitted_calls=pre_stabilization_fitted_calls,
-                bounds=fit_price_bounds,
-                config=config,
-            )
-            post_target_band_metrics = _projection_target_band_metrics(
-                smooth=smooth,
-                expiries=expiries,
-                inner=inner,
-                fitted_calls=fitted_calls,
-                bounds=fit_price_bounds,
-                config=config,
-            )
-            stabilization = {
-                **stabilization_base,
-                "pre_target_call_max_abs": float(
-                    np.max(np.abs(pre_stabilization_fitted_calls - target_calls))
-                ),
-                "post_target_call_max_abs": float(
-                    np.max(np.abs(fitted_calls - target_calls))
-                ),
-                "pre_target_iv_max_abs": float(
-                    pre_target_band_metrics["maximum_absolute_iv_error"]
-                ),
-                "post_target_iv_max_abs": float(
-                    post_target_band_metrics["maximum_absolute_iv_error"]
-                ),
-                "pre_target_band_max_violation": float(
-                    pre_target_band_metrics["maximum_violation"]
-                ),
-                "post_target_band_max_violation": float(
-                    post_target_band_metrics["maximum_violation"]
-                ),
-            }
+                dlv_squares,
+                fitted_calls,
+                pre_state_metrics,
+                stabilization,
+            ) = stabilize_and_measure(discrete)
         except Exception as exc:
             failure = canonical_json(
                 {
@@ -1671,23 +1755,66 @@ def _fit_discrete_dlv_projection(
                 f"Discrete-DLV projection solver failed: {exc}; diagnostics={failure}"
             ) from exc
     solver_warnings = [f"{item.category.__name__}: {item.message}" for item in caught]
-    diagnostics = _validate_discrete_dlv_projection(
-        smooth=smooth,
-        discrete=discrete,
-        raw_nms=raw_nms,
-        inner=inner,
-        supports=supports,
-        target_calls=target_calls,
-        fitted_calls=fitted_calls,
-        listed_strikes=listed_strikes,
-        dlv_squares=dlv_squares,
-        solver_events=solver_events,
-        solver_warnings=solver_warnings,
-        fit_mode=fit_mode,
-        stabilization=stabilization,
-        pre_state_metrics=pre_state_metrics,
-        config=config,
-    )
+
+    def validate() -> dict[str, object]:
+        return _validate_discrete_dlv_projection(
+            smooth=smooth,
+            discrete=discrete,
+            raw_nms=raw_nms,
+            inner=inner,
+            supports=supports,
+            target_calls=target_calls,
+            fitted_calls=fitted_calls,
+            listed_strikes=listed_strikes,
+            dlv_squares=dlv_squares,
+            solver_events=solver_events,
+            solver_warnings=solver_warnings,
+            fit_mode=fit_mode,
+            fallback_reason=fallback_reason,
+            strict_fit_rejections=strict_fit_rejections,
+            stabilization=stabilization,
+            pre_state_metrics=pre_state_metrics,
+            config=config,
+        )
+
+    try:
+        diagnostics = validate()
+    except _StrictDlvFitQualityError as exc:
+        strict_fit_rejections = exc.failures
+        fit_mode = "uniform_l1_fallback"
+        fallback_reason = "strict_fit_quality"
+        with warnings.catch_warnings(record=True) as fallback_warnings:
+            warnings.simplefilter("always")
+            try:
+                discrete = solve(
+                    stage="discrete_dlv_l1",
+                    impose_fit_bounds=False,
+                )
+                (
+                    discrete,
+                    dlv_squares,
+                    fitted_calls,
+                    pre_state_metrics,
+                    stabilization,
+                ) = stabilize_and_measure(discrete)
+            except Exception as fallback_exc:
+                failure = canonical_json(
+                    {
+                        "outcome": "failed",
+                        "fallback_reason": fallback_reason,
+                        "solver_events": solver_events,
+                        "solver_timeout_seconds": config.solver_timeout_seconds,
+                        "strict_fit_rejections": list(strict_fit_rejections),
+                    }
+                )
+                raise DailyDataError(
+                    "Discrete-DLV projection solver failed after strict fit-quality "
+                    f"rejection: {fallback_exc}; diagnostics={failure}"
+                ) from fallback_exc
+        solver_warnings.extend(
+            f"{item.category.__name__}: {item.message}" for item in fallback_warnings
+        )
+        diagnostics = validate()
     diagnostics_json = canonical_json(diagnostics)
     configuration_id = canonical_sha256({"discrete_dlv": config})
     count = frame.height
@@ -1742,7 +1869,7 @@ def _fit_discrete_dlv_projection(
     ]
 
 
-@version("1.2", dependencies=[DiscreteDlvConfig, canonical_json, canonical_sha256])
+@version("1.3", dependencies=[DiscreteDlvConfig, canonical_json, canonical_sha256])
 def _empty_discrete_dlv_columns(
     count: int,
     *,
@@ -1755,7 +1882,7 @@ def _empty_discrete_dlv_columns(
     null_lists: list[list[float] | None] = [None] * count
     diagnostics = canonical_json(
         {
-            "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
+            "schema": "sanos-discrete-dlv-projection-diagnostics-v5",
             "outcome": outcome,
             "source": "smooth_sanos_surface",
         }

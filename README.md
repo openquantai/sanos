@@ -129,8 +129,8 @@ The available terminal stages are `paired-day`, `enriched-day`, `no-arb-day`,
 eligibility/reason fields and stores the pre-filter no-arbitrage audit state,
 the post-filter smooth 0.25 SANOS state, and a separately fitted 200-inner-node
 finite-DLV projection of that smooth state as typed list columns. The DLV fit
-tries the strict call/IV bands first and, only when HiGHS reports the strict
-problem as `infeasible` or `infeasible_inaccurate`,
+tries the strict call/IV bands first and, when HiGHS reports infeasibility or a
+nominal solution fails the post-solve check of those same bands,
 returns the same max-DLV-3 model's uniform-L1 closest fit with explicit quality
 diagnostics.
 

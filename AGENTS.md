@@ -290,9 +290,9 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 ## Finite-DLV fit and restart policy
 
 - Fit the bounded discrete-DLV projection with the configured call-price and
-  conditioned-IV bands first. Retry without only those fit-quality bands if and
-  only if the authenticated HiGHS result is `infeasible` or
-  `infeasible_inaccurate`.
+  conditioned-IV bands first. Retry without only those fit-quality bands if the
+  authenticated HiGHS result is `infeasible`/`infeasible_inaccurate`, or if a
+  nominally successful result fails the post-solve check of those same bands.
 - The fallback keeps the identical support, density, martingale, calendar, and
   DLV-bound constraints and uses the uniform-L1 objective. A timeout, solver
   error, unbounded status, malformed event, or structural validation failure is

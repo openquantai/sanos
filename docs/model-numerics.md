@@ -82,14 +82,15 @@ The interval is inset by the `1e-10` solver feasibility tolerance so an allowed
 LP residual cannot cross the annual-IV edge. These are hard linear price
 constraints; the fit objective remains uniformly weighted L1 error.
 
-If HiGHS reports that strict price-band problem as `infeasible` or
-`infeasible_inaccurate`, the projection is solved a second time with the same
-support, density, martingale, calendar, and `[0.01,3]` DLV constraints but
-without either hard fit-quality bound. The second solve is the legacy-style
-uniform L1 closest fit. No retry is permitted for a timeout, solver error,
-unbounded status, or failed numerical invariant. Diagnostics authenticate the
-two solver attempts, record `strict_feasible` or `uniform_l1_fallback`, and
-report every call/IV threshold without rejecting a structurally valid L1 fit.
+If HiGHS reports that strict price-band problem as infeasible, or a nominally
+successful result fails the post-solve check of those same bands, the
+projection is solved a second time with the same support, density, martingale,
+calendar, and `[0.01,3]` DLV constraints but without either hard fit-quality
+bound. The second solve is the legacy-style uniform L1 closest fit. No retry is
+permitted for a timeout, solver error, unbounded status, or failed structural
+invariant. Diagnostics authenticate both attempts and the fallback reason,
+record `strict_feasible` or `uniform_l1_fallback`, and report every call/IV
+threshold without rejecting a structurally valid L1 fit.
 
 The projection additionally imposes a `1e-8` probability-mass floor at every
 support node. Its solver-only DLV interval is inset by `1e-5` volatility units

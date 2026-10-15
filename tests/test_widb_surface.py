@@ -347,7 +347,7 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
     dlv_diagnostics = json.loads(
         fitted.get_column("discrete_dlv_diagnostics_json").item(0)
     )
-    assert dlv_diagnostics["schema"] == "sanos-discrete-dlv-projection-diagnostics-v4"
+    assert dlv_diagnostics["schema"] == "sanos-discrete-dlv-projection-diagnostics-v5"
     assert dlv_diagnostics["source"] == "smooth_sanos_surface"
     assert dlv_diagnostics["fit_mode"] == "strict_feasible"
     assert dlv_diagnostics["fit_quality"] == {"accepted": True, "failures": []}
@@ -554,6 +554,48 @@ def test_discrete_dlv_retries_solver_reported_strict_infeasibility_with_unbounde
     ]
     assert [event["status"] for event in diagnostics["solver_events"]] == [
         strict_status,
+        "optimal",
+    ]
+
+
+def test_discrete_dlv_retries_nominal_strict_solution_that_fails_its_bands(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_validate = surface_module._validate_discrete_dlv_projection
+    observed_modes: list[str] = []
+
+    def reject_nominal_strict(**kwargs: Any) -> dict[str, object]:
+        fit_mode = cast(str, kwargs["fit_mode"])
+        observed_modes.append(fit_mode)
+        if fit_mode == "strict_feasible":
+            raise surface_module._StrictDlvFitQualityError(
+                ["post_stabilization_target_iv"]
+            )
+        return original_validate(**kwargs)
+
+    monkeypatch.setattr(
+        surface_module,
+        "_validate_discrete_dlv_projection",
+        reject_nominal_strict,
+    )
+    fitted = fit_smooth_sanos(phase6_frames[2], config=DailySurfaceConfig())
+    diagnostics = json.loads(
+        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
+    )
+
+    assert observed_modes == ["strict_feasible", "uniform_l1_fallback"]
+    assert diagnostics["fit_mode"] == "uniform_l1_fallback"
+    assert diagnostics["fallback_reason"] == "strict_fit_quality"
+    assert diagnostics["strict_fit_rejections"] == [
+        "post_stabilization_target_iv"
+    ]
+    assert [event["stage"] for event in diagnostics["solver_events"]] == [
+        "discrete_dlv_strict",
+        "discrete_dlv_l1",
+    ]
+    assert [event["status"] for event in diagnostics["solver_events"]] == [
+        "optimal",
         "optimal",
     ]
 
@@ -1016,6 +1058,8 @@ def test_dataset_boundary_normalizes_only_the_exact_legacy_strict_dlv_envelope(
     )
     assert diagnostics.pop("fit_mode") == "strict_feasible"
     assert diagnostics.pop("fit_quality") == {"accepted": True, "failures": []}
+    assert diagnostics.pop("fallback_reason") is None
+    assert diagnostics.pop("strict_fit_rejections") == []
     diagnostics["schema"] = "sanos-discrete-dlv-projection-diagnostics-v3"
     diagnostics["solver_events"][0]["stage"] = "discrete_dlv_surface"
     source_stage_version = "2.2 { reviewed-historical-fit: 1.0 }"
@@ -1093,6 +1137,48 @@ def test_dataset_boundary_normalizes_only_the_exact_legacy_strict_dlv_envelope(
             trading_date=date(2024, 1, 3),
             typed_empty_reason=None,
         )
+
+
+def test_dataset_boundary_preserves_previous_v4_serialization(
+    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
+) -> None:
+    fitted = phase6_frames[-1]
+    diagnostics = json.loads(
+        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
+    )
+    diagnostics["schema"] = "sanos-discrete-dlv-projection-diagnostics-v4"
+    diagnostics.pop("fallback_reason")
+    diagnostics.pop("strict_fit_rejections")
+    source_stage_version = "2.2 { reviewed-v4-fit: 1.0 }"
+    legacy = fitted.with_columns(
+        pl.lit(canonical_json(diagnostics)).alias("discrete_dlv_diagnostics_json"),
+        pl.lit(source_stage_version).alias("stage_version"),
+    )
+    config = InternalDatasetConfig(
+        name="legacy-v4-dlv-envelope",
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        daily=DailyWidbConfig(),
+        surface=DailySurfaceConfig(),
+    )
+
+    statistics = validate_fitted_partition(
+        legacy,
+        config=config,
+        trading_date=date(2024, 1, 3),
+        typed_empty_reason=None,
+        expected_raw_options_artifact_id=None,
+        accepted_stage_version_sha256=hashlib.sha256(
+            source_stage_version.encode()
+        ).hexdigest(),
+    )
+
+    assert statistics.trading_date == date(2024, 1, 3)
+    assert statistics.row_count == legacy.height
 
 
 def test_smooth_producer_observables_have_distinct_exact_replays(
@@ -1789,10 +1875,16 @@ def test_discrete_dlv_solver_path_authentication_is_closed() -> None:
     infeasible = _solver_event("discrete_dlv_strict", "infeasible")
     l1 = _solver_event("discrete_dlv_l1", "optimal")
     assert surface_module._discrete_dlv_solver_path_is_valid(
-        [strict], "strict_feasible"
+        [strict], "strict_feasible", None, ()
     )
     assert surface_module._discrete_dlv_solver_path_is_valid(
-        [infeasible, l1], "uniform_l1_fallback"
+        [infeasible, l1], "uniform_l1_fallback", "solver_infeasible", ()
+    )
+    assert surface_module._discrete_dlv_solver_path_is_valid(
+        [strict, l1],
+        "uniform_l1_fallback",
+        "strict_fit_quality",
+        ("post_stabilization_target_iv",),
     )
 
     corruptions = [
@@ -1804,11 +1896,103 @@ def test_discrete_dlv_solver_path_authentication_is_closed() -> None:
     ]
     for corrupted in corruptions:
         assert not surface_module._discrete_dlv_solver_path_is_valid(
-            [corrupted, l1], "uniform_l1_fallback"
+            [corrupted, l1], "uniform_l1_fallback", "solver_infeasible", ()
         )
     assert not surface_module._discrete_dlv_solver_path_is_valid(
-        [infeasible, {**l1, "objective": None}], "uniform_l1_fallback"
+        [infeasible, {**l1, "objective": None}],
+        "uniform_l1_fallback",
+        "solver_infeasible",
+        (),
     )
+    for rejections in (
+        ("unknown",),
+        ("post_stabilization_target_iv", "post_stabilization_target_iv"),
+        ("pre_stabilization_target_iv", "post_stabilization_target_iv"),
+    ):
+        assert not surface_module._discrete_dlv_solver_path_is_valid(
+            [strict, l1],
+            "uniform_l1_fallback",
+            "strict_fit_quality",
+            rejections,
+        )
+
+
+@pytest.mark.parametrize(
+    ("fit_mode", "events", "fallback_reason"),
+    [
+        (
+            "strict_feasible",
+            [_solver_event("discrete_dlv_strict", "optimal")],
+            None,
+        ),
+        (
+            "uniform_l1_fallback",
+            [
+                _solver_event("discrete_dlv_strict", "infeasible"),
+                _solver_event("discrete_dlv_l1", "optimal"),
+            ],
+            "solver_infeasible",
+        ),
+    ],
+)
+def test_previous_v4_dlv_envelopes_normalize_to_authenticated_v5(
+    fit_mode: str,
+    events: list[dict[str, object]],
+    fallback_reason: str | None,
+) -> None:
+    normalized, legacy = internal_dataset_module._normalize_discrete_dlv_diagnostics(
+        {
+            "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
+            "outcome": "completed",
+            "fit_mode": fit_mode,
+            "fit_quality": {"accepted": True, "failures": []},
+            "solver_events": events,
+        },
+        "test v4 DLV",
+    )
+
+    assert legacy is True
+    assert normalized["schema"] == "sanos-discrete-dlv-projection-diagnostics-v5"
+    assert normalized["fallback_reason"] == fallback_reason
+    assert normalized["strict_fit_rejections"] == []
+    evidence = internal_dataset_module._terminal_solver_events(
+        normalized,
+        "test v4 DLV",
+        expected_expiry_indices=None,
+    )
+    assert evidence.terminal_solver_call.stage == events[-1]["stage"]
+
+
+@pytest.mark.parametrize(
+    "rejections",
+    [
+        ["unknown"],
+        ["post_stabilization_target_iv", "post_stabilization_target_iv"],
+        ["pre_stabilization_target_iv", "post_stabilization_target_iv"],
+    ],
+)
+def test_dataset_rejects_unauthenticated_strict_fit_rejections(
+    rejections: list[str],
+) -> None:
+    with pytest.raises(
+        internal_dataset_module.DatasetValidationError,
+        match="unauthenticated strict-fit rejections",
+    ):
+        internal_dataset_module._terminal_solver_events(
+            {
+                "schema": "sanos-discrete-dlv-projection-diagnostics-v5",
+                "outcome": "completed",
+                "fit_mode": "uniform_l1_fallback",
+                "fallback_reason": "strict_fit_quality",
+                "strict_fit_rejections": rejections,
+                "solver_events": [
+                    _solver_event("discrete_dlv_strict", "optimal"),
+                    _solver_event("discrete_dlv_l1", "optimal"),
+                ],
+            },
+            "test malformed DLV",
+            expected_expiry_indices=None,
+        )
 
 
 def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:

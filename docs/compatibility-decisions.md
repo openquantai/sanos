@@ -389,9 +389,10 @@ both accepted it. Only `approved` may alter reference behavior.
   implied volatility plus/minus `0.005` (flooring the lower volatility at
   zero), inset by the `1e-10` solver tolerance. These additional constraints
   remain linear in fitted prices and do not change the uniform L1 objective.
-  If and only if HiGHS reports this strict fit as `infeasible` or
-  `infeasible_inaccurate`, solve again with the same grid, density, martingale,
-  calendar and `[0.01,3]` DLV constraints but without the hard call/IV bands.
+  If HiGHS reports this strict fit as `infeasible`/`infeasible_inaccurate`, or a
+  nominally successful result fails the post-solve check of those same bands,
+  solve again with the same grid, density, martingale, calendar and `[0.01,3]`
+  DLV constraints but without the hard call/IV bands.
   The second solve returns the legacy-style uniform-L1 closest fit. Do not
   relax on a timeout, solver error, unbounded status, or structural validation
   failure. Persist the authenticated solver path, terminal mode, achieved

@@ -77,6 +77,7 @@ from sanos.widb.surface import (
     _canonical_discrete_dlv_squares,
     _discrete_dlv_grid,
     _is_discrete_dlv_solver_event,
+    _strict_dlv_fit_rejections_are_valid,
     _validate_discrete_dlv_projection,
     apply_options_filter,
     discrete_dlv_pricer,
@@ -379,7 +380,14 @@ def _solver_calls(events: list[Any], label: str) -> list[_SolverCall]:
     return calls
 
 
-@version("5.1", dependencies=[_solver_calls, _TerminalSolverEvidence])
+@version(
+    "5.3",
+    dependencies=[
+        _solver_calls,
+        _strict_dlv_fit_rejections_are_valid,
+        _TerminalSolverEvidence,
+    ],
+)
 def _terminal_solver_events(
     value: Mapping[str, Any],
     label: str,
@@ -400,21 +408,50 @@ def _terminal_solver_events(
     if expected_expiry_indices is None:
         calls = _solver_calls(events, label)
         fit_mode = value.get("fit_mode")
+        fallback_reason = value.get("fallback_reason")
+        strict_fit_rejections = value.get("strict_fit_rejections")
+        if fallback_reason is None and strict_fit_rejections is None:
+            strict_fit_rejections = []
+            if fit_mode == "uniform_l1_fallback":
+                fallback_reason = "solver_infeasible"
+        if fallback_reason not in {None, "solver_infeasible", "strict_fit_quality"}:
+            _fail(f"{label} diagnostics has an invalid DLV fallback reason")
+        if not isinstance(strict_fit_rejections, list) or any(
+            not isinstance(item, str) or not item for item in strict_fit_rejections
+        ):
+            _fail(f"{label} diagnostics has invalid strict-fit rejections")
+        rejection_tuple = tuple(strict_fit_rejections)
+        if not _strict_dlv_fit_rejections_are_valid(rejection_tuple):
+            _fail(f"{label} diagnostics has unauthenticated strict-fit rejections")
         strict_path = (
             fit_mode == "strict_feasible"
+            and fallback_reason is None
+            and not strict_fit_rejections
             and len(calls) == 1
             and calls[0].stage == "discrete_dlv_strict"
             and calls[0].terminal_status in successful
         )
-        l1_path = (
+        infeasible_l1_path = (
             fit_mode == "uniform_l1_fallback"
+            and fallback_reason == "solver_infeasible"
+            and not strict_fit_rejections
             and len(calls) == 2
             and calls[0].stage == "discrete_dlv_strict"
             and calls[0].terminal_status in {"infeasible", "infeasible_inaccurate"}
             and calls[1].stage == "discrete_dlv_l1"
             and calls[1].terminal_status in successful
         )
-        if not strict_path and not l1_path:
+        quality_l1_path = (
+            fit_mode == "uniform_l1_fallback"
+            and fallback_reason == "strict_fit_quality"
+            and bool(strict_fit_rejections)
+            and len(calls) == 2
+            and calls[0].stage == "discrete_dlv_strict"
+            and calls[0].terminal_status in successful
+            and calls[1].stage == "discrete_dlv_l1"
+            and calls[1].terminal_status in successful
+        )
+        if not strict_path and not infeasible_l1_path and not quality_l1_path:
             _fail(f"{label} diagnostics has an invalid discrete-DLV solver path")
         if any(call.used_fallback for call in calls):
             _fail(f"{label} diagnostics discrete-DLV solve used a solver fallback")
@@ -550,19 +587,46 @@ def _terminal_solver_events(
     )
 
 
-@version("1.0", dependencies=[_is_discrete_dlv_solver_event])
+@version("1.1", dependencies=[_is_discrete_dlv_solver_event])
 def _normalize_discrete_dlv_diagnostics(
     value: Mapping[str, Any],
     label: str,
 ) -> tuple[dict[str, Any], bool]:
-    """Normalize the one accepted pre-policy strict diagnostics envelope."""
+    """Normalize accepted historical DLV diagnostics to the current envelope."""
 
     schema = value.get("schema")
-    if schema == "sanos-discrete-dlv-projection-diagnostics-v4":
+    if schema == "sanos-discrete-dlv-projection-diagnostics-v5":
         return dict(value), False
+    if schema == "sanos-discrete-dlv-projection-diagnostics-v4":
+        if "fallback_reason" in value or "strict_fit_rejections" in value:
+            _fail(f"{label} v4 diagnostics contains v5 fields")
+        if value.get("outcome") == "no_smooth_state":
+            if set(value) != {"schema", "outcome", "source"}:
+                _fail(f"{label} v4 empty diagnostics fields changed")
+            normalized = dict(value)
+            normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v5"
+            return normalized, True
+        fit_mode = value.get("fit_mode")
+        if fit_mode not in {"strict_feasible", "uniform_l1_fallback"}:
+            _fail(f"{label} v4 diagnostics has an invalid fit mode")
+        normalized = dict(value)
+        normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v5"
+        normalized["fallback_reason"] = (
+            None if fit_mode == "strict_feasible" else "solver_infeasible"
+        )
+        normalized["strict_fit_rejections"] = []
+        return normalized, True
     if schema != "sanos-discrete-dlv-projection-diagnostics-v3":
         _fail(f"{label} diagnostics schema is unsupported")
-    if "fit_mode" in value or "fit_quality" in value:
+    if any(
+        field in value
+        for field in (
+            "fit_mode",
+            "fit_quality",
+            "fallback_reason",
+            "strict_fit_rejections",
+        )
+    ):
         _fail(f"{label} legacy diagnostics contains post-policy fields")
     events = value.get("solver_events")
     if (
@@ -576,8 +640,10 @@ def _normalize_discrete_dlv_diagnostics(
     ):
         _fail(f"{label} legacy diagnostics has an invalid strict solver event")
     normalized = dict(value)
-    normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v4"
+    normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v5"
     normalized["fit_mode"] = "strict_feasible"
+    normalized["fallback_reason"] = None
+    normalized["strict_fit_rejections"] = []
     normalized["solver_events"] = [
         {**cast(Mapping[str, Any], events[0]), "stage": "discrete_dlv_strict"}
     ]
@@ -2199,6 +2265,9 @@ def validate_fitted_partition(
             "discrete-DLV",
         )
     )
+    legacy_dlv_schema = (
+        dlv_diagnostics.get("schema") if legacy_dlv_diagnostics else None
+    )
     if legacy_dlv_diagnostics and accepted_stage_version_sha256 is None:
         _fail(
             f"{trading_date}: legacy discrete-DLV diagnostics require exact "
@@ -2490,7 +2559,7 @@ def validate_fitted_partition(
     if np.any(selected):
         if (
             normalized_dlv_diagnostics.get("schema")
-            != "sanos-discrete-dlv-projection-diagnostics-v4"
+            != "sanos-discrete-dlv-projection-diagnostics-v5"
             or dlv_diagnostics.get("outcome") != "completed"
             or dlv_diagnostics.get("source") != "smooth_sanos_surface"
             or dlv_diagnostics.get("inner_nodes") != config.surface.discrete_dlv.inner_nodes
@@ -2532,8 +2601,8 @@ def validate_fitted_partition(
         or smooth.get("solver_timeout_seconds") != SOLVER_TIMEOUT_SECONDS
     ):
         _fail(f"{trading_date}: zero-selected day lacks explicit smooth outcome")
-    elif dlv_diagnostics != {
-        "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
+    elif normalized_dlv_diagnostics != {
+        "schema": "sanos-discrete-dlv-projection-diagnostics-v5",
         "outcome": "no_smooth_state",
         "source": "smooth_sanos_surface",
     }:
@@ -2795,6 +2864,16 @@ def validate_fitted_partition(
             ],
             solver_warnings=[str(value) for value in dlv_diagnostics["solver_warnings"]],
             fit_mode=str(normalized_dlv_diagnostics["fit_mode"]),
+            fallback_reason=cast(
+                str | None,
+                normalized_dlv_diagnostics.get("fallback_reason"),
+            ),
+            strict_fit_rejections=tuple(
+                str(value)
+                for value in normalized_dlv_diagnostics.get(
+                    "strict_fit_rejections", []
+                )
+            ),
             stabilization={
                 "density_max_abs": float(
                     dlv_diagnostics["stabilization_density_max_abs"]
@@ -2828,9 +2907,11 @@ def validate_fitted_partition(
             config=config.surface.discrete_dlv,
         )
         expected_dlv_diagnostics = dict(revalidated_dlv_diagnostics)
-        if legacy_dlv_diagnostics:
+        if legacy_dlv_schema == "sanos-discrete-dlv-projection-diagnostics-v3":
             expected_dlv_diagnostics.pop("fit_mode")
             expected_dlv_diagnostics.pop("fit_quality")
+            expected_dlv_diagnostics.pop("fallback_reason")
+            expected_dlv_diagnostics.pop("strict_fit_rejections")
             expected_dlv_diagnostics["schema"] = (
                 "sanos-discrete-dlv-projection-diagnostics-v3"
             )
@@ -2843,6 +2924,12 @@ def validate_fitted_partition(
                     "stage": "discrete_dlv_surface",
                 }
             ]
+        elif legacy_dlv_schema == "sanos-discrete-dlv-projection-diagnostics-v4":
+            expected_dlv_diagnostics.pop("fallback_reason")
+            expected_dlv_diagnostics.pop("strict_fit_rejections")
+            expected_dlv_diagnostics["schema"] = (
+                "sanos-discrete-dlv-projection-diagnostics-v4"
+            )
         if canonical_json(expected_dlv_diagnostics) != dlv_text:
             _fail(f"{trading_date}: stored DLV diagnostics differ from strict recomputation")
         dlv_projection_call_error = float(

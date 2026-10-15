@@ -244,11 +244,11 @@ Its DLV rows are geometry-and-bound-scaled and use the configured `1e-10`
 strict-solver feasibility target. The first solve imposes a `9e-5` fitted-node
 call-error cap and, where source Black vega divided by `sqrt(T)` is at least
 `0.05`, the exact Black-price band for an annual-IV move of at most `0.005`.
-If HiGHS reports that strict problem as `infeasible` or
-`infeasible_inaccurate`, a second solve removes only
-those fit-quality bands and returns the uniform-L1 closest fit. The solver mode
-and every breached fit-quality threshold are persisted as diagnostics. A
-`1e-8` support-mass floor and `1e-5` solver-only inset
+If HiGHS reports that strict problem as infeasible, or a nominally successful
+result fails the post-solve check of those same bands, a second solve removes
+only those fit-quality bands and returns the uniform-L1 closest fit. The solver
+mode, fallback reason, and every breached fit-quality threshold are persisted.
+A `1e-8` support-mass floor and `1e-5` solver-only inset
 from each DLV bound keep the persisted inverse well-conditioned without
 post-fit clipping. Canonical DLV serialization and stabilization use wider
 NumPy precision but persist Float64; validation separately proves the ordinary
