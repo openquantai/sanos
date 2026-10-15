@@ -20,7 +20,7 @@ from filelock import FileLock
 from sanos.artifacts import ArtifactPointer, StorageClass, atomic_write_json
 from sanos.config import canonical_json, canonical_sha256, canonical_value
 from sanos.datasets import PublicProjectionConfig, plan_public_candidate
-from sanos.experiments import ExperimentConfig, plan_experiment
+from sanos.models.dysanos import ExperimentConfig, plan_experiment
 from sanos.reference.compare import (
     PHASE11_PRODUCTION_ORACLE_GAPS,
     REFERENCE_REPORT_SCHEMA,
@@ -44,10 +44,10 @@ PHASE11_POPULATED_DATES = 917
 PHASE11_RAW_ARTIFACTS = 3676
 PHASE11_SOURCE_GENERATION = "default-v1"
 PHASE11_PUBLIC_TEMPLATE_POLICY_ID = (
-    "b18dbd833d2b9b191c79f3b6a60d26ce9a65536d5edaf703c1ede85976f36277"
+    "944dbd0eca379b267a4b5a6ef88764ca15980ddb9534eab65f0ceffd6be0ec47"
 )
 PHASE11_EXPERIMENT_TEMPLATE_POLICY_ID = (
-    "f519ad500fb72cc1e12467c8d213b2c9f16cac49841505c5aba0dc59310036b0"
+    "701edff74afc46b91df72de20b462f2f6d775a042a6f950231f8313c443be5bd"
 )
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -423,9 +423,12 @@ def build_phase11_evidence_index(
     observations_by_table = {
         table: tuple(
             sorted(
-                cast(str | None, value.get("observation_date"))
-                for value in raw_artifacts
-                if value.get("logical_table") == table
+                (
+                    cast(str | None, value.get("observation_date"))
+                    for value in raw_artifacts
+                    if value.get("logical_table") == table
+                ),
+                key=lambda item: (item is not None, item or ""),
             )
         )
         for table in ("security", "options", "spot", "forwards", "zero_curve")

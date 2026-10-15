@@ -57,7 +57,7 @@ Each table root has `README.md` describing source/query/fields and a manifest
 with query identity, selected columns, partitions, counts and checksums. It does
 not contain credentials. The requested start date also plans/downloads the
 fresh previous-business-day close and any earlier observations required by the
-approved public return rule. CD-004 fixes that formula and the retained-date
+approved public return rule. CD-030 fixes that formula and the retained-date
 policy; the planner exposes its boundary dependencies explicitly.
 
 ## Intermediate daily frame
@@ -289,53 +289,55 @@ an ingestion default.
 
 ## Public SANOS/DLV projection
 
-Public release is a separate deliberately lossy dataset identity. The intended
-physical representation has **one Polars row per trading day** and typed
-list/struct columns. The exporter starts from an explicit allowlist and fails on
-every unexpected input column.
+Public release is a separate deliberately lossy dataset identity. Its physical
+representation is one canonically ordered, tagged long-form Polars frame with
+scalar columns only. `record_kind` is one of `day`, `expiry`, `book`,
+`smooth_node`, or `dlv_node`; `trading_date` is the common key. The exporter
+starts from an explicit allowlist and fails on every unexpected input column.
 
-The approved version-2 logical allowlist is below. CD-004 and CD-009 freeze the
-exact return formula, retained-date policy, normalized units, and unit bridge:
+The approved version-3 logical allowlist is below. CD-029 and CD-030 freeze the
+flat layout, retained-date policy, driftless units, and return formula:
 
 | Level | Fields and units |
 |---|---|
-| day | `trading_date`, trading-session `is_half_day`, `forward_adjusted_spot_return`; the first return is null |
-| expiries | expiry date, business DTE, calendar DTE, expiry `is_am`, model time, and dimensionless interpreting geometry including `discounted_forward_over_spot = DF*(F/S)` |
-| books | `expiry_index`, call/put side, `normalized_strike = K/F`, `half_spread_spot = (ask-bid)/(2S)` for every book surviving the exact daily-front filter below |
+| day | `trading_date`, trading-session `is_half_day`, `driftless_spot_return`; the first return is null |
+| expiry | expiry date, business DTE, calendar DTE, expiry `is_am`, model time, and model-derived ATM volatility |
+| book | `expiry_index`, call/put side, `normalized_strike = K/F`, driftless `half_spread = (ask-bid)/2` in `C/(DF*F)` units for every book surviving the exact daily-front filter below |
 | smooth SANOS | complete smooth parameter/density state, supports, expiry/time increments and separately named smoothing input variances |
 | discrete DLV | complete CD-023 finite projection density and squared-DLV state, supports, boundaries and expiry/time increments |
 
-The version-2 public book population reproduces the daily-front
+The flat-v3 public book population defines the daily-front
 reference. For
 each call and put side independently, a book is initially active only when the
 pre-smooth no-arbitrage mask is true, bid/ask are finite, bid is non-negative
 and ask is strictly above bid. It is retained only when the option is European,
-the corresponding smooth fitted call/put value is finite, the expiry is not an
-explicitly excluded 0.2-business-day node, the expiry lies at or before the
+the corresponding smooth fitted call/put value is finite, the expiry is neither
+an explicitly excluded zero-business-day PM node nor the 0.2-business-day AM
+node, the expiry lies at or before the
 70-business-day model horizon, and `K/F` is inside the **inclusive** AF-ATM NMS
 interval `[-3, 2]`. Calls and puts remain separate observations. A different
 filter is a different explicitly approved dataset configuration and identity.
 
-Model prices reconstructed in memory from the retained state are expressed in
-discounted-forward units `C/(DF*F)`; no redundant per-book model-price column is
-stored. The proposed dimensionless conversion is:
-
-```text
-C/S = [DF*(F/S)] * [C/(DF*F)]
-h/(DF*F) = (h/S) / [DF*(F/S)]
-```
-
-The exact public return formula and unit bridge are approved technical
-contracts in `docs/compatibility-decisions.md`. This approval permits a
+Model prices reconstructed in memory from the retained state and public
+half-spreads are both expressed directly in driftless `C/(DF*F)` units; no
+redundant per-book model-price or forward/spot bridge is stored. The exact
+public return and driftless-book contracts are approved technical contracts in
+`docs/compatibility-decisions.md`. This approval permits a
 `public_candidate`; it does not establish redistribution rights.
 
 The exporter forbids raw bids/asks/mids, absolute spot/strike/price levels,
 volume, open interest, option symbols/IDs, security IDs, vendor implied
-volatilities/Greeks, redundant per-book fitted model price/IV arrays and all
-other unapproved source fields. It also rejects a schema containing a forbidden
-field even if the value is null. Validation may derive model prices and ATM
-implied volatilities from the published state in memory; those derived values
-are not stored columns.
+volatilities/Greeks, per-book fitted model prices, and all other unapproved
+source fields. It also rejects a schema containing a forbidden field even if
+the value is null. The allowlist includes six model-derived Black IV columns:
+SANOS and DLV fit IV plus the synthetic fit-minus-half-spread and
+fit-plus-half-spread IVs. Invalid or non-identifiable synthetic bounds are
+null. Custom configurations that retain zero model time store all six as null;
+the canonical public and DySANOS 1.1 configurations exclude those books. These
+are not vendor or observed-market IVs. Day rows additionally contain private-source-derived
+SANOS and DLV quality triples (percentage outside, conditional mean excess,
+and conditional median excess in market half-spreads), without publishing
+per-book excesses or source quotes.
 
 A public manifest is initially `public_candidate`. Transition to immutable
 `public` additionally requires release license, rights basis, approver,
@@ -345,11 +347,17 @@ same internal Dataset, must be exactly logically equal to the approved
 candidate, and has its own identity, manifest, README, approval record, and
 license bytes. It never aliases or mutates the candidate.
 
+The one-period public return for retained dates `t<u` is
+`DF(t,u)*S(u)/F_t(u)-1`. Private carry is interpolated only while projecting;
+neither discount factors, forwards, nor absolute spots are published. The
+normalized driftless spot path starts at one and is the cumulative product of
+`1+driftless_spot_return`.
+
 Candidate identity also fixes the coverage start/end and exact permitted
 typed-empty date/reason records. Shallow validation binds the complete logical
 frame and return vector to stored evidence and runs public-only capabilities;
 deep validation additionally reprojects from the internal source to prove the
-private-input CD-004 and CD-009 calculations.
+private-input CD-030 return and CD-029 driftless-book calculations.
 
 Capability flags may advertise normalized SANOS/DLV dynamics and normalized
 spread experiments. Smooth-to-DLV approximation error is measured and reported

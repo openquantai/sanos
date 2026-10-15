@@ -64,7 +64,7 @@ from sanos.datasets.public import (
     public_candidate_label,
     public_frame_logical_sha256,
 )
-from sanos.experiments import (
+from sanos.models.dysanos import (
     ExperimentBuildOptions,
     ExperimentConfig,
     build_experiment,
@@ -101,7 +101,7 @@ from sanos.runtime import (
     runtime_fingerprint,
     write_runtime_fingerprint,
 )
-from sanos.widb.build import IntermediateBuildRequest, build_intermediates
+from sanos.widb.build import IntermediateBuildRequest, IntermediateStage, build_intermediates
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.wrds import (
     ALL_RAW_TABLES,
@@ -1452,7 +1452,7 @@ def intermediate_build(
             ticker=ticker,
             start_date=start_date.date(),
             end_date=end_date.date(),
-            through=through,
+            through=cast(IntermediateStage, through),
             include_half_days=include_half_days,
             source=source,
             source_generation=source_generation,
@@ -2490,6 +2490,7 @@ def public_dataset_validate(
         locations = context.locations.require_complete()
         store = ArtifactStore(locations)
         warning_records: Sequence[warnings.WarningMessage] = ()
+        config: PublicProjectionConfig | PublicReleaseConfig | None
         if config_path is not None:
             if name is not None or artifact_id is not None:
                 raise ValueError("Use either --config or --name with --artifact-id, not both")
@@ -2497,9 +2498,7 @@ def public_dataset_validate(
             if not isinstance(document, dict):
                 raise ValueError("Public validation configuration must be a JSON object")
             if set(document) == {"public_dataset"}:
-                config: PublicProjectionConfig | PublicReleaseConfig = (
-                    PublicProjectionConfig.from_document(document)
-                )
+                config = PublicProjectionConfig.from_document(document)
                 plan = plan_public_candidate(config)
             elif set(document) == {"public_release"}:
                 config = PublicReleaseConfig.from_document(document)
@@ -2592,7 +2591,7 @@ def public_dataset_validate(
 
 @main.group()
 def experiment() -> None:
-    """Build and validate disposable experiment materializations."""
+    """Deprecated aliases for model-specific Experiment commands."""
 
 
 @experiment.command("build")
@@ -2643,7 +2642,7 @@ def experiment_build(
     restart_work: bool,
     version_request: str,
 ) -> None:
-    """Build an internal daily-front HDF5 Experiment from a Dataset."""
+    """Build a DySANOS HDF5 Experiment from its pinned public Dataset."""
 
     try:
         locations = context.locations.require_complete()
@@ -2813,3 +2812,15 @@ def experiment_validate(
         reuse_record=reuse_record,
         summary=None if summary is None else summary.as_dict(),
     )
+
+
+@main.group()
+def dysanos() -> None:
+    """Materialize and operate the DySANOS 1.1 model."""
+
+
+# The generic Experiment lifecycle remains a storage concept, while DySANOS is
+# the concrete model.  Register the same command objects so the old spelling is
+# a thin compatibility alias with no second implementation path.
+dysanos.add_command(experiment_build, name="build")
+dysanos.add_command(experiment_validate, name="validate")

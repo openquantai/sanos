@@ -1,4 +1,4 @@
-"""Exact internal daily-front market projection for the reference Experiment."""
+"""Public-derived driftless data contracts for DySANOS 1.1."""
 
 from __future__ import annotations
 
@@ -13,13 +13,14 @@ from cdxcore.version import version
 
 from sanos.artifacts import ArtifactPointer
 from sanos.config import canonical_json, canonical_sha256
-from sanos.experiments.config import (
+from sanos.datasets.public.schema import public_polars_schema
+from sanos.model.tools import SanosPricer
+from sanos.models.dysanos.config import (
     DailyFrontGeometryConfig,
     DailyFrontMarketConfig,
 )
 from sanos.widb.calendar import DAYS_PER_YEAR, NMS, business_dates
 from sanos.widb.daily import DailyDataError
-from sanos.widb.surface import FITTED_SCHEMA, smooth_sanos_pricer
 
 
 @version("1.0")
@@ -50,7 +51,7 @@ def _ordered_fingerprint(
     return digest.hexdigest()
 
 
-@version("1.6", dependencies=[EligibilityAudit, _ordered_fingerprint])
+@version("2.0", dependencies=[EligibilityAudit, _ordered_fingerprint])
 @dataclass(frozen=True, slots=True)
 class DailyFrontDay:
     """One immutable logical day before global HDF5 padding."""
@@ -58,12 +59,12 @@ class DailyFrontDay:
     ticker: str
     trading_date: date
     is_half_day: bool
-    spot_reference: float
+    driftless_spot_return: float
+    driftless_spot_return_valid: bool
     market_uid: str
     market_fingerprint: str
     expiry_time_y: np.ndarray
     expiry_date_days: np.ndarray
-    expiry_id: np.ndarray
     expiry_is_am: np.ndarray
     expiry_atm_annual_vol: np.ndarray
     expiry_strike_lower: np.ndarray
@@ -73,11 +74,8 @@ class DailyFrontDay:
     quote_price_index: np.ndarray
     quote_strike: np.ndarray
     quote_is_call: np.ndarray
-    quote_bid: np.ndarray
-    quote_ask: np.ndarray
     quote_fit: np.ndarray
-    quote_log_volume: np.ndarray
-    quote_log_open_interest: np.ndarray
+    quote_half_spread: np.ndarray
     price_expiry_y: np.ndarray
     price_strike: np.ndarray
     audit: EligibilityAudit
@@ -85,8 +83,13 @@ class DailyFrontDay:
     def __post_init__(self) -> None:
         if not self.ticker or not isinstance(self.is_half_day, bool):
             raise ValueError("A daily-front day requires ticker and half-day state")
-        if not np.isfinite(self.spot_reference) or self.spot_reference <= 0.0:
-            raise ValueError("spot_reference must be finite and positive")
+        if not isinstance(self.driftless_spot_return_valid, bool):
+            raise ValueError("driftless_spot_return_valid must be boolean")
+        if self.driftless_spot_return_valid:
+            if not np.isfinite(self.driftless_spot_return):
+                raise ValueError("A valid driftless spot return must be finite")
+        elif not np.isnan(self.driftless_spot_return):
+            raise ValueError("An unavailable driftless spot return must be NaN")
         if (
             len(self.market_uid) != 64
             or len(self.market_fingerprint) != 64
@@ -97,7 +100,6 @@ class DailyFrontDay:
         expiry_count = len(self.expiry_time_y)
         expiry_arrays = (
             self.expiry_date_days,
-            self.expiry_id,
             self.expiry_is_am,
             self.expiry_atm_annual_vol,
             self.expiry_strike_lower,
@@ -114,7 +116,6 @@ class DailyFrontDay:
             or np.any(self.expiry_strike_lower <= 0.0)
             or np.any(self.expiry_strike_lower >= 1.0)
             or np.any(self.expiry_strike_upper <= 1.0)
-            or len(set(int(value) for value in self.expiry_id)) != expiry_count
         ):
             raise ValueError("Expiry geometry is invalid")
         quote_count = len(self.quote_strike)
@@ -122,11 +123,8 @@ class DailyFrontDay:
             self.quote_expiry_index,
             self.quote_price_index,
             self.quote_is_call,
-            self.quote_bid,
-            self.quote_ask,
             self.quote_fit,
-            self.quote_log_volume,
-            self.quote_log_open_interest,
+            self.quote_half_spread,
         )
         if quote_count == 0 or any(array.shape != (quote_count,) for array in quote_arrays):
             raise ValueError("Quote arrays must be non-empty and aligned")
@@ -135,15 +133,9 @@ class DailyFrontDay:
             or np.any(self.quote_expiry_index >= expiry_count)
             or np.any(~np.isfinite(self.quote_strike))
             or np.any(self.quote_strike <= 0.0)
-            or np.any(~np.isfinite(self.quote_bid))
-            or np.any(~np.isfinite(self.quote_ask))
             or np.any(~np.isfinite(self.quote_fit))
-            or np.any(self.quote_bid < 0.0)
-            or np.any(self.quote_ask <= self.quote_bid)
-            or np.any(~np.isfinite(self.quote_log_volume))
-            or np.any(~np.isfinite(self.quote_log_open_interest))
-            or np.any(self.quote_log_volume < 0.0)
-            or np.any(self.quote_log_open_interest < 0.0)
+            or np.any(~np.isfinite(self.quote_half_spread))
+            or np.any(self.quote_half_spread <= 0.0)
         ):
             raise ValueError("Quote objective arrays are invalid")
         quote_lower = self.expiry_strike_lower[self.quote_expiry_index]
@@ -243,7 +235,9 @@ class DailyFrontDay:
 
     @property
     def expiry_ids(self) -> np.ndarray:
-        return self.expiry_id
+        """Dense public expiry indices retained for legacy adapters only."""
+
+        return np.arange(self.expiry_count, dtype=np.int64)
 
     @property
     def expiry_index(self) -> np.ndarray:
@@ -259,28 +253,32 @@ class DailyFrontDay:
 
     @property
     def bids(self) -> np.ndarray:
-        return self.quote_bid
+        return self.quote_fit - self.quote_half_spread
 
     @property
     def asks(self) -> np.ndarray:
-        return self.quote_ask
+        return self.quote_fit + self.quote_half_spread
+
+    @property
+    def quote_bid(self) -> np.ndarray:
+        """Synthetic driftless bid reconstructed from fit minus half-spread."""
+
+        return self.bids
+
+    @property
+    def quote_ask(self) -> np.ndarray:
+        """Synthetic driftless ask reconstructed from fit plus half-spread."""
+
+        return self.asks
 
     @property
     def fit_prices(self) -> np.ndarray:
         return self.quote_fit
 
     @property
-    def log_volumes(self) -> np.ndarray:
-        return self.quote_log_volume
-
-    @property
-    def log_open_interests(self) -> np.ndarray:
-        return self.quote_log_open_interest
-
-    @property
     def quote_ids(self) -> tuple[str, ...]:
         return tuple(
-            f"{self.trading_date.isoformat()}:{self.expiry_id[int(expiry_index)]}:"
+            f"{self.trading_date.isoformat()}:{int(expiry_index)}:"
             f"{strike:.12g}:{'C' if is_call else 'P'}"
             for expiry_index, strike, is_call in zip(
                 self.quote_expiry_index,
@@ -307,10 +305,6 @@ class DailyFrontDay:
         return self.expiry_strike_upper
 
     @property
-    def spot_ref(self) -> float:
-        return self.spot_reference
-
-    @property
     def num_quotes(self) -> int:
         return self.quote_count
 
@@ -328,14 +322,12 @@ class DailyFrontDay:
             ),
             (
                 self.expiries_y,
-                self.expiry_ids,
                 self.expiry_is_am,
                 self.expiry_index,
                 self.strikes,
                 self.is_call,
-                self.bids,
-                self.asks,
                 self.fit_prices,
+                self.quote_half_spread,
                 self.atm_annual_vols,
                 self.model_atm_total_vols,
                 self.strike_lower_bounds,
@@ -361,7 +353,7 @@ class DailyFrontDay:
     def half_spreads(self) -> np.ndarray:
         """One normalized half-spread per retained separate side book."""
 
-        return 0.5 * (self.quote_ask - self.quote_bid)
+        return self.quote_half_spread
 
     @property
     def call_equivalent_fit_prices(self) -> np.ndarray:
@@ -377,8 +369,7 @@ class DailyFrontDay:
     def call_equivalent_book_mids(self) -> np.ndarray:
         """Observed mids represented as calls without merging observations."""
 
-        mids = 0.5 * (self.quote_bid + self.quote_ask)
-        return mids + np.where(
+        return self.quote_fit + np.where(
             self.quote_is_call,
             0.0,
             1.0 - self.quote_strike,
@@ -461,7 +452,7 @@ def _market_fingerprint(
     )
 
 
-@version("1.1", dependencies=[DailyFrontDay, _market_fingerprint])
+@version("2.0", dependencies=[DailyFrontDay, _market_fingerprint])
 def recompute_market_fingerprint(
     day: DailyFrontDay,
     source_dataset: ArtifactPointer,
@@ -473,7 +464,7 @@ def recompute_market_fingerprint(
         str(epoch + np.timedelta64(int(value), "D")) for value in day.expiry_date_days
     )
     quote_ids = tuple(
-        f"{day.trading_date.isoformat()}:{day.expiry_id[int(expiry_index)]}:"
+        f"{day.trading_date.isoformat()}:{int(expiry_index)}:"
         f"{strike:.12g}:{'C' if is_call else 'P'}"
         for expiry_index, strike, is_call in zip(
             day.quote_expiry_index,
@@ -491,14 +482,12 @@ def recompute_market_fingerprint(
         quote_ids=quote_ids,
         arrays=(
             day.expiry_time_y,
-            day.expiry_id,
             day.expiry_is_am,
             day.quote_expiry_index,
             day.quote_strike,
             day.quote_is_call,
-            day.quote_bid,
-            day.quote_ask,
             day.quote_fit,
+            day.quote_half_spread,
             day.expiry_atm_annual_vol,
             day.model_atm_total_vol,
             day.expiry_strike_lower,
@@ -508,7 +497,7 @@ def recompute_market_fingerprint(
 
 
 @version(
-    "1.2",
+    "2.0",
     dependencies=[
         DailyFrontDay,
         DailyFrontMarketConfig,
@@ -518,192 +507,119 @@ def recompute_market_fingerprint(
         _one_value,
         _days_since_epoch,
         canonical_sha256,
-        smooth_sanos_pricer,
+        SanosPricer,
+        public_polars_schema,
         NMS,
     ],
 )
 def project_daily_front(
     frame: pl.DataFrame,
     *,
+    ticker: str,
     source_dataset: ArtifactPointer,
     market: DailyFrontMarketConfig,
     geometry: DailyFrontGeometryConfig,
 ) -> DailyFrontDay:
-    """Project one fitted internal partition into the exact daily-front universe."""
+    """Project one flat public day into the normalized DySANOS objective."""
 
-    if frame.schema != pl.Schema(FITTED_SCHEMA):
-        raise DailyDataError("daily-front source does not have the fitted-day schema")
+    if frame.schema != public_polars_schema():
+        raise DailyDataError("daily-front source does not have the flat public schema")
     if frame.is_empty():
-        raise DailyDataError("A typed-empty partition has no daily-front market")
-    ticker = str(_one_value(frame, "ticker"))
+        raise DailyDataError("A public day cannot be empty")
     trading_date = _one_value(frame, "trading_date")
     if not isinstance(trading_date, date):
         raise DailyDataError("trading_date must be a date")
-    is_half_day = bool(_one_value(frame, "is_half_day"))
-    spot_reference = float(_one_value(frame, "spot_reference"))
-    smoothness = float(_one_value(frame, "smoothness"))
+    day_rows = frame.filter(pl.col("record_kind") == "day")
+    if day_rows.height != 1:
+        raise DailyDataError("A public day requires exactly one day row")
+    is_half_day = bool(_one_value(day_rows, "is_half_day"))
+    smoothness = float(_one_value(day_rows, "smoothness"))
     if smoothness != market.smoothness:
         raise DailyDataError(
-            f"Daily smoothness {smoothness} differs from Experiment {market.smoothness}"
+            f"Public smoothness {smoothness} differs from Experiment {market.smoothness}"
         )
+    return_value = day_rows.get_column("driftless_spot_return")[0]
+    return_valid = return_value is not None
+    driftless_return = float(return_value) if return_valid else float("nan")
 
-    eligible = frame.filter(pl.col("options_filter_eligible")).sort(
-        "time_to_expiry_years", "expiry_id", "normalized_strike", maintain_order=True
+    expiry_rows = frame.filter(pl.col("record_kind") == "expiry").sort("expiry_index")
+    book_rows = frame.filter(pl.col("record_kind") == "book").sort(
+        "expiry_index", "book_index"
     )
-    if eligible.is_empty():
-        raise DailyDataError("A populated source day has no options_filter_eligible rows")
-    expiry_rows = eligible.unique(
-        subset=["time_to_expiry_years", "expiry_id"], maintain_order=True
-    ).sort("time_to_expiry_years", "expiry_id", maintain_order=True)
-    all_time_y = expiry_rows.get_column("time_to_expiry_years").cast(pl.Float64).to_numpy()
-    if len(all_time_y) > 1 and np.any(np.diff(all_time_y) <= 0.0):
-        raise DailyDataError("Daily-front input requires one strictly ordered identity per expiry")
+    smooth_rows = frame.filter(pl.col("record_kind") == "smooth_node").sort(
+        "expiry_index", "node_index"
+    )
+    if expiry_rows.is_empty() or book_rows.is_empty() or smooth_rows.is_empty():
+        raise DailyDataError("A public day requires expiry, book, and smooth-state rows")
 
-    pricer = smooth_sanos_pricer(frame)
-    pricer_expiries = np.asarray(pricer.expiries, dtype=np.float64)
-    pricer_variances = np.asarray(pricer.variances, dtype=np.float64)
-    all_atm_vol = _interpolate_atm_vols(all_time_y, pricer_expiries, pricer_variances)
+    pricer_times: list[float] = []
+    pricer_variances: list[float] = []
+    pricer_supports: list[np.ndarray] = []
+    pricer_densities: list[np.ndarray] = []
+    for public_index in smooth_rows.get_column("expiry_index").unique(maintain_order=True):
+        nodes = smooth_rows.filter(pl.col("expiry_index") == public_index).sort("node_index")
+        expiry = expiry_rows.filter(pl.col("expiry_index") == public_index)
+        if expiry.height != 1:
+            raise DailyDataError("Smooth state refers to missing public expiry geometry")
+        pricer_times.append(float(expiry.get_column("time_to_expiry_years")[0]))
+        pricer_variances.append(float(_one_value(nodes, "kernel_input_total_variance")))
+        pricer_supports.append(nodes.get_column("normalized_support").cast(pl.Float64).to_numpy())
+        pricer_densities.append(nodes.get_column("density_mass").cast(pl.Float64).to_numpy())
+    pricer = SanosPricer(
+        smoothness=smoothness,
+        expiries=np.asarray(pricer_times, dtype=np.float64),
+        variances=np.asarray(pricer_variances, dtype=np.float64),
+        xstrikes=pricer_supports,
+        xdensities=pricer_densities,
+    )
     model_business_dtes = np.asarray(geometry.model_business_dtes, dtype=np.float64)
     model_time_y = model_business_dtes / DAYS_PER_YEAR
-    model_atm_vol = _interpolate_atm_vols(model_time_y, pricer_expiries, pricer_variances)
+    model_atm_vol = _interpolate_atm_vols(
+        model_time_y,
+        np.asarray(pricer.expiries, dtype=np.float64),
+        np.asarray(pricer.variances, dtype=np.float64),
+    )
     model_atm_total_vol = model_atm_vol * np.sqrt(model_time_y)
+
+    public_book_expiries = set(int(value) for value in book_rows["expiry_index"].to_list())
+    retained_expiry_rows = expiry_rows.filter(pl.col("expiry_index").is_in(public_book_expiries))
+    public_to_dense = {
+        int(value): index
+        for index, value in enumerate(retained_expiry_rows["expiry_index"].to_list())
+    }
+    expiry_time_array = retained_expiry_rows["time_to_expiry_years"].cast(pl.Float64).to_numpy()
+    expiry_atm_array = retained_expiry_rows["nms_atm_annual_volatility"].cast(pl.Float64).to_numpy()
+    epsilon_atm = float(_one_value(day_rows, "nms_epsilon_atm_annual_volatility"))
     bounds = np.asarray(
         NMS.from_nms(
             np.asarray(geometry.nms_range, dtype=np.float64)[None, :],
-            all_time_y[:, None],
-            volatility=all_atm_vol[:, None],
-            epsilon_volatility=float(model_atm_vol[0]),
+            expiry_time_array[:, None],
+            volatility=expiry_atm_array[:, None],
+            epsilon_volatility=epsilon_atm,
         ),
         dtype=np.float64,
     )
-
-    expiry_time: list[float] = []
-    expiry_dates: list[date] = []
-    expiry_ids: list[int] = []
-    expiry_is_am: list[bool] = []
-    expiry_atm: list[float] = []
-    expiry_lower: list[float] = []
-    expiry_upper: list[float] = []
-    quote_expiry: list[int] = []
-    quote_strike: list[float] = []
-    quote_side: list[bool] = []
-    quote_bid: list[float] = []
-    quote_ask: list[float] = []
-    quote_fit: list[float] = []
-    quote_volume: list[float] = []
-    quote_open_interest: list[float] = []
-    quote_ids: list[str] = []
-    active_european_books = 0
-    horizon_eligible_books = 0
-    nms_eligible_books = 0
-    maximum_time = float(model_time_y[-1])
-
-    for input_expiry_index, expiry_record in enumerate(expiry_rows.iter_rows(named=True)):
-        expiry_id = int(expiry_record["expiry_id"])
-        time_y = float(expiry_record["time_to_expiry_years"])
-        business_dte = time_y * DAYS_PER_YEAR
-        group = eligible.filter(pl.col("expiry_id") == expiry_id).sort(
-            "normalized_strike", maintain_order=True
-        )
-        european = ~group.get_column("is_american").to_numpy().astype(bool)
-        fit_available = group.get_column("smooth_mid_available").to_numpy().astype(bool)
-        strikes = group.get_column("normalized_strike").cast(pl.Float64).to_numpy()
-        within_nms = (strikes >= bounds[input_expiry_index, 0]) & (
-            strikes <= bounds[input_expiry_index, 1]
-        )
-        excluded = any(
-            abs(business_dte - value) <= 1.0e-4 for value in market.excluded_business_dtes
-        )
-        within_horizon = not excluded and 0.0 <= time_y <= maximum_time + 1.0e-12
-        output_expiry_index = len(expiry_time)
-        expiry_quote_start = len(quote_strike)
-        side_fields = (
-            (
-                True,
-                "C",
-                "call_active",
-                "pure_market_call_bid",
-                "pure_market_call_ask",
-                "smooth_call_mid",
-                "market_call_log_volume",
-                "market_call_log_open_interest",
-            ),
-            (
-                False,
-                "P",
-                "put_active",
-                "pure_market_put_bid",
-                "pure_market_put_ask",
-                "smooth_put_mid",
-                "market_put_log_volume",
-                "market_put_log_open_interest",
-            ),
-        )
-        for (
-            is_call,
-            side,
-            active_column,
-            bid_column,
-            ask_column,
-            fit_column,
-            volume_column,
-            oi_column,
-        ) in side_fields:
-            fit = group.get_column(fit_column).cast(pl.Float64).to_numpy()
-            active = (
-                group.get_column(active_column).to_numpy().astype(bool)
-                & european
-                & fit_available
-                & np.isfinite(fit)
+    quote_expiry_array = np.asarray(
+        [public_to_dense[int(value)] for value in book_rows["expiry_index"].to_list()],
+        dtype=np.int64,
+    )
+    quote_strike_array = book_rows["normalized_strike"].cast(pl.Float64).to_numpy()
+    quote_side_array = book_rows["is_call"].to_numpy().astype(np.bool_)
+    quote_half_spread = book_rows["half_spread"].cast(pl.Float64).to_numpy()
+    call_fit = np.asarray(
+        [
+            pricer(float(expiry_time_array[expiry_index]), np.asarray([strike]))[0]
+            for expiry_index, strike in zip(
+                quote_expiry_array, quote_strike_array, strict=True
             )
-            active_european_books += int(np.sum(active))
-            if not within_horizon:
-                continue
-            horizon_eligible_books += int(np.sum(active))
-            selected = active & within_nms
-            nms_eligible_books += int(np.sum(selected))
-            if not np.any(selected):
-                continue
-            selected_strikes = strikes[selected]
-            count = len(selected_strikes)
-            quote_expiry.extend([output_expiry_index] * count)
-            quote_strike.extend(selected_strikes.tolist())
-            quote_side.extend([is_call] * count)
-            quote_bid.extend(
-                group.get_column(bid_column).cast(pl.Float64).to_numpy()[selected].tolist()
-            )
-            quote_ask.extend(
-                group.get_column(ask_column).cast(pl.Float64).to_numpy()[selected].tolist()
-            )
-            quote_fit.extend(fit[selected].tolist())
-            quote_volume.extend(
-                group.get_column(volume_column).cast(pl.Float64).to_numpy()[selected].tolist()
-            )
-            quote_open_interest.extend(
-                group.get_column(oi_column).cast(pl.Float64).to_numpy()[selected].tolist()
-            )
-            quote_ids.extend(
-                f"{trading_date.isoformat()}:{expiry_id}:{strike:.12g}:{side}"
-                for strike in selected_strikes
-            )
-        if len(quote_strike) == expiry_quote_start:
-            continue
-        expiry_time.append(time_y)
-        expiry_value = expiry_record["expiry_date"]
-        if not isinstance(expiry_value, date):
-            raise DailyDataError("expiry_date must be a date")
-        expiry_dates.append(expiry_value)
-        expiry_ids.append(expiry_id)
-        expiry_is_am.append(bool(expiry_record["expiry_is_am"]))
-        expiry_atm.append(float(all_atm_vol[input_expiry_index]))
-        expiry_lower.append(float(bounds[input_expiry_index, 0]))
-        expiry_upper.append(float(bounds[input_expiry_index, 1]))
-
-    if not quote_strike:
-        raise DailyDataError("A populated source day has no daily-front eligible books")
-
-    quote_expiry_array = np.asarray(quote_expiry, dtype=np.int64)
-    quote_strike_array = np.asarray(quote_strike, dtype=np.float64)
+        ],
+        dtype=np.float64,
+    )
+    quote_fit_array = call_fit + np.where(
+        quote_side_array,
+        0.0,
+        quote_strike_array - 1.0,
+    )
     price_by_key: dict[tuple[int, float], int] = {}
     price_expiry_y: list[float] = []
     price_strike: list[float] = []
@@ -716,35 +632,33 @@ def project_daily_front(
         if price_index is None:
             price_index = len(price_strike)
             price_by_key[key] = price_index
-            price_expiry_y.append(expiry_time[int(expiry_index)])
+            price_expiry_y.append(float(expiry_time_array[int(expiry_index)]))
             price_strike.append(float(strike))
         quote_price_index[index] = price_index
 
-    expiry_time_array = np.asarray(expiry_time, dtype=np.float64)
-    expiry_id_array = np.asarray(expiry_ids, dtype=np.int64)
-    expiry_am_array = np.asarray(expiry_is_am, dtype=np.bool_)
-    quote_side_array = np.asarray(quote_side, dtype=np.bool_)
-    quote_bid_array = np.asarray(quote_bid, dtype=np.float64)
-    quote_ask_array = np.asarray(quote_ask, dtype=np.float64)
-    quote_fit_array = np.asarray(quote_fit, dtype=np.float64)
-    quote_volume_array = np.asarray(quote_volume, dtype=np.float64)
-    quote_oi_array = np.asarray(quote_open_interest, dtype=np.float64)
-    expiry_atm_array = np.asarray(expiry_atm, dtype=np.float64)
-    lower_array = np.asarray(expiry_lower, dtype=np.float64)
-    upper_array = np.asarray(expiry_upper, dtype=np.float64)
+    expiry_am_array = retained_expiry_rows["is_am"].to_numpy().astype(np.bool_)
+    lower_array = bounds[:, 0]
+    upper_array = bounds[:, 1]
+    expiry_dates = retained_expiry_rows["expiry_date"].to_list()
     expiry_date_array = _days_since_epoch(expiry_dates)
     price_expiry_array = np.asarray(price_expiry_y, dtype=np.float64)
     price_strike_array = np.asarray(price_strike, dtype=np.float64)
+    if not ticker:
+        raise DailyDataError("DySANOS 1.1 requires an explicit ticker label")
+    quote_ids = tuple(
+        f"{trading_date.isoformat()}:{int(expiry_index)}:{strike:.12g}:"
+        f"{'C' if is_call else 'P'}"
+        for expiry_index, strike, is_call in zip(
+            quote_expiry_array,
+            quote_strike_array,
+            quote_side_array,
+            strict=True,
+        )
+    )
     market_uid = canonical_sha256(
         {
             "source_dataset": source_dataset,
-            "daily_configuration_id": str(_one_value(frame, "configuration_id")),
-            "options_filter_configuration_id": str(
-                _one_value(frame, "options_filter_configuration_id")
-            ),
-            "smooth_sanos_configuration_id": str(
-                _one_value(frame, "smooth_sanos_configuration_id")
-            ),
+            "public_schema": str(public_polars_schema()),
             "market": market,
             "geometry": geometry,
         }
@@ -758,14 +672,12 @@ def project_daily_front(
         quote_ids=tuple(quote_ids),
         arrays=(
             expiry_time_array,
-            expiry_id_array,
             expiry_am_array,
             quote_expiry_array,
             quote_strike_array,
             quote_side_array,
-            quote_bid_array,
-            quote_ask_array,
             quote_fit_array,
+            quote_half_spread,
             expiry_atm_array,
             model_atm_total_vol,
             lower_array,
@@ -776,12 +688,12 @@ def project_daily_front(
         ticker=ticker,
         trading_date=trading_date,
         is_half_day=is_half_day,
-        spot_reference=spot_reference,
+        driftless_spot_return=driftless_return,
+        driftless_spot_return_valid=return_valid,
         market_uid=market_uid,
         market_fingerprint=fingerprint,
         expiry_time_y=expiry_time_array,
         expiry_date_days=expiry_date_array,
-        expiry_id=expiry_id_array,
         expiry_is_am=expiry_am_array,
         expiry_atm_annual_vol=expiry_atm_array,
         expiry_strike_lower=lower_array,
@@ -791,18 +703,15 @@ def project_daily_front(
         quote_price_index=quote_price_index,
         quote_strike=quote_strike_array,
         quote_is_call=quote_side_array,
-        quote_bid=quote_bid_array,
-        quote_ask=quote_ask_array,
         quote_fit=quote_fit_array,
-        quote_log_volume=quote_volume_array,
-        quote_log_open_interest=quote_oi_array,
+        quote_half_spread=quote_half_spread,
         price_expiry_y=price_expiry_array,
         price_strike=price_strike_array,
         audit=EligibilityAudit(
-            active_european_books=active_european_books,
-            horizon_eligible_books=horizon_eligible_books,
-            nms_eligible_books=nms_eligible_books,
-            input_expiries=len(all_time_y),
+            active_european_books=len(quote_strike_array),
+            horizon_eligible_books=len(quote_strike_array),
+            nms_eligible_books=len(quote_strike_array),
+            input_expiries=expiry_rows.height,
             eligible_expiries=len(expiry_time_array),
         ),
     )

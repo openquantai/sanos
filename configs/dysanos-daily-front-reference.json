@@ -1,21 +1,22 @@
 {
   "experiment": {
-    "name": "spx-daily-front-reference-v1",
-    "profile": "dysanos-daily-front-market-v1",
+    "name": "spx-dysanos-1.1-reference-v1",
+    "ticker": "SPX",
+    "profile": "dysanos-1.1",
     "source_dataset": {
       "storage_class": "dataset",
-      "namespace": "widb/internal/name-widb-spx-2022-2025-reference",
-      "artifact_id": "2ea20498735adf1e625b84f99c812bae78c90e9aeb81b36c9e0a330a21bd4585"
+      "namespace": "sanos/public-candidate/name-sanos-spx-2022-2025-public-candidate",
+      "artifact_id": "d09a55ee4806916f0fc355f56c76401e9e21de09cfb6de99d5630e59439f1fc1"
     },
-    "consumer_contract": "flex-market-day-v1"
+    "consumer_contract": "dysanos-1.1-daily-front-v1"
   },
   "market": {
     "smoothness": 0.25,
-    "max_num_options": 100000,
-    "excluded_business_dtes": [0.2],
+    "excluded_business_dtes": [0.0, 0.2],
     "overnight_variance_fraction": 0.2
   },
   "geometry": {
+    "support_epsilon_business_dte": 0.125,
     "model_business_dtes": [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70],
     "nms_range": [-3.0, 2.0],
     "num_inner_strikes": 200,

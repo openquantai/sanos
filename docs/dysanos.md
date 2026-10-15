@@ -1,22 +1,53 @@
-# Internal DySANOS Experiment materialization
+# DySANOS 1.1 model
+
+DySANOS is a downstream model under `sanos.models.dysanos`; SANOS itself ends
+at the fitted internal/public Dataset boundary. Other retained research models
+belong beside DySANOS under `sanos.models`, each with its own Dataset capability
+contract, configuration, CLI, artifacts, and tests.
+
+The package deliberately contains one canonical model path rather than the
+legacy `dysanos.flex` research forest. It owns the public-Dataset adapter,
+model-specific HDF5, constrained differentiable SANOS decoder, synthetic-band
+objective, fresh native-state calibration, Float64 affine Direct-200
+initialization, stable weekly dynamics, joint training, checkpoints, and
+validation. It never imports `quant_data` or consumes a legacy checkpoint at
+runtime. Alternative Q/OCE, hedging, liquidity, encoder, hierarchical,
+fixed-grid, plotting, and presentation experiments are not part of DySANOS
+1.1.
+
+The checked model configuration is all-history with no holdout. Its 2025 date
+is a diagnostic boundary, not an out-of-sample claim.
+
+The completed DySANOS lifecycle uses two immutable Experiment artifacts. The
+currently implemented first artifact is the reusable
+public-derived daily-front `data.h5` materialization documented below. The
+pending second artifact is the trained Direct-200 model and will depend on that
+HDF5 Experiment.
+Keeping them separate permits multiple training runs to reuse the same input
+materialization and preserves a valid HDF5 artifact when training is
+interrupted or fails. Both remain disposable; neither replaces the public
+Dataset as the SANOS reference.
 
 The reference Dataset and an Experiment are different lifecycle objects. The
 freshly downloaded, validated, and promoted SANOS **Dataset** is the canonical
-research reference. This command derives a disposable, internal HDF5
-**Experiment** from that Dataset for the recovered all-history DySANOS
+research reference. DySANOS 1.1 derives a disposable HDF5 **Experiment** only
+from the completed public Dataset for the all-history DySANOS
 daily-front consumer. Deleting an Experiment never changes its source Dataset.
 
 The checked-in profile is `configs/dysanos-daily-front-reference.json`. It
-documents the expected internal Dataset identity and the recovered selector and
-model
-geometry: smoothness 0.25, a 100,000-option upstream population cap, literal
-0.2-business-day exclusion, inclusive NMS `[-3,2]`, 18 business-DTE model
-nodes, and 200 inner strike coordinates. Its HDF5 contains exact internal
-bids, asks, fitted prices, liquidity fields, expiry identifiers, and an
-absolute spot reference. It is therefore not redistributable and is not the
-public SANOS Dataset. The pinned selector's lower horizon is inclusive: a
-genuine zero-business-DTE book is valid when it survives all other gates;
-zero-valued padding remains distinguishable through the mandatory prefix mask.
+documents the expected public Dataset identity and the recovered selector and
+model geometry: smoothness 0.25, literal zero- and
+0.2-business-day exclusions, inclusive NMS `[-3,2]`, 18 business-DTE model
+nodes, 200 inner strike coordinates, and a distinct 0.125-business-day
+regularization time for the learned model's shared support. The public
+Dataset's 1-business-day NMS field selects the ATM-volatility proxy and is not
+this model support epsilon. Its HDF5 stores smooth fitted prices
+and published driftless half-spreads in `C/(DF*F)` units. Synthetic bid and ask
+are always derived as fit minus/plus half-spread; a negative synthetic bid is
+valid and is never clipped. The HDF5 stores no absolute spot, volume, open
+interest, observed vendor bid/ask, or vendor expiry identifier. Zero-valued
+padding remains distinguishable through the mandatory prefix mask; it does not
+represent a retained 0DTE book.
 
 ## Plan, build, and validate
 
@@ -25,13 +56,14 @@ WRDS:
 
 ```bash
 sanos --root /path/to/quant-data --dry-run --log-format json \
-  experiment build --config configs/dysanos-daily-front-reference.json
+  dysanos build --config configs/dysanos-daily-front-reference.json
 ```
 
-Build after the pinned internal Dataset exists:
+Build after the pinned public Dataset exists. Raw, Intermediate, the internal
+Dataset, and WRDS are not consulted:
 
 ```bash
-sanos --root /path/to/quant-data experiment build \
+sanos --root /path/to/quant-data dysanos build \
   --config configs/dysanos-daily-front-reference.json \
   --max-workers 2
 ```
@@ -42,8 +74,8 @@ finalize-configs` as shown in the
 `final-configs/experiment.json`. This binds the actual Dataset pointer and
 configuration digest without manual JSON editing.
 
-The build uses at most four local spawned processes. It writes one atomic,
-pickle-free NPZ restart shard per populated date beneath the exact plan-owned
+The build writes one atomic, pickle-free NPZ restart shard per populated date
+beneath the exact plan-owned
 Experiment workspace, assembles and validates `data.h5`, and then publishes
 the immutable artifact atomically. Progress is available as human text with
 `--verbose` or structured events with `--log-format json`. This operation is
@@ -52,7 +84,7 @@ offline and never opens WRDS.
 Validate the completed artifact without requiring its source:
 
 ```bash
-sanos --root /path/to/quant-data experiment validate \
+sanos --root /path/to/quant-data dysanos validate \
   --config configs/dysanos-daily-front-reference.json
 ```
 
@@ -80,12 +112,15 @@ The immutable artifact contains `data.h5`, `README.md`, `config.json`,
 prefixes; all padding, dtypes, storage filters, source identity, reconstructed
 market fingerprints, consumer training fingerprints, weekly pairs, and logical
 content hashes are validation gates. The stored `market_fingerprint` binds a
-day to the exact SANOS Dataset identity; the adapter's `training_fingerprint`
-separately reproduces the pinned objective-only FLEX formula.
+day to the exact public SANOS Dataset identity. The day return has an explicit
+validity mask because the first published day has no preceding return.
+`market_uid` and `market_fingerprint` are derived SHA-256 integrity digests,
+not vendor identifiers or model features; training inputs are the documented
+quote, price, expiry, model, return, split, and dynamics arrays.
 
 ## Legacy parity and fresh production
 
-The 891-date legacy Joint Direct-200 artifact is a read-only migration oracle,
+The internal-derived DySANOS 1.0 artifact is a read-only migration oracle,
 not a build input. It establishes the common-period population of 3,566,258
 separate call/put books and the recovered tensor contract. The newly downloaded
 SANOS Dataset plans 918 sessions through 2025-08-29, with one policy-owned

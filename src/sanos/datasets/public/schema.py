@@ -1,4 +1,4 @@
-"""Exact recursive schema and capability contract for public SANOS data."""
+"""Exact flat scalar schema and capability contract for public SANOS data."""
 
 from __future__ import annotations
 
@@ -7,157 +7,162 @@ from typing import Any, Final, cast
 import polars as pl
 from cdxcore.version import version
 
-PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-daily-v2"
-PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v3"
-PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v3"
-PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v4"
+PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-flat-v3"
+PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v4"
+PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v4"
+PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v5"
 
-EXPIRY_DTYPE: Final = pl.Struct(
-    [
-        pl.Field("expiry_index", pl.Int32),
-        pl.Field("expiry_date", pl.Date),
-        pl.Field("business_dte", pl.Float32),
-        pl.Field("calendar_dte", pl.Int32),
-        pl.Field("is_am", pl.Boolean),
-        pl.Field("time_to_expiry_years", pl.Float32),
-        pl.Field("discounted_forward_over_spot", pl.Float64),
-        pl.Field("nms_atm_annual_volatility", pl.Float64),
-    ]
-)
-
-BOOK_DTYPE: Final = pl.Struct(
-    [
-        pl.Field("expiry_index", pl.Int32),
-        pl.Field("is_call", pl.Boolean),
-        pl.Field("normalized_strike", pl.Float32),
-        pl.Field("half_spread_spot", pl.Float64),
-    ]
-)
-
-SMOOTH_EXPIRY_DTYPE: Final = pl.Struct(
-    [
-        pl.Field("expiry_index", pl.Int32),
-        pl.Field("time_increment_years", pl.Float64),
-        pl.Field("kernel_input_total_variance", pl.Float64),
-        pl.Field("normalized_support", pl.List(pl.Float64)),
-        pl.Field("density_mass", pl.List(pl.Float64)),
-    ]
-)
-
-SMOOTH_STATE_DTYPE: Final = pl.Struct(
-    [
-        pl.Field("smoothness", pl.Float64),
-        pl.Field("model_expiries", pl.List(SMOOTH_EXPIRY_DTYPE)),
-    ]
-)
-
-DLV_EXPIRY_DTYPE: Final = pl.Struct(
-    [
-        pl.Field("expiry_index", pl.Int32),
-        pl.Field("time_increment_years", pl.Float64),
-        pl.Field("input_total_variance", pl.Float64),
-        pl.Field("normalized_support", pl.List(pl.Float64)),
-        pl.Field("density_mass", pl.List(pl.Float64)),
-        pl.Field("squared_dlv", pl.List(pl.Float64)),
-    ]
-)
-
-DLV_STATE_DTYPE: Final = pl.Struct(
-    [pl.Field("model_expiries", pl.List(DLV_EXPIRY_DTYPE))]
+PUBLIC_RECORD_KINDS: Final = (
+    "day",
+    "expiry",
+    "book",
+    "smooth_node",
+    "dlv_node",
 )
 
 
-@version("sanos-public-recursive-polars-schema-v2")
+@version("sanos-public-flat-polars-schema-v3")
 def public_polars_schema() -> pl.Schema:
-    """Return the only accepted version-2 public Parquet schema."""
+    """Return the only accepted flat public Parquet schema.
+
+    Every column is scalar. Fields which do not apply to a row's ``record_kind``
+    are null; the schema document owns the exact population rules.
+    """
 
     return pl.Schema(
         {
             "trading_date": pl.Date,
+            "record_kind": pl.String,
             "is_half_day": pl.Boolean,
-            "forward_adjusted_spot_return": pl.Float64,
+            "driftless_spot_return": pl.Float64,
             "nms_epsilon_atm_annual_volatility": pl.Float64,
-            "expiries": pl.List(EXPIRY_DTYPE),
-            "books": pl.List(BOOK_DTYPE),
-            "smooth_sanos": SMOOTH_STATE_DTYPE,
-            "discrete_dlv": DLV_STATE_DTYPE,
+            "smoothness": pl.Float64,
+            "sanos_market_percent_books_outside": pl.Float64,
+            "sanos_market_conditional_mean_excess_halfspreads": pl.Float64,
+            "sanos_market_conditional_median_excess_halfspreads": pl.Float64,
+            "dlv_market_percent_books_outside": pl.Float64,
+            "dlv_market_conditional_mean_excess_halfspreads": pl.Float64,
+            "dlv_market_conditional_median_excess_halfspreads": pl.Float64,
+            "expiry_index": pl.Int32,
+            "expiry_date": pl.Date,
+            "business_dte": pl.Float32,
+            "calendar_dte": pl.Int32,
+            "is_am": pl.Boolean,
+            "time_to_expiry_years": pl.Float32,
+            "nms_atm_annual_volatility": pl.Float64,
+            "is_call": pl.Boolean,
+            "normalized_strike": pl.Float32,
+            "half_spread": pl.Float64,
+            "sanos_fit_annual_iv": pl.Float64,
+            "sanos_synthetic_bid_annual_iv": pl.Float64,
+            "sanos_synthetic_ask_annual_iv": pl.Float64,
+            "dlv_fit_annual_iv": pl.Float64,
+            "dlv_synthetic_bid_annual_iv": pl.Float64,
+            "dlv_synthetic_ask_annual_iv": pl.Float64,
+            "book_index": pl.Int32,
+            "node_index": pl.Int32,
+            "time_increment_years": pl.Float64,
+            "kernel_input_total_variance": pl.Float64,
+            "input_total_variance": pl.Float64,
+            "normalized_support": pl.Float64,
+            "density_mass": pl.Float64,
+            "squared_dlv": pl.Float64,
         }
     )
 
 
-@version("2.1", dependencies=[public_polars_schema])
+@version("3.0", dependencies=[public_polars_schema])
 def public_schema_document() -> dict[str, Any]:
     """Return the human- and machine-readable immutable schema contract."""
 
+    scalar_types = {
+        "trading_date": "Date non-null",
+        "record_kind": f"String one-of {list(PUBLIC_RECORD_KINDS)}",
+        "is_half_day": "Boolean day-only",
+        "driftless_spot_return": "Float64 day-only nullable-first-day",
+        "nms_epsilon_atm_annual_volatility": "Float64 day-only",
+        "smoothness": "Float64 day-only",
+        "sanos_market_percent_books_outside": "Float64 day-only percent",
+        "sanos_market_conditional_mean_excess_halfspreads": "Float64 day-only",
+        "sanos_market_conditional_median_excess_halfspreads": "Float64 day-only",
+        "dlv_market_percent_books_outside": "Float64 day-only percent",
+        "dlv_market_conditional_mean_excess_halfspreads": "Float64 day-only",
+        "dlv_market_conditional_median_excess_halfspreads": "Float64 day-only",
+        "expiry_index": "Int32 expiry/book/model-node",
+        "expiry_date": "Date expiry-only",
+        "business_dte": "Float32 expiry-only",
+        "calendar_dte": "Int32 expiry-only",
+        "is_am": "Boolean expiry-only",
+        "time_to_expiry_years": "Float32 expiry-only",
+        "nms_atm_annual_volatility": "Float64 expiry-only",
+        "is_call": "Boolean book-only",
+        "normalized_strike": "Float32 book-only",
+        "half_spread": "Float64 book-only",
+        "sanos_fit_annual_iv": "Float64 nullable book-only (null at zero model time)",
+        "sanos_synthetic_bid_annual_iv": "Float64 nullable book-only",
+        "sanos_synthetic_ask_annual_iv": "Float64 nullable book-only",
+        "dlv_fit_annual_iv": "Float64 nullable book-only (null at zero model time)",
+        "dlv_synthetic_bid_annual_iv": "Float64 nullable book-only",
+        "dlv_synthetic_ask_annual_iv": "Float64 nullable book-only",
+        "book_index": "Int32 book-only",
+        "node_index": "Int32 model-node-only",
+        "time_increment_years": "Float64 model-node-only, repeated within expiry",
+        "kernel_input_total_variance": "Float64 smooth-node-only, repeated within expiry",
+        "input_total_variance": "Float64 dlv-node-only, repeated within expiry",
+        "normalized_support": "Float64 model-node-only",
+        "density_mass": "Float64 model-node-only",
+        "squared_dlv": "Float64 dlv-node-only",
+    }
     return {
         "schema": PUBLIC_SCHEMA_DOCUMENT_VERSION,
+        "integrated_contract": "DySANOS 1.1",
         "physical_schema": {
-            "trading_date": "Date",
-            "is_half_day": "Boolean",
-            "forward_adjusted_spot_return": "Float64 nullable-first-row-only",
-            "nms_epsilon_atm_annual_volatility": "Float64",
-            "expiries": {
-                "type": "List[Struct]",
-                "fields": {
-                    "expiry_index": "Int32",
-                    "expiry_date": "Date",
-                    "business_dte": "Float32",
-                    "calendar_dte": "Int32",
-                    "is_am": "Boolean",
-                    "time_to_expiry_years": "Float32",
-                    "discounted_forward_over_spot": "Float64",
-                    "nms_atm_annual_volatility": "Float64",
-                },
+            "layout": "single flat scalar Polars frame",
+            "columns": scalar_types,
+            "row_keys": {
+                "day": ["trading_date", "record_kind"],
+                "expiry": ["trading_date", "record_kind", "expiry_index"],
+                "book": [
+                    "trading_date",
+                    "record_kind",
+                    "expiry_index",
+                    "is_call",
+                    "normalized_strike",
+                    "book_index",
+                ],
+                "smooth_node": [
+                    "trading_date",
+                    "record_kind",
+                    "expiry_index",
+                    "node_index",
+                ],
+                "dlv_node": [
+                    "trading_date",
+                    "record_kind",
+                    "expiry_index",
+                    "node_index",
+                ],
             },
-            "books": {
-                "type": "List[Struct]",
-                "fields": {
-                    "expiry_index": "Int32",
-                    "is_call": "Boolean",
-                    "normalized_strike": "Float32",
-                    "half_spread_spot": "Float64",
-                },
-            },
-            "smooth_sanos": {
-                "smoothness": "Float64",
-                "model_expiries": {
-                    "type": "List[Struct]",
-                    "fields": {
-                        "expiry_index": "Int32",
-                        "time_increment_years": "Float64",
-                        "kernel_input_total_variance": "Float64",
-                        "normalized_support": "List[Float64]",
-                        "density_mass": "List[Float64]",
-                    },
-                },
-            },
-            "discrete_dlv": {
-                "model_expiries": {
-                    "type": "List[Struct]",
-                    "fields": {
-                        "expiry_index": "Int32",
-                        "time_increment_years": "Float64",
-                        "input_total_variance": "Float64",
-                        "normalized_support": "List[Float64]",
-                        "density_mass": "List[Float64]",
-                        "squared_dlv": "List[Float64]",
-                    },
-                }
-            },
+            "ordering": "date, then day/expiry/book/smooth_node/dlv_node canonical order",
+            "nested_columns": False,
         },
         "units": {
             "normalized_strike": "K/F",
             "model_call_price": "C/(DF*F), reconstructed only",
-            "half_spread_spot": "(ask-bid)/(2*S)",
-            "discounted_forward_over_spot": "DF*(F/S)",
+            "half_spread": "(pure_ask-pure_bid)/2 in C/(DF*F)",
+            "book_implied_volatility": "annualized Black volatility",
+            "market_excess": "outside-market distance divided by market half-spread",
             "squared_dlv": "annualized 1/year with exact zero boundaries",
             "model_time": "NYSE business sessions/252",
         },
         "return": {
-            "formula": "(S_now/S_prev)/(F_prev(target)/S_prev)-1",
+            "field": "driftless_spot_return",
+            "formula": "DF(prev,now)*S_now/F_prev(now)-1",
+            "normalized_path": "starts at 1; cumulative product of (1+r)",
+            "log_path": "starts at 0; cumulative sum of log1p(r)",
             "curve_interpolation": "log-linear in business DTE with (0,1) anchor",
-            "date_pair": "consecutive populated retained public rows",
-            "first_row": "null",
+            "date_pair": "consecutive populated retained public days",
+            "first_day": "null",
             "extrapolation": "forbidden",
         },
         "pricing": {
@@ -179,7 +184,7 @@ def public_schema_document() -> dict[str, Any]:
     }
 
 
-@version("2.1")
+@version("3.0")
 def public_capabilities() -> dict[str, bool | str]:
     """Return the closed advertised capability and non-capability object."""
 
@@ -187,6 +192,8 @@ def public_capabilities() -> dict[str, bool | str]:
         dict[str, bool | str],
         {
             "schema": PUBLIC_CAPABILITIES_VERSION,
+            "integrated_contract": "DySANOS 1.1",
+            "flat_scalar_polars": True,
             "normalized_smooth_sanos_pricing": True,
             "normalized_discrete_dlv_pricing": True,
             "discrete_dlv_projection_scope": "retained-expiries-inclusive-nms-[-3,2]",
@@ -194,8 +201,8 @@ def public_capabilities() -> dict[str, bool | str]:
             "arbitrary_time_smooth_dlv_equivalence": False,
             "model_atm_implied_volatility": True,
             "daily_front_normalized_books": True,
-            "spot_one_spread_experiments": True,
-            "forward_adjusted_return_dynamics": True,
+            "driftless_spread_experiments": True,
+            "driftless_return_dynamics": True,
             "exact_vendor_books": False,
             "quote_containment_replay": False,
             "vendor_implied_volatility_or_greeks": False,
@@ -208,14 +215,11 @@ def public_capabilities() -> dict[str, bool | str]:
 
 
 __all__ = [
-    "BOOK_DTYPE",
-    "DLV_STATE_DTYPE",
-    "EXPIRY_DTYPE",
     "PUBLIC_CAPABILITIES_VERSION",
     "PUBLIC_DATASET_SCHEMA_VERSION",
+    "PUBLIC_RECORD_KINDS",
     "PUBLIC_SCHEMA_DOCUMENT_VERSION",
     "PUBLIC_VALIDATION_VERSION",
-    "SMOOTH_STATE_DTYPE",
     "public_capabilities",
     "public_polars_schema",
     "public_schema_document",

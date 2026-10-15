@@ -50,6 +50,10 @@ jax = [
 experiment = [
   "h5py>=3.10,<4",
 ]
+dysanos = [
+  "h5py>=3.10,<4",
+  "torch>=2,<3",
+]
 operator = [
   "h5py>=3.10,<4",
   "pandas>=2.2,<4",
@@ -64,6 +68,7 @@ test = [
   "jax>=0.4,<1",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
+  "torch>=2,<3",
 ]
 dev = [
   "build>=1.2,<2",
@@ -93,6 +98,9 @@ include = ["sanos*"]
 testpaths = ["tests"]
 addopts = ["-ra"]
 pythonpath = ["src"]
+filterwarnings = [
+  "ignore:The 'generic' unit for NumPy timedelta is deprecated.*:DeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -110,7 +118,7 @@ select = ["E", "F", "I", "UP"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "tests", "scripts"]
+files = ["src"]
 check_untyped_defs = true
 disallow_untyped_defs = true
 warn_redundant_casts = true
@@ -132,5 +140,9 @@ module = [
   "sanos.model.fitter",
   "sanos.model.tools",
   "sanos.model.tridiag",
+  "sanos.datasets.internal",
+  "sanos.reference.*",
+  "sanos.widb.daily",
+  "sanos.widb.surface",
 ]
 ignore_errors = true

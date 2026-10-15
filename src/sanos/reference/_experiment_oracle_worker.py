@@ -24,8 +24,8 @@ import numpy as np
 from cdxcore.version import version
 
 from sanos.config import canonical_value
-from sanos.experiments import ExperimentConfig, exact_weekly_pairs
-from sanos.experiments.hdf5 import read_hdf5_day
+from sanos.models.dysanos import ExperimentConfig, exact_weekly_pairs
+from sanos.models.dysanos.hdf5 import read_hdf5_day
 from sanos.reference.legacy_market import read_legacy_pytree_hdf5
 
 PINNED_SOURCE_SHA256 = {
@@ -305,7 +305,7 @@ def _legacy_price_geometry(day: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray
 
 
 @version(
-    "1.1",
+    "2.0",
     dependencies=[_compare_array, _legacy_price_geometry, _strings_digest],
 )
 def _compare_logical_day(
@@ -328,7 +328,6 @@ def _compare_logical_day(
     arrays = (
         ("expiry/time_y", fresh.expiry_time_y, legacy.expiries_y),
         ("expiry/date_days", fresh.expiry_date_days, legacy_expiry_days),
-        ("expiry/id", fresh.expiry_id, legacy.expiry_ids),
         ("expiry/is_am", fresh.expiry_is_am, legacy.expiry_is_am),
         (
             "expiry/atm_annual_vol",
@@ -342,22 +341,14 @@ def _compare_logical_day(
         ("quote/price_index", fresh.quote_price_index, legacy_price_index),
         ("quote/strike", fresh.quote_strike, legacy.strikes),
         ("quote/is_call", fresh.quote_is_call, legacy.is_call),
-        ("quote/bid", fresh.quote_bid, legacy.bids),
-        ("quote/ask", fresh.quote_ask, legacy.asks),
         ("quote/fit", fresh.quote_fit, legacy.fit_prices),
-        ("quote/log_volume", fresh.quote_log_volume, legacy.log_volumes),
         (
-            "quote/log_open_interest",
-            fresh.quote_log_open_interest,
-            legacy.log_open_interests,
+            "quote/half_spread",
+            fresh.quote_half_spread,
+            0.5 * (legacy.asks - legacy.bids),
         ),
         ("price/expiry_y", fresh.price_expiry_y, legacy_price_expiry),
         ("price/strike", fresh.price_strike, legacy_price_strike),
-        (
-            "day/spot_reference",
-            np.asarray([fresh.spot_reference], dtype=np.float64),
-            np.asarray([legacy.spot_ref], dtype=np.float64),
-        ),
         (
             "audit/counts",
             np.asarray(dataclasses.astuple(fresh.audit), dtype=np.int64),
@@ -368,18 +359,16 @@ def _compare_logical_day(
         _compare_array(name, np.asarray(left), np.asarray(right), float_atol=float_atol)
         for name, left, right in arrays
     ]
-    fresh_quote_ids = fresh.quote_ids
-    legacy_quote_ids = legacy.quote_ids
-    quote_ids_match = fresh_quote_ids == legacy_quote_ids
     strings = {
         "quote_ids": {
-            "matched": quote_ids_match,
-            "count": len(fresh_quote_ids),
-            "fresh_sha256": _strings_digest(fresh_quote_ids),
-            "legacy_sha256": _strings_digest(legacy_quote_ids),
+            "matched": None,
+            "expected_to_change": True,
+            "fresh_count": len(fresh.quote_ids),
+            "legacy_count": len(legacy.quote_ids),
+            "fresh_sha256": _strings_digest(fresh.quote_ids),
+            "legacy_sha256": _strings_digest(legacy.quote_ids),
         }
     }
-    rebased_legacy = dataclasses.replace(legacy, market_uid=fresh.market_uid)
     identity = {
         "ticker_matched": fresh.ticker == legacy.ticker,
         "date_matched": fresh.trading_date == legacy.trading_date,
@@ -388,18 +377,13 @@ def _compare_logical_day(
         "market_uid_expected_to_change": True,
         "fresh_market_fingerprint": fresh.market_fingerprint,
         "legacy_training_fingerprint": legacy.training_fingerprint,
-        "rebased_legacy_training_fingerprint": rebased_legacy.training_fingerprint,
         "fresh_training_fingerprint": fresh.training_fingerprint,
-        "rebased_training_fingerprint_matched": (
-            rebased_legacy.training_fingerprint == fresh.training_fingerprint
-        ),
+        "training_fingerprint_expected_to_change": True,
     }
     mismatch_fields = [
         str(record["field"]) for record in comparisons if not record["matched"]
     ]
-    if not quote_ids_match:
-        mismatch_fields.append("quote_ids")
-    for key in ("ticker_matched", "date_matched", "rebased_training_fingerprint_matched"):
+    for key in ("ticker_matched", "date_matched"):
         if not identity[key]:
             mismatch_fields.append(key)
     return {

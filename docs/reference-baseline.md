@@ -197,10 +197,10 @@ c - p = 1 - k
 ```
 
 The legacy internal `spot_ret` is only `S_t / S_previous - 1`; it is not the
-public forward-adjusted return. Requested public half-spreads use
-`half_spread / S`. A model price in discounted-forward units can be converted
-by `C/S = DF*(F/S)*C/(DF*F)`. Approved CD-009 therefore retains the
-dimensionless `DF*(F/S)` interpreting bridge without exposing absolute spot.
+public discounted driftless return. Under superseding CD-029, public
+half-spreads are stored directly in the model's `C/(DF*F)` units and no
+forward/spot interpreting bridge is published. Under CD-030, the public return
+is `DF(previous,current) * S_current / F_previous(current) - 1`.
 
 The exact reconstructing state and expiry-pricing policy are frozen in
 `docs/data-contracts.md`. In particular, surface support/densities

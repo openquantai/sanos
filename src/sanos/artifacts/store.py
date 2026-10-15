@@ -171,7 +171,7 @@ class DatasetDistribution:
         )
 
 
-@version("1.0", dependencies=[StorageClass])
+@version("1.1", dependencies=[StorageClass])
 def _validate_lineage(
     storage_class: StorageClass,
     upstream: tuple[ArtifactPointer, ...],
@@ -182,7 +182,9 @@ def _validate_lineage(
         StorageClass.DATASET: frozenset(
             {StorageClass.RAW, StorageClass.INTERMEDIATE, StorageClass.DATASET}
         ),
-        StorageClass.EXPERIMENT: frozenset({StorageClass.DATASET}),
+        StorageClass.EXPERIMENT: frozenset(
+            {StorageClass.DATASET, StorageClass.EXPERIMENT}
+        ),
     }[storage_class]
     invalid = sorted(
         {
@@ -198,10 +200,10 @@ def _validate_lineage(
     if storage_class in {StorageClass.INTERMEDIATE, StorageClass.DATASET, StorageClass.EXPERIMENT}:
         if not upstream:
             raise ValueError(f"{storage_class.value} requires at least one upstream artifact")
-    if storage_class is StorageClass.EXPERIMENT and not any(
-        pointer.storage_class is StorageClass.DATASET for pointer in upstream
-    ):
-        raise ValueError("experiment requires a Dataset upstream artifact")
+    if storage_class is StorageClass.EXPERIMENT and len(upstream) != 1:
+        raise ValueError(
+            "experiment requires exactly one Dataset or Experiment upstream artifact"
+        )
 
 
 @version("1.0")

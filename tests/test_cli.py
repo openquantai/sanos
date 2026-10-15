@@ -4,6 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from sanos.artifacts import ArtifactPointer, StorageClass
@@ -28,6 +29,7 @@ def test_help_lists_stable_command_groups() -> None:
         "raw",
         "intermediate",
         "dataset",
+        "dysanos",
         "experiment",
         "production",
     ):
@@ -525,8 +527,10 @@ def test_public_release_approve_dry_run_is_offline_and_needs_no_license_file(
     assert not root.exists()
 
 
-def test_experiment_build_dry_run_is_structured_offline_and_non_mutating(
+@pytest.mark.parametrize("command_group", ["dysanos", "experiment"])
+def test_dysanos_build_dry_run_and_legacy_alias_are_identical(
     tmp_path: Path,
+    command_group: str,
 ) -> None:
     root = tmp_path / "data"
     config = Path(__file__).parents[1] / "configs" / "dysanos-daily-front-reference.json"
@@ -538,7 +542,7 @@ def test_experiment_build_dry_run_is_structured_offline_and_non_mutating(
             "--dry-run",
             "--log-format",
             "json",
-            "experiment",
+            command_group,
             "build",
             "--config",
             str(config),
@@ -564,7 +568,7 @@ def test_experiment_build_dry_run_is_structured_offline_and_non_mutating(
     assert not root.exists()
 
 
-def test_experiment_validate_never_builds_a_missing_experiment(tmp_path: Path) -> None:
+def test_dysanos_validate_never_builds_a_missing_experiment(tmp_path: Path) -> None:
     config = Path(__file__).parents[1] / "configs" / "dysanos-daily-front-reference.json"
     result = CliRunner().invoke(
         main,
@@ -573,7 +577,7 @@ def test_experiment_validate_never_builds_a_missing_experiment(tmp_path: Path) -
             str(tmp_path / "data"),
             "--log-format",
             "json",
-            "experiment",
+            "dysanos",
             "validate",
             "--config",
             str(config),

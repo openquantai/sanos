@@ -19,9 +19,10 @@ declared oracle gap, 2025-01-08 is the typed-empty policy day, and 2025-01-02/03
 remain unexplained differences in the final cross-expiry `MkArbFree` solve.
 The full fresh 2022--2025 production build has not run and remains blocked on
 owner classification of those two dates plus the monitored safety gates. The
-separately identified Direct-200 neural training producer remains deferred
-experiment work; it is not part of the daily-front HDF5 parity gate and does
-not define the SANOS Dataset. Phase 11 evidence and canonical promotion bind an
+separately identified Direct-200 neural training producer is being copy/adapted
+into the self-contained `sanos.models.dysanos` package. It is not part of the
+SANOS Dataset producer and does not define that Dataset. Phase 11 evidence and
+canonical promotion bind an
 immutable runtime fingerprint covering the exact Python, numerical packages,
 CVXPY solvers, BLAS/LAPACK runtime, CPU availability and numerical thread
 controls; the fingerprint was independently code- and quantitatively reviewed
@@ -35,8 +36,8 @@ Actions mean:
   architecture rather than carrying the legacy framework;
 - **reference only**: retain history/evidence but do not put it on the new
   runtime path; and
-- **defer experiment**: not needed to produce the curated dataset, but available
-  for a separately scoped experiment adapter.
+- **model package**: downstream behavior owned by one self-contained package
+  under `sanos.models`, consuming only an advertised Dataset contract.
 
 ## End-to-end production call graph
 
@@ -51,7 +52,7 @@ Actions mean:
 | 7 | `widb.day.collect_raw_day` | split into durable extraction plus deterministic daily cleaning | same selected result; vendor rows remain minimally transformed in raw Parquet |
 | 8 | `widb.client.WIDBClient` methods | copy SQL meaning; replace connection/cache mechanics | OptionMetrics table resolution, security identity, options, spot, forward and zero curve |
 | 9 | `dysanos.flex.market.market_day_from_payload` | copy/adapt into dataset/experiment projection | European books, explicit DTE exclusions, model horizon, AF-ATM canonical NMS, quote identity |
-| 10 | `dysanos.flex.run_all_history_joint_direct.run` | defer experiment; retain as exact parity provenance | loads the 891 daily-front markets, fits the affine Direct-200 neural state/dynamics model, and writes the checkpoint, target-state history, report and completion marker |
+| 10 | `dysanos.flex.run_all_history_joint_direct.run` | copy/adapt canonical behavior into `sanos.models.dysanos`; retain old output as parity provenance | freshly initialize, then fit the affine Direct-200 neural state/dynamics model and write versioned checkpoints, reports and completion evidence |
 
 `sanos.widb_sanos_day.fit_sanos_day` and `widb.timeseries` are not on this
 production path.  The former is stale/broken; the latter is the older padded
@@ -67,17 +68,17 @@ experiment work cannot silently substitute a similarly named workflow:
 
 | Pinned path | Blob | Disposition |
 |---|---|---|
-| `quantdata/dysanos/flex/run_all_history_joint_direct.py` | `6b1c408c3ab1d32e92115cb95c91b3472bcf6086` | exact producer; defer experiment |
-| `quantdata/dysanos/flex/config.py` | `d9d8b18680f78fb6d23bf532784984a3a86f2518` | exact model/market/objective configuration; selected data contracts copy/adapt, neural producer use defer experiment |
-| `quantdata/dysanos/flex/failure_reporting.py` | `cc1bcd7ece1759bc8f544e28b62cbe6169dd4f0f` | guarded producer CLI wrapper; defer experiment |
-| `quantdata/dysanos/flex/joint_direct.py` | `e2a1a35959cf506a2abef7b65bfa40964ab31b0b` | fitting/training dependency; defer experiment |
+| `quantdata/dysanos/flex/run_all_history_joint_direct.py` | `6b1c408c3ab1d32e92115cb95c91b3472bcf6086` | parity oracle for the fresh `sanos.models.dysanos` producer |
+| `quantdata/dysanos/flex/config.py` | `d9d8b18680f78fb6d23bf532784984a3a86f2518` | copy/adapt only canonical Direct-200 geometry, objective, and training contracts |
+| `quantdata/dysanos/flex/failure_reporting.py` | `cc1bcd7ece1759bc8f544e28b62cbe6169dd4f0f` | replace with the ordinary SANOS CLI, structured progress, and atomic artifacts |
+| `quantdata/dysanos/flex/joint_direct.py` | `e2a1a35959cf506a2abef7b65bfa40964ab31b0b` | copy/adapt canonical initialization, joint objective, stable dynamics, and diagnostics |
 | `quantdata/dysanos/flex/run_shared_strikes_full_encoder.py` | `cb2fe72f6307bac0ea07c275421370906e17b68f` | market-date/loading dependency; reference only until experiment port |
 | `quantdata/dysanos/flex/market.py` | `67f30c151d1e5bfb33dbd31ba3fb8d4c76c9a4f3` | market population; selected logic is copy/adapted, neural producer use is defer experiment |
-| `quantdata/dysanos/flex/market_encoder.py` | `fdc4457cf25c99646f5f9f1353592508e39842e8` | checkpoint digest and atomic report writer; defer experiment |
-| `quantdata/dysanos/flex/model.py` | `d5f65c8df9d8365c304cd6a04feb63b33011d595` | neural model; defer experiment |
-| `quantdata/dysanos/flex/training.py` | `b4d9c0039e1d07e324ddce2626ad8b8f9ede127d` | neural training/materialization; defer experiment |
-| `quantdata/dysanos/flex/weekly_validation.py` | `8756e5f9bc241dd9b42f06e01dcf680d6c4dead3` | exact-week dynamics pairing; defer experiment |
-| `quantdata/torch/__init__.py` | `aa4fe2a5f49c70b6ea540c2b151bb981a4404386` | `BaseEnvironment` runtime dependency; defer experiment |
+| `quantdata/dysanos/flex/market_encoder.py` | `fdc4457cf25c99646f5f9f1353592508e39842e8` | adapt checkpoint digests, reports, and atomic writes to SANOS artifacts |
+| `quantdata/dysanos/flex/model.py` | `d5f65c8df9d8365c304cd6a04feb63b33011d595` | copy/adapt the canonical constrained surface and Direct-200 model only |
+| `quantdata/dysanos/flex/training.py` | `b4d9c0039e1d07e324ddce2626ad8b8f9ede127d` | copy/adapt canonical objective, native initialization, evaluation, and convergence behavior |
+| `quantdata/dysanos/flex/weekly_validation.py` | `8756e5f9bc241dd9b42f06e01dcf680d6c4dead3` | copy/adapt exact five-session weekly pairing |
+| `quantdata/torch/__init__.py` | `aa4fe2a5f49c70b6ea540c2b151bb981a4404386` | replace with narrow ordinary Torch utilities owned by `sanos.models.dysanos` |
 
 The target payload schema is
 `flex-all-history-joint-direct-targets-v1`: its 891 dates exactly equal the
@@ -156,7 +157,7 @@ hash.
 | `ExpiryFilter(10,4,1e-6,0.01,5.0)` | preserve thresholds and pre/post validity application |
 | `enrich_day` | preserve inverse-spread weighted forward, put-call conversion, pure prices, NMS and Greeks |
 | `MkArbFree`, `ArbFreePricer`, `mk_arb_free_day` | copy/adapt; parity on fits/masks/prices and invariant tests |
-| `OptionsFilter`, `normalize_day`, `filter_options_day` | preserve order and legacy simple `spot_ret`; public forward-adjusted return is a separate field; `min_vegaSqrtVar` remains an explicitly registered no-op pending CD-012 |
+| `OptionsFilter`, `normalize_day`, `filter_options_day` | preserve order and legacy simple `spot_ret`; public `driftless_spot_return` is the separate discounted driftless return approved by CD-030; `min_vegaSqrtVar` remains an explicitly registered no-op pending CD-012 |
 | `SanosPricer` | copy/adapt; price, density, DLV and unequal-grid round trips |
 | `SanosLPSolver` | copy/adapt; feasible/infeasible behavior, accepted per-expiry quote containment, soft surface-fit diagnostics and solver selection |
 | `repair_density_nonnegative`, `warn_and_fix_density` | copy/adapt; fixture and invariant tests |
@@ -167,7 +168,7 @@ hash.
 | `smooth_interpolated_market(smoothness=0.25)` | preserve production fit and all direct book/diagnostic fields in one daily frame |
 | `FlexMarketConfig(max_num_options=100000, smoothness=0.25)` | preserve for the daily-front reference; exclusions are explicit per dataset/experiment |
 | `market_day_from_payload` | preserve active-European/horizon/canonical-NMS population and quote IDs |
-| `excluded_business_dtes=(0.2,)` | preserve for the exact daily-front experiment, not as an internal-dataset default |
+| `excluded_business_dtes=(0.0,0.2)` | canonical public/DySANOS 1.1 excludes PM 0DTE and next-session AM 0.2D books; this is not an internal-dataset default |
 | daily-front geometry: DTE 1–5 then 10–70, NMS `[-3,2]`, 18 expiries, 200 inner strikes | preserve in exact experiment parity configuration |
 
 Every new deterministic configuration class and transformation uses

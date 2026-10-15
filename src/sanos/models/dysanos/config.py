@@ -1,4 +1,4 @@
-"""Strict configuration for disposable SANOS Experiment materializations."""
+"""Strict configuration for disposable DySANOS model materializations."""
 
 from __future__ import annotations
 
@@ -92,21 +92,19 @@ class SourceDatasetConfig:
         )
 
 
-@version("1.0")
+@version("1.1")
 @dataclass(frozen=True, slots=True)
 class DailyFrontMarketConfig:
     """Exact recovered daily-front population contract."""
 
     smoothness: float = 0.25
-    max_num_options: int = 100_000
-    excluded_business_dtes: tuple[float, ...] = (0.2,)
+    excluded_business_dtes: tuple[float, ...] = (0.0, 0.2)
     overnight_variance_fraction: float = 0.2
 
     def __post_init__(self) -> None:
         smoothness = _finite(self.smoothness, "smoothness")
         if smoothness <= 0.01:
             raise ValueError("smoothness must be finite and exceed 0.01")
-        _positive_int(self.max_num_options, "max_num_options")
         excluded = np.asarray(self.excluded_business_dtes, dtype=np.float64)
         if (
             excluded.ndim != 1
@@ -125,7 +123,6 @@ class DailyFrontMarketConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> DailyFrontMarketConfig:
         fields = {
             "smoothness",
-            "max_num_options",
             "excluded_business_dtes",
             "overnight_variance_fraction",
         }
@@ -135,7 +132,6 @@ class DailyFrontMarketConfig:
             raise ValueError("market.excluded_business_dtes must be a list")
         return cls(
             smoothness=_finite(value["smoothness"], "market.smoothness"),
-            max_num_options=_positive_int(value["max_num_options"], "market.max_num_options"),
             excluded_business_dtes=tuple(
                 _finite(item, "market.excluded_business_dtes[]") for item in excluded
             ),
@@ -146,12 +142,13 @@ class DailyFrontMarketConfig:
         )
 
 
-@version("1.0")
+@version("1.1")
 @dataclass(frozen=True, slots=True)
 class DailyFrontGeometryConfig:
     """Model and population geometry recovered from the reference run."""
 
     model_business_dtes: tuple[float, ...] = _REFERENCE_MODEL_DTES
+    support_epsilon_business_dte: float = 0.125
     nms_range: tuple[float, float] = (-3.0, 2.0)
     num_inner_strikes: int = 200
     min_dlvsq: float = 0.0001
@@ -178,6 +175,11 @@ class DailyFrontGeometryConfig:
             or np.any(np.diff(nodes) <= 0.0)
         ):
             raise ValueError("model_business_dtes must be finite, positive, and increasing")
+        epsilon_dte = _finite(
+            self.support_epsilon_business_dte, "support_epsilon_business_dte"
+        )
+        if epsilon_dte <= 0.0:
+            raise ValueError("support_epsilon_business_dte must be positive")
         if (
             len(self.nms_range) != 2
             or not all(
@@ -214,6 +216,7 @@ class DailyFrontGeometryConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> DailyFrontGeometryConfig:
         fields = {
             "model_business_dtes",
+            "support_epsilon_business_dte",
             "nms_range",
             "num_inner_strikes",
             "min_dlvsq",
@@ -410,7 +413,7 @@ class DirectTrainingConfig:
 
 
 @version(
-    "1.0",
+    "2.0",
     dependencies=[
         SourceDatasetConfig,
         DailyFrontMarketConfig,
@@ -428,8 +431,11 @@ class ExperimentConfig:
 
     name: str
     source_dataset: SourceDatasetConfig
-    profile: Literal["dysanos-daily-front-market-v1"] = "dysanos-daily-front-market-v1"
-    consumer_contract: Literal["flex-market-day-v1"] = "flex-market-day-v1"
+    ticker: str = "SPX"
+    profile: Literal["dysanos-1.1"] = "dysanos-1.1"
+    consumer_contract: Literal["dysanos-1.1-daily-front-v1"] = (
+        "dysanos-1.1-daily-front-v1"
+    )
     market: DailyFrontMarketConfig = DailyFrontMarketConfig()
     geometry: DailyFrontGeometryConfig = DailyFrontGeometryConfig()
     objective: ObjectiveConfig = ObjectiveConfig()
@@ -441,9 +447,11 @@ class ExperimentConfig:
     def __post_init__(self) -> None:
         if _SAFE_NAME.fullmatch(self.name) is None:
             raise ValueError("Experiment name must be a portable 1-128 character label")
-        if self.profile != "dysanos-daily-front-market-v1":
+        if _SAFE_NAME.fullmatch(self.ticker) is None:
+            raise ValueError("Experiment ticker must be a portable non-empty label")
+        if self.profile != "dysanos-1.1":
             raise ValueError("Unsupported Experiment profile")
-        if self.consumer_contract != "flex-market-day-v1":
+        if self.consumer_contract != "dysanos-1.1-daily-front-v1":
             raise ValueError("Unsupported Experiment consumer contract")
         expected = len(self.geometry.model_business_dtes) * (self.geometry.num_inner_strikes + 2)
         if self.model.decoded_state_size != expected:
@@ -464,6 +472,7 @@ class ExperimentConfig:
                 {
                     "experiment": {
                         "name": self.name,
+                        "ticker": self.ticker,
                         "profile": self.profile,
                         "source_dataset": asdict(self.source_dataset),
                         "consumer_contract": self.consumer_contract,
@@ -497,7 +506,7 @@ class ExperimentConfig:
         experiment = cast(Mapping[str, Any], document["experiment"])
         _require_exact(
             experiment,
-            {"name", "profile", "source_dataset", "consumer_contract"},
+            {"name", "ticker", "profile", "source_dataset", "consumer_contract"},
             "experiment",
         )
         source = experiment["source_dataset"]
@@ -519,11 +528,12 @@ class ExperimentConfig:
                 parsed[section] = config_type(**values)
             except TypeError as exc:
                 raise ValueError(f"Invalid {section} configuration: {exc}") from exc
-        string_fields = ("name", "profile", "consumer_contract")
+        string_fields = ("name", "ticker", "profile", "consumer_contract")
         if not all(isinstance(experiment[name], str) for name in string_fields):
             raise ValueError("experiment name/profile/consumer_contract must be strings")
         return cls(
             name=cast(str, experiment["name"]),
+            ticker=cast(str, experiment["ticker"]),
             profile=cast(Any, experiment["profile"]),
             source_dataset=SourceDatasetConfig.from_mapping(source),
             consumer_contract=cast(Any, experiment["consumer_contract"]),

@@ -14,7 +14,7 @@ import pytest
 from sanos.artifacts import ArtifactPointer, StorageClass
 from sanos.config import canonical_json, canonical_sha256, canonical_value
 from sanos.datasets import PublicProjectionConfig, plan_public_candidate
-from sanos.experiments import ExperimentConfig, plan_experiment
+from sanos.models.dysanos import ExperimentConfig, plan_experiment
 from sanos.production import (
     PHASE11_CONFIG_BUNDLE_SCHEMA,
     PHASE11_EVIDENCE_INDEX_SCHEMA,

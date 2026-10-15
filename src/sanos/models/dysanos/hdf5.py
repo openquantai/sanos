@@ -1,4 +1,4 @@
-"""Closed-schema HDF5 transport for daily-front Experiment inputs."""
+"""Closed-schema HDF5 transport for DySANOS model inputs."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from cdxcore.version import version
 
 from sanos.artifacts import ArtifactIntegrityError, ArtifactPointer, StorageClass
 from sanos.config import canonical_json, canonical_sha256
-from sanos.experiments.config import ExperimentConfig, Hdf5StorageConfig
-from sanos.experiments.daily_front import (
+from sanos.models.dysanos.config import ExperimentConfig, Hdf5StorageConfig
+from sanos.models.dysanos.data import (
     DailyFrontDay,
     EligibilityAudit,
     exact_weekly_pairs,
@@ -28,9 +28,9 @@ from sanos.experiments.daily_front import (
 )
 from sanos.widb.calendar import DAYS_PER_YEAR, NMS
 
-EXPERIMENT_HDF5_SCHEMA = "sanos-dysanos-joint-direct-market-v1"
+EXPERIMENT_HDF5_SCHEMA = "sanos-dysanos-1.1-v1"
 EXPERIMENT_HDF5_NAME = "data.h5"
-SHARD_SCHEMA = "sanos-daily-front-shard-v1"
+SHARD_SCHEMA = "sanos-daily-front-public-shard-v2"
 _EPOCH = np.datetime64("1970-01-01", "D")
 
 
@@ -73,7 +73,6 @@ def _decode(value: object) -> str:
 _SHARD_ARRAYS = (
     "expiry_time_y",
     "expiry_date_days",
-    "expiry_id",
     "expiry_is_am",
     "expiry_atm_annual_vol",
     "expiry_strike_lower",
@@ -83,17 +82,14 @@ _SHARD_ARRAYS = (
     "quote_price_index",
     "quote_strike",
     "quote_is_call",
-    "quote_bid",
-    "quote_ask",
     "quote_fit",
-    "quote_log_volume",
-    "quote_log_open_interest",
+    "quote_half_spread",
     "price_expiry_y",
     "price_strike",
 )
 
 
-@version("1.1", dependencies=[DailyFrontDay, _date_day, _encode])
+@version("2.0", dependencies=[DailyFrontDay, _date_day, _encode])
 def write_day_shard(path: Path, day: DailyFrontDay) -> None:
     """Atomically persist one restartable, pickle-free daily NPZ shard."""
 
@@ -122,7 +118,10 @@ def write_day_shard(path: Path, day: DailyFrontDay) -> None:
                 ticker=np.asarray(_encode(day.ticker, 32), dtype="S32"),
                 date_day=np.asarray(_date_day(day.trading_date), dtype=np.int32),
                 is_half_day=np.asarray(day.is_half_day, dtype=np.bool_),
-                spot_reference=np.asarray(day.spot_reference, dtype=np.float64),
+                driftless_spot_return=np.asarray(day.driftless_spot_return, dtype=np.float64),
+                driftless_spot_return_valid=np.asarray(
+                    day.driftless_spot_return_valid, dtype=np.bool_
+                ),
                 market_uid=np.asarray(_encode(day.market_uid, 64), dtype="S64"),
                 market_fingerprint=np.asarray(_encode(day.market_fingerprint, 64), dtype="S64"),
                 audit=audit,
@@ -141,7 +140,7 @@ def write_day_shard(path: Path, day: DailyFrontDay) -> None:
             temporary.unlink()
 
 
-@version("1.1", dependencies=[DailyFrontDay, EligibilityAudit, _day_date, _decode])
+@version("2.0", dependencies=[DailyFrontDay, EligibilityAudit, _day_date, _decode])
 def read_day_shard(path: Path) -> DailyFrontDay:
     """Read and validate one restart shard without enabling pickle."""
 
@@ -154,7 +153,8 @@ def read_day_shard(path: Path) -> DailyFrontDay:
                 "ticker",
                 "date_day",
                 "is_half_day",
-                "spot_reference",
+                "driftless_spot_return",
+                "driftless_spot_return_valid",
                 "market_uid",
                 "market_fingerprint",
                 "audit",
@@ -175,7 +175,10 @@ def read_day_shard(path: Path) -> DailyFrontDay:
                 ticker=_decode(payload["ticker"].item()),
                 trading_date=_day_date(int(payload["date_day"].item())),
                 is_half_day=bool(payload["is_half_day"].item()),
-                spot_reference=float(payload["spot_reference"].item()),
+                driftless_spot_return=float(payload["driftless_spot_return"].item()),
+                driftless_spot_return_valid=bool(
+                    payload["driftless_spot_return_valid"].item()
+                ),
                 market_uid=_decode(payload["market_uid"].item()),
                 market_fingerprint=_decode(payload["market_fingerprint"].item()),
                 audit=EligibilityAudit(*(int(value) for value in audit)),
@@ -198,7 +201,7 @@ def _hash_item(digest: Any, name: str, value: np.ndarray) -> None:
     digest.update(array.tobytes())
 
 
-@version("1.0", dependencies=[_hash_item, _date_day, canonical_json])
+@version("2.0", dependencies=[_hash_item, _date_day, canonical_json])
 def logical_content_digest(
     days: Sequence[DailyFrontDay],
     *,
@@ -228,7 +231,14 @@ def logical_content_digest(
         for name, value in (
             ("date_day", np.asarray(_date_day(day.trading_date), dtype=np.int32)),
             ("is_half_day", np.asarray(day.is_half_day, dtype=np.bool_)),
-            ("spot_reference", np.asarray(day.spot_reference, dtype=np.float64)),
+            (
+                "driftless_spot_return",
+                np.asarray(day.driftless_spot_return, dtype=np.float64),
+            ),
+            (
+                "driftless_spot_return_valid",
+                np.asarray(day.driftless_spot_return_valid, dtype=np.bool_),
+            ),
             ("market_uid", np.frombuffer(day.market_uid.encode("ascii"), dtype=np.uint8)),
             (
                 "market_fingerprint",
@@ -298,7 +308,7 @@ def _create_dataset(
 
 
 @version(
-    "1.4",
+    "2.0",
     dependencies=[
         DailyFrontDay,
         ExperimentConfig,
@@ -399,7 +409,10 @@ def write_experiment_hdf5(
         )
         day_date = one_dim(day_group, "date_days", "<i4", 0)
         day_half = one_dim(day_group, "is_half_day", "?", False)
-        day_spot = one_dim(day_group, "spot_ref", "<f8", 0.0)
+        day_return = one_dim(day_group, "driftless_spot_return", "<f8", 0.0)
+        day_return_valid = one_dim(
+            day_group, "driftless_spot_return_valid", "?", False
+        )
         day_qcount = one_dim(day_group, "quote_count", "<i4", 0)
         day_pcount = one_dim(day_group, "price_count", "<i4", 0)
         day_ecount = one_dim(day_group, "expiry_count", "<i4", 0)
@@ -411,11 +424,8 @@ def write_experiment_hdf5(
         quote_price = two_dim(quote_group, "price_index", Q, "<i8", 0)
         quote_strike = two_dim(quote_group, "strike", Q, "<f8", 1.0)
         quote_side = two_dim(quote_group, "is_call", Q, "?", True)
-        quote_bid = two_dim(quote_group, "bid", Q, "<f8", 0.0)
-        quote_ask = two_dim(quote_group, "ask", Q, "<f8", 1.0)
         quote_fit = two_dim(quote_group, "fit", Q, "<f8", 0.0)
-        quote_volume = two_dim(quote_group, "log_volume", Q, "<f8", 0.0)
-        quote_oi = two_dim(quote_group, "log_open_interest", Q, "<f8", 0.0)
+        quote_half_spread = two_dim(quote_group, "half_spread", Q, "<f8", 0.0)
 
         price_mask = two_dim(price_group, "mask", P, "?", False)
         price_expiry = two_dim(price_group, "expiry_y", P, "<f8", 0.0)
@@ -424,7 +434,6 @@ def write_experiment_hdf5(
         expiry_mask = two_dim(expiry_group, "mask", E, "?", False)
         expiry_time = two_dim(expiry_group, "time_y", E, "<f8", 0.0)
         expiry_date = two_dim(expiry_group, "date_days", E, "<i4", 0)
-        expiry_id = two_dim(expiry_group, "id", E, "<i8", 0)
         expiry_am = two_dim(expiry_group, "is_am", E, "?", False)
         expiry_atm = two_dim(expiry_group, "atm_annual_vol", E, "<f8", 0.0)
         expiry_lower = two_dim(expiry_group, "strike_lower", E, "<f8", 1.0)
@@ -487,7 +496,8 @@ def write_experiment_hdf5(
             q, p, e = day.quote_count, day.price_count, day.expiry_count
             day_date[row] = _date_day(day.trading_date)
             day_half[row] = day.is_half_day
-            day_spot[row] = day.spot_reference
+            day_return[row] = day.driftless_spot_return if day.driftless_spot_return_valid else 0.0
+            day_return_valid[row] = day.driftless_spot_return_valid
             day_qcount[row], day_pcount[row], day_ecount[row] = q, p, e
             day_uid[row] = _encode(day.market_uid, 64)
             day_fingerprint[row] = _encode(day.market_fingerprint, 64)
@@ -496,18 +506,14 @@ def write_experiment_hdf5(
             quote_price[row, :q] = day.quote_price_index
             quote_strike[row, :q] = day.quote_strike
             quote_side[row, :q] = day.quote_is_call
-            quote_bid[row, :q] = day.quote_bid
-            quote_ask[row, :q] = day.quote_ask
             quote_fit[row, :q] = day.quote_fit
-            quote_volume[row, :q] = day.quote_log_volume
-            quote_oi[row, :q] = day.quote_log_open_interest
+            quote_half_spread[row, :q] = day.quote_half_spread
             price_mask[row, :p] = True
             price_expiry[row, :p] = day.price_expiry_y
             price_strike[row, :p] = day.price_strike
             expiry_mask[row, :e] = True
             expiry_time[row, :e] = day.expiry_time_y
             expiry_date[row, :e] = day.expiry_date_days
-            expiry_id[row, :e] = day.expiry_id
             expiry_am[row, :e] = day.expiry_is_am
             expiry_atm[row, :e] = day.expiry_atm_annual_vol
             expiry_lower[row, :e] = day.expiry_strike_lower
@@ -559,7 +565,8 @@ def write_experiment_hdf5(
 _EXPECTED_DATASETS: Mapping[str, str] = {
     "day/date_days": "<i4",
     "day/is_half_day": "|b1",
-    "day/spot_ref": "<f8",
+    "day/driftless_spot_return": "<f8",
+    "day/driftless_spot_return_valid": "|b1",
     "day/quote_count": "<i4",
     "day/price_count": "<i4",
     "day/expiry_count": "<i4",
@@ -570,18 +577,14 @@ _EXPECTED_DATASETS: Mapping[str, str] = {
     "quote/price_index": "<i8",
     "quote/strike": "<f8",
     "quote/is_call": "|b1",
-    "quote/bid": "<f8",
-    "quote/ask": "<f8",
     "quote/fit": "<f8",
-    "quote/log_volume": "<f8",
-    "quote/log_open_interest": "<f8",
+    "quote/half_spread": "<f8",
     "price/mask": "|b1",
     "price/expiry_y": "<f8",
     "price/strike": "<f8",
     "expiry/mask": "|b1",
     "expiry/time_y": "<f8",
     "expiry/date_days": "<i4",
-    "expiry/id": "<i8",
     "expiry/is_am": "|b1",
     "expiry/atm_annual_vol": "<f8",
     "expiry/strike_lower": "<f8",
@@ -616,7 +619,7 @@ _EXPECTED_GROUPS = {
 }
 
 
-@version("1.1")
+@version("2.0")
 def experiment_hdf5_schema_document() -> dict[str, Any]:
     """Return the exact portable HDF5 path, dtype, shape, unit, and pad contract."""
 
@@ -644,18 +647,14 @@ def experiment_hdf5_schema_document() -> dict[str, Any]:
             "quote/price_index": 0,
             "quote/strike": 1.0,
             "quote/is_call": True,
-            "quote/bid": 0.0,
-            "quote/ask": 1.0,
             "quote/fit": 0.0,
-            "quote/log_volume": 0.0,
-            "quote/log_open_interest": 0.0,
+            "quote/half_spread": 0.0,
             "price/mask": False,
             "price/expiry_y": 0.0,
             "price/strike": 1.0,
             "expiry/mask": False,
             "expiry/time_y": 0.0,
             "expiry/date_days": 0,
-            "expiry/id": 0,
             "expiry/is_am": False,
             "expiry/atm_annual_vol": 0.0,
             "expiry/strike_lower": 1.0,
@@ -665,7 +664,7 @@ def experiment_hdf5_schema_document() -> dict[str, Any]:
     units: dict[str, str] = {name: "not_applicable" for name in _EXPECTED_DATASETS}
     for name in ("quote/strike", "price/strike", "expiry/strike_lower", "expiry/strike_upper"):
         units[name] = "K/F"
-    for name in ("quote/bid", "quote/ask", "quote/fit"):
+    for name in ("quote/fit", "quote/half_spread"):
         units[name] = "option_price/(DF*F)"
     for name in ("expiry/time_y", "price/expiry_y", "model/expiry_y"):
         units[name] = "NYSE_business_years"
@@ -674,9 +673,8 @@ def experiment_hdf5_schema_document() -> dict[str, Any]:
     units["model/atm_total_vol"] = "volatility*sqrt(years)"
     units["day/date_days"] = "days_since_1970-01-01"
     units["expiry/date_days"] = "days_since_1970-01-01"
-    units["day/spot_ref"] = "absolute_underlying_level_internal_only"
-    units["quote/log_volume"] = "log10(1+vendor_volume)"
-    units["quote/log_open_interest"] = "log10(1+vendor_open_interest)"
+    units["day/driftless_spot_return"] = "dimensionless_driftless_return"
+    units["day/driftless_spot_return_valid"] = "validity_mask"
     return {
         "schema": EXPERIMENT_HDF5_SCHEMA,
         "dimensions": {
@@ -774,7 +772,7 @@ def _hdf_dataset_digest(dataset: Any) -> str:
     return digest.hexdigest()
 
 
-@version("1.0", dependencies=[DailyFrontDay, EligibilityAudit, _day_date, _decode])
+@version("2.0", dependencies=[DailyFrontDay, EligibilityAudit, _day_date, _decode])
 def read_hdf5_day(handle: Any, index: int) -> DailyFrontDay:
     D = int(handle.attrs["D"])
     if not 0 <= index < D:
@@ -786,12 +784,18 @@ def read_hdf5_day(handle: Any, index: int) -> DailyFrontDay:
         ticker=str(handle.attrs["ticker"]),
         trading_date=_day_date(int(handle["day/date_days"][index])),
         is_half_day=bool(handle["day/is_half_day"][index]),
-        spot_reference=float(handle["day/spot_ref"][index]),
+        driftless_spot_return=(
+            float(handle["day/driftless_spot_return"][index])
+            if bool(handle["day/driftless_spot_return_valid"][index])
+            else float("nan")
+        ),
+        driftless_spot_return_valid=bool(
+            handle["day/driftless_spot_return_valid"][index]
+        ),
         market_uid=_decode(handle["day/market_uid"][index]),
         market_fingerprint=_decode(handle["day/market_fingerprint"][index]),
         expiry_time_y=np.asarray(handle["expiry/time_y"][index, :e], dtype=np.float64),
         expiry_date_days=np.asarray(handle["expiry/date_days"][index, :e], dtype=np.int32),
-        expiry_id=np.asarray(handle["expiry/id"][index, :e], dtype=np.int64),
         expiry_is_am=np.asarray(handle["expiry/is_am"][index, :e], dtype=np.bool_),
         expiry_atm_annual_vol=np.asarray(
             handle["expiry/atm_annual_vol"][index, :e], dtype=np.float64
@@ -803,12 +807,9 @@ def read_hdf5_day(handle: Any, index: int) -> DailyFrontDay:
         quote_price_index=np.asarray(handle["quote/price_index"][index, :q], dtype=np.int64),
         quote_strike=np.asarray(handle["quote/strike"][index, :q], dtype=np.float64),
         quote_is_call=np.asarray(handle["quote/is_call"][index, :q], dtype=np.bool_),
-        quote_bid=np.asarray(handle["quote/bid"][index, :q], dtype=np.float64),
-        quote_ask=np.asarray(handle["quote/ask"][index, :q], dtype=np.float64),
         quote_fit=np.asarray(handle["quote/fit"][index, :q], dtype=np.float64),
-        quote_log_volume=np.asarray(handle["quote/log_volume"][index, :q], dtype=np.float64),
-        quote_log_open_interest=np.asarray(
-            handle["quote/log_open_interest"][index, :q], dtype=np.float64
+        quote_half_spread=np.asarray(
+            handle["quote/half_spread"][index, :q], dtype=np.float64
         ),
         price_expiry_y=np.asarray(handle["price/expiry_y"][index, :p], dtype=np.float64),
         price_strike=np.asarray(handle["price/strike"][index, :p], dtype=np.float64),
@@ -828,7 +829,7 @@ def read_hdf5_day(handle: Any, index: int) -> DailyFrontDay:
 
 
 @version(
-    "1.7",
+    "2.0",
     dependencies=[
         read_hdf5_day,
         logical_content_digest,
@@ -960,6 +961,21 @@ def validate_experiment_hdf5(
         dates_raw = np.asarray(handle["day/date_days"][:], dtype=np.int32)
         if len(dates_raw) == 0 or np.any(np.diff(dates_raw.astype(np.int64)) <= 0):
             raise ExperimentValidationError("Experiment dates are not increasing")
+        returns = np.asarray(handle["day/driftless_spot_return"][:], dtype=np.float64)
+        return_valid = np.asarray(
+            handle["day/driftless_spot_return_valid"][:], dtype=np.bool_
+        )
+        expected_return_valid = np.ones(D, dtype=np.bool_)
+        expected_return_valid[0] = False
+        if (
+            not np.array_equal(return_valid, expected_return_valid)
+            or np.any(~np.isfinite(returns))
+            or np.any(returns[return_valid] <= -1.0)
+            or returns[0] != 0.0
+        ):
+            raise ExperimentValidationError(
+                "Driftless spot returns or their first-value validity mask changed"
+            )
         days: list[DailyFrontDay] = []
         total_books = 0
         calls = 0
@@ -980,16 +996,12 @@ def validate_experiment_hdf5(
                 ("quote/price_index", q, 0),
                 ("quote/strike", q, 1.0),
                 ("quote/is_call", q, True),
-                ("quote/bid", q, 0.0),
-                ("quote/ask", q, 1.0),
                 ("quote/fit", q, 0.0),
-                ("quote/log_volume", q, 0.0),
-                ("quote/log_open_interest", q, 0.0),
+                ("quote/half_spread", q, 0.0),
                 ("price/expiry_y", p, 0.0),
                 ("price/strike", p, 1.0),
                 ("expiry/time_y", e, 0.0),
                 ("expiry/date_days", e, 0),
-                ("expiry/id", e, 0),
                 ("expiry/is_am", e, False),
                 ("expiry/atm_annual_vol", e, 0.0),
                 ("expiry/strike_lower", e, 1.0),
@@ -1029,10 +1041,6 @@ def validate_experiment_hdf5(
             ):
                 raise ExperimentValidationError(
                     f"Configured excluded business DTE retained at row {index}"
-                )
-            if day.quote_count > 2 * config.market.max_num_options:
-                raise ExperimentValidationError(
-                    f"Quote population exceeds configured source cap at row {index}"
                 )
             model_first_time_y = config.geometry.model_business_dtes[0] / DAYS_PER_YEAR
             model_first_annual_vol = day.model_atm_total_vol[0] / np.sqrt(model_first_time_y)
@@ -1088,7 +1096,9 @@ def validate_experiment_hdf5(
         if np.any(handle["split/validation_mask"][:]) or np.any(handle["split/test_mask"][:]):
             raise ExperimentValidationError("Reference validation/test masks must be empty")
         boundary = date.fromisoformat(config.split.diagnostic_boundary)
-        expected_pre = np.asarray([day.trading_date < boundary for day in days])
+        expected_pre = np.asarray(
+            [day.trading_date < boundary for day in days], dtype=np.bool_
+        )
         pre_matches = np.array_equal(handle["period/pre_2025_mask"][:], expected_pre)
         post_matches = np.array_equal(handle["period/from_2025_mask"][:], ~expected_pre)
         if not pre_matches or not post_matches:
@@ -1172,6 +1182,34 @@ class DailyFrontExperiment:
     def iter_days(self) -> Iterator[DailyFrontDay]:
         for index in range(len(self)):
             yield self.load_day(index)
+
+    def driftless_spot_returns(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return stored driftless returns and their authoritative validity mask."""
+
+        h5py = _h5py()
+        with h5py.File(self.path, "r", swmr=True) as handle:
+            returns = np.asarray(handle["day/driftless_spot_return"][:], dtype=np.float64)
+            valid = np.asarray(
+                handle["day/driftless_spot_return_valid"][:], dtype=np.bool_
+            )
+        return returns, valid
+
+    def driftless_spot_path(self, *, initial_value: float = 1.0) -> np.ndarray:
+        """Reconstruct the spot-one driftless path as cumulative ``prod(1+r)``."""
+
+        if not np.isfinite(initial_value) or initial_value <= 0.0:
+            raise ValueError("initial_value must be finite and positive")
+        returns, valid = self.driftless_spot_returns()
+        expected = np.ones(len(returns), dtype=np.bool_)
+        if len(expected):
+            expected[0] = False
+        if not np.array_equal(valid, expected):
+            raise ExperimentValidationError("Driftless return validity mask is noncanonical")
+        path = np.empty(len(returns), dtype=np.float64)
+        if len(path):
+            path[0] = float(initial_value)
+            path[1:] = float(initial_value) * np.cumprod(1.0 + returns[1:])
+        return path
 
 
 __all__ = [

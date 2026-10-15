@@ -17,7 +17,15 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install
-        run: python -m pip install --upgrade pip && python -m pip install '.[dev,operator]'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            'torch>=2,<3'
+          python -m pip install '.[dev,operator]'
+          python -c 'import torch; assert torch.version.cuda is None, torch.version.cuda'
+          python -m pip cache purge
       - name: Lint
         run: ruff check src tests scripts setup.py
       - name: Type check
@@ -46,7 +54,7 @@ jobs:
       - name: Install TeX dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y --no-install-recommends
-          latexmk texlive-latex-base texlive-latex-extra texlive-science
+          latexmk lmodern texlive-latex-base texlive-latex-extra texlive-science
           texlive-fonts-recommended texlive-fonts-extra
       - name: Build paper outside checkout
         run: |

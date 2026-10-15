@@ -7,7 +7,7 @@ from cdxcore.version import version
 from sanos.datasets.public.config import PublicProjectionConfig, PublicReleaseConfig
 
 
-@version("1.2", dependencies=[PublicProjectionConfig])
+@version("2.0", dependencies=[PublicProjectionConfig])
 def candidate_readme(config: PublicProjectionConfig, artifact_id: str) -> str:
     """Return the exact candidate README payload."""
 
@@ -18,14 +18,21 @@ This immutable Dataset is a deliberately lossy, technically validated
 requires a separate license, rights basis, approver, approval date, and durable
 approval reference.
 
-The single `data.parquet` file contains one row per populated retained trading
-date. It supports normalized smooth-SANOS and discrete-DLV pricing, derived
-model ATM volatility, forward-adjusted return dynamics, and normalized spread
-experiments. See `schema.json` and `capabilities.json` for exact units and
-limitations. The finite DLV state is the stored canonical projection of smooth
-SANOS. Its approximation error is measured at retained expiries within
-inclusive NMS [-3,2] and reported in `validation.json`; no maximum-error or
-arbitrary-time equivalence guarantee is made.
+This Dataset implements the integrated **DySANOS 1.1** public-derived
+contract. The single `data.parquet` file is one flat scalar-only Polars frame. Tagged
+day, expiry, book, smooth-node, and DLV-node rows support normalized
+smooth-SANOS and discrete-DLV pricing, derived model ATM volatility, driftless
+return dynamics, and driftless normalized spread experiments. The simple
+period return is `DF(previous,current)*S_current/F_previous(current)-1`; a
+normalized path starts at one and cumulatively multiplies `1+r`, while its log
+path starts at zero and cumulatively sums `log1p(r)`. See `schema.json` and
+`capabilities.json` for exact units and limitations. Book rows include SANOS
+and DLV fit/synthetic-bound Black IVs; day rows include source-derived market
+quality aggregates without exposing market quotes. The finite DLV state is
+the stored canonical projection of smooth SANOS. Its approximation error is
+measured at retained expiries within inclusive NMS [-3,2] and reported in
+`validation.json`; no maximum-error or arbitrary-time equivalence guarantee is
+made.
 
 It intentionally excludes absolute spot/forward/strike/price levels, raw
 bids/asks/mids, identifiers, symbols, vendor Greeks/IVs, volume, open interest,

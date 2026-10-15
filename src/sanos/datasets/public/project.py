@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, NoReturn
 
 import numpy as np
 import polars as pl
@@ -20,7 +21,7 @@ from sanos.widb.calendar import (
     count_business_days_between,
     normalized_strike_policy,
 )
-from sanos.widb.daily import DailyDataError
+from sanos.widb.daily import DailyDataError, _black_implied
 from sanos.widb.surface import (
     FITTED_SCHEMA,
     FITTED_SCHEMA_VERSION,
@@ -57,7 +58,7 @@ class ProjectedPublicDay:
     expiry_count: int
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise PublicProjectionError(message)
 
 
@@ -232,6 +233,425 @@ def _state_payload(
     return result
 
 
+@version("1.0", dependencies=[public_polars_schema])
+def _flat_row(
+    trading_date: date,
+    record_kind: str,
+    **values: Any,
+) -> dict[str, Any]:
+    """Create one exact scalar public row with all inapplicable fields null."""
+
+    row = dict.fromkeys(public_polars_schema().names())
+    row.update({"trading_date": trading_date, "record_kind": record_kind})
+    unknown = set(values) - set(row)
+    if unknown:
+        _fail(f"Flat public row contains unknown fields: {sorted(unknown)}")
+    row.update(values)
+    return row
+
+
+@version("1.0", dependencies=[_flat_row, public_polars_schema])
+def _flatten_public_day(row: Mapping[str, Any]) -> pl.DataFrame:
+    """Encode one private nested semantic day as canonical scalar public rows."""
+
+    required = {
+        "trading_date",
+        "is_half_day",
+        "driftless_spot_return",
+        "nms_epsilon_atm_annual_volatility",
+        "sanos_market_percent_books_outside",
+        "sanos_market_conditional_mean_excess_halfspreads",
+        "sanos_market_conditional_median_excess_halfspreads",
+        "dlv_market_percent_books_outside",
+        "dlv_market_conditional_mean_excess_halfspreads",
+        "dlv_market_conditional_median_excess_halfspreads",
+        "expiries",
+        "books",
+        "smooth_sanos",
+        "discrete_dlv",
+    }
+    if set(row) != required or not isinstance(row["trading_date"], date):
+        _fail("Private public-day fields changed")
+    trading_date = row["trading_date"]
+    smooth = row["smooth_sanos"]
+    discrete = row["discrete_dlv"]
+    if not isinstance(smooth, Mapping) or not isinstance(discrete, Mapping):
+        _fail("Private public model state is malformed")
+    expiries = row["expiries"]
+    books = row["books"]
+    smooth_expiries = smooth.get("model_expiries")
+    dlv_expiries = discrete.get("model_expiries")
+    if not isinstance(expiries, list):
+        _fail("Private public-day expiries must be a list")
+    if not isinstance(books, list):
+        _fail("Private public-day books must be a list")
+    if not isinstance(smooth_expiries, list):
+        _fail("Private smooth SANOS expiries must be a list")
+    if not isinstance(dlv_expiries, list):
+        _fail("Private discrete DLV expiries must be a list")
+    smoothness = smooth.get("smoothness")
+    if smoothness is None:
+        _fail("Private smooth SANOS state has no smoothness")
+    smooth_by_expiry = {
+        int(item["expiry_index"]): item for item in smooth_expiries
+    }
+    dlv_by_expiry = {int(item["expiry_index"]): item for item in dlv_expiries}
+    flat: list[dict[str, Any]] = [
+        _flat_row(
+            trading_date,
+            "day",
+            is_half_day=row["is_half_day"],
+            driftless_spot_return=row["driftless_spot_return"],
+            nms_epsilon_atm_annual_volatility=row[
+                "nms_epsilon_atm_annual_volatility"
+            ],
+            smoothness=smoothness,
+            sanos_market_percent_books_outside=row[
+                "sanos_market_percent_books_outside"
+            ],
+            sanos_market_conditional_mean_excess_halfspreads=row[
+                "sanos_market_conditional_mean_excess_halfspreads"
+            ],
+            sanos_market_conditional_median_excess_halfspreads=row[
+                "sanos_market_conditional_median_excess_halfspreads"
+            ],
+            dlv_market_percent_books_outside=row[
+                "dlv_market_percent_books_outside"
+            ],
+            dlv_market_conditional_mean_excess_halfspreads=row[
+                "dlv_market_conditional_mean_excess_halfspreads"
+            ],
+            dlv_market_conditional_median_excess_halfspreads=row[
+                "dlv_market_conditional_median_excess_halfspreads"
+            ],
+        )
+    ]
+    for expiry in expiries:
+        if not isinstance(expiry, Mapping):
+            _fail("Private public expiry is malformed")
+        expiry_index = int(expiry["expiry_index"])
+        flat.append(
+            _flat_row(
+                trading_date,
+                "expiry",
+                expiry_index=expiry_index,
+                expiry_date=expiry["expiry_date"],
+                business_dte=expiry["business_dte"],
+                calendar_dte=expiry["calendar_dte"],
+                is_am=expiry["is_am"],
+                time_to_expiry_years=expiry["time_to_expiry_years"],
+                nms_atm_annual_volatility=expiry[
+                    "nms_atm_annual_volatility"
+                ],
+            )
+        )
+        expiry_books = [
+            item
+            for item in books
+            if isinstance(item, Mapping)
+            and int(item["expiry_index"]) == expiry_index
+        ]
+        for book_index, book in enumerate(expiry_books):
+            flat.append(
+                _flat_row(
+                    trading_date,
+                    "book",
+                    expiry_index=expiry_index,
+                    book_index=book_index,
+                    is_call=book["is_call"],
+                    normalized_strike=book["normalized_strike"],
+                    half_spread=book["half_spread"],
+                    sanos_fit_annual_iv=book["sanos_fit_annual_iv"],
+                    sanos_synthetic_bid_annual_iv=book[
+                        "sanos_synthetic_bid_annual_iv"
+                    ],
+                    sanos_synthetic_ask_annual_iv=book[
+                        "sanos_synthetic_ask_annual_iv"
+                    ],
+                    dlv_fit_annual_iv=book["dlv_fit_annual_iv"],
+                    dlv_synthetic_bid_annual_iv=book[
+                        "dlv_synthetic_bid_annual_iv"
+                    ],
+                    dlv_synthetic_ask_annual_iv=book[
+                        "dlv_synthetic_ask_annual_iv"
+                    ],
+                )
+            )
+        for kind, state, variance_name in (
+            (
+                "smooth_node",
+                smooth_by_expiry.get(expiry_index),
+                "kernel_input_total_variance",
+            ),
+            ("dlv_node", dlv_by_expiry.get(expiry_index), "input_total_variance"),
+        ):
+            if not isinstance(state, Mapping):
+                _fail(f"Private {kind} state does not cover expiry {expiry_index}")
+            support = state.get("normalized_support")
+            density = state.get("density_mass")
+            squared_dlv = state.get("squared_dlv") if kind == "dlv_node" else None
+            if not isinstance(support, list) or not isinstance(density, list):
+                _fail(f"Private {kind} vectors are malformed")
+            if len(support) != len(density) or (
+                kind == "dlv_node"
+                and (not isinstance(squared_dlv, list) or len(squared_dlv) != len(support))
+            ):
+                _fail(f"Private {kind} vectors have different lengths")
+            for node_index, (strike, mass) in enumerate(
+                zip(support, density, strict=True)
+            ):
+                values = {
+                    "expiry_index": expiry_index,
+                    "node_index": node_index,
+                    "time_increment_years": state["time_increment_years"],
+                    variance_name: state[variance_name],
+                    "normalized_support": strike,
+                    "density_mass": mass,
+                }
+                if kind == "dlv_node":
+                    if not isinstance(squared_dlv, list):
+                        _fail("Private DLV squared values are malformed")
+                    values["squared_dlv"] = squared_dlv[node_index]
+                flat.append(_flat_row(trading_date, kind, **values))
+    return pl.DataFrame(flat, schema=public_polars_schema(), strict=True)
+
+
+@version("1.0")
+def _require_flat_population(
+    frame: pl.DataFrame,
+    kind: str,
+    required: set[str],
+    *,
+    nullable: Set[str] = frozenset(),
+) -> None:
+    """Enforce the exact populated/null column matrix for one row kind."""
+
+    common = {"trading_date", "record_kind"}
+    for column in frame.columns:
+        if column in common:
+            if frame.get_column(column).null_count():
+                _fail(f"Flat {kind} rows contain a null {column}")
+        elif column in required:
+            if column not in nullable and frame.get_column(column).null_count():
+                _fail(f"Flat {kind} rows contain a null {column}")
+        elif frame.get_column(column).null_count() != frame.height:
+            _fail(f"Flat {kind} rows populate inapplicable field {column}")
+
+
+@version("1.0")
+def _one_repeated(frame: pl.DataFrame, column: str, label: str) -> Any:
+    values = frame.get_column(column).unique().to_list()
+    if len(values) != 1 or values[0] is None:
+        _fail(f"{label} has inconsistent {column}")
+    return values[0]
+
+
+@version(
+    "1.0",
+    dependencies=[
+        _flatten_public_day,
+        _one_repeated,
+        _require_flat_population,
+        public_polars_schema,
+    ],
+)
+def _inflate_public_day(frame: pl.DataFrame) -> dict[str, Any]:
+    """Decode and authenticate one canonical scalar day for numerical validation."""
+
+    if frame.schema != public_polars_schema() or frame.is_empty():
+        _fail("Flat public day does not have the exact scalar schema")
+    dates = frame.get_column("trading_date").unique().to_list()
+    if len(dates) != 1 or not isinstance(dates[0], date):
+        _fail("Flat public day must contain exactly one trading date")
+    trading_date = dates[0]
+    observed_kinds = set(frame.get_column("record_kind").to_list())
+    expected_kinds = {"day", "expiry", "book", "smooth_node", "dlv_node"}
+    if observed_kinds != expected_kinds:
+        _fail("Flat public day record kinds changed")
+
+    day = frame.filter(pl.col("record_kind") == "day")
+    if day.height != 1:
+        _fail("Flat public day requires exactly one day row")
+    _require_flat_population(
+        day,
+        "day",
+        {
+            "is_half_day",
+            "driftless_spot_return",
+            "nms_epsilon_atm_annual_volatility",
+            "smoothness",
+            "sanos_market_percent_books_outside",
+            "sanos_market_conditional_mean_excess_halfspreads",
+            "sanos_market_conditional_median_excess_halfspreads",
+            "dlv_market_percent_books_outside",
+            "dlv_market_conditional_mean_excess_halfspreads",
+            "dlv_market_conditional_median_excess_halfspreads",
+        },
+        nullable={"driftless_spot_return"},
+    )
+
+    expiry_rows = frame.filter(pl.col("record_kind") == "expiry")
+    _require_flat_population(
+        expiry_rows,
+        "expiry",
+        {
+            "expiry_index",
+            "expiry_date",
+            "business_dte",
+            "calendar_dte",
+            "is_am",
+            "time_to_expiry_years",
+            "nms_atm_annual_volatility",
+        },
+    )
+    expiry_indices = expiry_rows.get_column("expiry_index").to_list()
+    if expiry_indices != list(range(len(expiry_indices))):
+        _fail("Flat public expiry indices must be contiguous from zero")
+    expiries = [
+        {
+            "expiry_index": int(item["expiry_index"]),
+            "expiry_date": item["expiry_date"],
+            "business_dte": item["business_dte"],
+            "calendar_dte": item["calendar_dte"],
+            "is_am": item["is_am"],
+            "time_to_expiry_years": item["time_to_expiry_years"],
+            "nms_atm_annual_volatility": item["nms_atm_annual_volatility"],
+        }
+        for item in expiry_rows.iter_rows(named=True)
+    ]
+
+    book_rows = frame.filter(pl.col("record_kind") == "book")
+    _require_flat_population(
+        book_rows,
+        "book",
+        {
+            "expiry_index",
+            "is_call",
+            "normalized_strike",
+            "half_spread",
+            "sanos_fit_annual_iv",
+            "sanos_synthetic_bid_annual_iv",
+            "sanos_synthetic_ask_annual_iv",
+            "dlv_fit_annual_iv",
+            "dlv_synthetic_bid_annual_iv",
+            "dlv_synthetic_ask_annual_iv",
+            "book_index",
+        },
+        nullable={
+            "sanos_fit_annual_iv",
+            "sanos_synthetic_bid_annual_iv",
+            "sanos_synthetic_ask_annual_iv",
+            "dlv_fit_annual_iv",
+            "dlv_synthetic_bid_annual_iv",
+            "dlv_synthetic_ask_annual_iv",
+        },
+    )
+    books: list[dict[str, Any]] = []
+    for expiry_index in expiry_indices:
+        group = book_rows.filter(pl.col("expiry_index") == expiry_index)
+        if group.get_column("book_index").to_list() != list(range(group.height)):
+            _fail("Flat public book indices must be contiguous within expiry")
+        books.extend(
+            {
+                "expiry_index": int(item["expiry_index"]),
+                "is_call": item["is_call"],
+                "normalized_strike": item["normalized_strike"],
+                "half_spread": item["half_spread"],
+                "sanos_fit_annual_iv": item["sanos_fit_annual_iv"],
+                "sanos_synthetic_bid_annual_iv": item[
+                    "sanos_synthetic_bid_annual_iv"
+                ],
+                "sanos_synthetic_ask_annual_iv": item[
+                    "sanos_synthetic_ask_annual_iv"
+                ],
+                "dlv_fit_annual_iv": item["dlv_fit_annual_iv"],
+                "dlv_synthetic_bid_annual_iv": item[
+                    "dlv_synthetic_bid_annual_iv"
+                ],
+                "dlv_synthetic_ask_annual_iv": item[
+                    "dlv_synthetic_ask_annual_iv"
+                ],
+            }
+            for item in group.iter_rows(named=True)
+        )
+
+    states: dict[str, list[dict[str, Any]]] = {
+        "smooth_node": [],
+        "dlv_node": [],
+    }
+    for kind, variance_name in (
+        ("smooth_node", "kernel_input_total_variance"),
+        ("dlv_node", "input_total_variance"),
+    ):
+        rows = frame.filter(pl.col("record_kind") == kind)
+        required = {
+            "expiry_index",
+            "node_index",
+            "time_increment_years",
+            variance_name,
+            "normalized_support",
+            "density_mass",
+        }
+        if kind == "dlv_node":
+            required.add("squared_dlv")
+        _require_flat_population(rows, kind, required)
+        for expiry_index in expiry_indices:
+            group = rows.filter(pl.col("expiry_index") == expiry_index)
+            if group.is_empty() or group.get_column("node_index").to_list() != list(
+                range(group.height)
+            ):
+                _fail(f"Flat {kind} node indices must be non-empty and contiguous")
+            item = {
+                "expiry_index": int(expiry_index),
+                "time_increment_years": _one_repeated(
+                    group, "time_increment_years", kind
+                ),
+                variance_name: _one_repeated(group, variance_name, kind),
+                "normalized_support": group.get_column("normalized_support").to_list(),
+                "density_mass": group.get_column("density_mass").to_list(),
+            }
+            if kind == "dlv_node":
+                item["squared_dlv"] = group.get_column("squared_dlv").to_list()
+            states[kind].append(item)
+
+    nested = {
+        "trading_date": trading_date,
+        "is_half_day": day.item(0, "is_half_day"),
+        "driftless_spot_return": day.item(0, "driftless_spot_return"),
+        "nms_epsilon_atm_annual_volatility": day.item(
+            0, "nms_epsilon_atm_annual_volatility"
+        ),
+        "sanos_market_percent_books_outside": day.item(
+            0, "sanos_market_percent_books_outside"
+        ),
+        "sanos_market_conditional_mean_excess_halfspreads": day.item(
+            0, "sanos_market_conditional_mean_excess_halfspreads"
+        ),
+        "sanos_market_conditional_median_excess_halfspreads": day.item(
+            0, "sanos_market_conditional_median_excess_halfspreads"
+        ),
+        "dlv_market_percent_books_outside": day.item(
+            0, "dlv_market_percent_books_outside"
+        ),
+        "dlv_market_conditional_mean_excess_halfspreads": day.item(
+            0, "dlv_market_conditional_mean_excess_halfspreads"
+        ),
+        "dlv_market_conditional_median_excess_halfspreads": day.item(
+            0, "dlv_market_conditional_median_excess_halfspreads"
+        ),
+        "expiries": expiries,
+        "books": books,
+        "smooth_sanos": {
+            "smoothness": day.item(0, "smoothness"),
+            "model_expiries": states["smooth_node"],
+        },
+        "discrete_dlv": {"model_expiries": states["dlv_node"]},
+    }
+    if not _flatten_public_day(nested).equals(frame):
+        _fail("Flat public rows are not in exact canonical order or form")
+    return nested
+
+
 @version("1.1", dependencies=[SanosPricer, _canonical_discrete_dlv_densities])
 def _stored_dlv_squares(
     frame: pl.DataFrame,
@@ -270,7 +690,24 @@ def _stored_dlv_squares(
     return values
 
 
-@version("1.0", dependencies=[normalized_strike_policy])
+@version("1.0")
+def _excluded_public_business_dte(
+    business_dte: float,
+    config: PublicProjectionConfig,
+) -> bool:
+    """Return whether one expiry is outside the configured public book population."""
+
+    return (
+        business_dte < 0.0
+        or business_dte > config.maximum_business_dte
+        or any(
+            abs(business_dte - value) <= config.exclusion_tolerance
+            for value in config.excluded_business_dtes
+        )
+    )
+
+
+@version("1.1", dependencies=[_excluded_public_business_dte, normalized_strike_policy])
 def _daily_front_mask(
     *,
     business_dte: float,
@@ -286,11 +723,7 @@ def _daily_front_mask(
 ) -> np.ndarray:
     """Apply the exact side-specific daily-front public population rule."""
 
-    excluded = any(
-        abs(business_dte - value) <= config.exclusion_tolerance
-        for value in config.excluded_business_dtes
-    )
-    if excluded or business_dte < 0.0 or business_dte > config.maximum_business_dte:
+    if _excluded_public_business_dte(business_dte, config):
         return np.zeros(strikes.shape, dtype=bool)
     bounds = np.asarray(
         NMS.from_nms(
@@ -312,9 +745,102 @@ def _daily_front_mask(
     )
 
 
+@version("1.0", dependencies=[_black_implied])
+def _public_implied_volatility(
+    strike: float,
+    call_price: float,
+    time_years: float,
+    *,
+    required: bool,
+) -> float | None:
+    """Invert an identifiable normalized call price without clipping it."""
+
+    intrinsic = max(1.0 - strike, 0.0)
+    if (
+        not math.isfinite(call_price)
+        or not math.isfinite(strike)
+        or not math.isfinite(time_years)
+        or time_years <= 0.0
+        or call_price <= intrinsic
+        or call_price >= 1.0
+    ):
+        if required:
+            _fail("Public model fit has no identifiable finite Black volatility")
+        return None
+    try:
+        value = float(
+            _black_implied(
+                k=np.asarray([strike], dtype=np.float64),
+                prices=np.asarray([call_price], dtype=np.float64),
+                sqrtT=math.sqrt(time_years),
+                eps=1.0e-8,
+            )[0]
+        )
+    except (ArithmeticError, RuntimeError, ValueError):
+        value = math.nan
+    if not math.isfinite(value) or value <= 0.0:
+        if required:
+            _fail("Public model fit has no identifiable finite Black volatility")
+        return None
+    return value
+
+
+@version("1.0", dependencies=[_public_implied_volatility])
+def _model_iv_fields(
+    label: str,
+    strike: float,
+    call_price: float,
+    half_spread: float,
+    time_years: float,
+) -> dict[str, float | None]:
+    """Return one model's exact fit and synthetic-bound IV fields."""
+
+    if time_years <= 0.0:
+        return {
+            f"{label}_fit_annual_iv": None,
+            f"{label}_synthetic_bid_annual_iv": None,
+            f"{label}_synthetic_ask_annual_iv": None,
+        }
+    return {
+        f"{label}_fit_annual_iv": _public_implied_volatility(
+            strike, call_price, time_years, required=True
+        ),
+        f"{label}_synthetic_bid_annual_iv": _public_implied_volatility(
+            strike, call_price - half_spread, time_years, required=False
+        ),
+        f"{label}_synthetic_ask_annual_iv": _public_implied_volatility(
+            strike, call_price + half_spread, time_years, required=False
+        ),
+    }
+
+
+@version("1.0")
+def _market_quality(excesses: list[float], label: str) -> dict[str, float]:
+    if not excesses or any(not math.isfinite(value) or value < 0.0 for value in excesses):
+        _fail(f"{label} market-quality inputs are invalid")
+    positive = np.asarray([value for value in excesses if value > 0.0], dtype=np.float64)
+    prefix = f"{label}_market_"
+    return {
+        prefix + "percent_books_outside": 100.0 * len(positive) / len(excesses),
+        prefix + "conditional_mean_excess_halfspreads": (
+            float(np.mean(positive)) if len(positive) else 0.0
+        ),
+        prefix + "conditional_median_excess_halfspreads": (
+            float(np.median(positive)) if len(positive) else 0.0
+        ),
+    }
+
+
 @version(
-    "1.0",
-    dependencies=[_atm_volatility, _daily_front_mask, normalized_strike_policy],
+    "3.1",
+    dependencies=[
+        _atm_volatility,
+        _daily_front_mask,
+        _excluded_public_business_dte,
+        _market_quality,
+        _model_iv_fields,
+        normalized_strike_policy,
+    ],
 )
 def _book_payload(
     frame: pl.DataFrame,
@@ -322,10 +848,12 @@ def _book_payload(
     expiry_records: tuple[dict[str, Any], ...],
     public_index_by_expiry_id: dict[int, int],
     surface_pricer: SanosPricer,
+    dlv_pricer: SanosPricer,
     epsilon_atm_vol: float,
     config: PublicProjectionConfig,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
     books: list[dict[str, Any]] = []
+    excesses: dict[str, list[float]] = {"sanos": [], "dlv": []}
     eligible = frame.filter(pl.col("options_filter_eligible")).sort(
         "time_to_expiry_years", "expiry_id", "normalized_strike", maintain_order=True
     )
@@ -338,22 +866,22 @@ def _book_payload(
             continue
         business_dte = float(record["business_dte"])
         time_years = float(record["time_to_expiry_years"])
+        # Book exclusion never removes this expiry from the complete published
+        # state/geometry.  In particular, do not try to infer an ATM IV at T=0.
+        if _excluded_public_business_dte(business_dte, config):
+            continue
         atm_vol = float(_atm_volatility(time_years, surface_pricer))
         strikes = group.get_column("normalized_strike").to_numpy()
-        for is_call, active_column, fit_column, bid_column, ask_column in (
+        for is_call, active_column, fit_column in (
             (
                 True,
                 "call_active",
                 "smooth_call_mid",
-                "spot_normalized_market_call_bid",
-                "spot_normalized_market_call_ask",
             ),
             (
                 False,
                 "put_active",
                 "smooth_put_mid",
-                "spot_normalized_market_put_bid",
-                "spot_normalized_market_put_ask",
             ),
         ):
             fit = group.get_column(fit_column).cast(pl.Float64).to_numpy()
@@ -369,8 +897,6 @@ def _book_payload(
                 epsilon_atm_volatility=epsilon_atm_vol,
                 config=config,
             )
-            bids = group.get_column(bid_column).to_numpy().astype(np.float64)
-            asks = group.get_column(ask_column).to_numpy().astype(np.float64)
             pure_bid_column = (
                 "pure_market_call_bid" if is_call else "pure_market_put_bid"
             )
@@ -379,43 +905,56 @@ def _book_payload(
             )
             pure_bids = group.get_column(pure_bid_column).to_numpy().astype(np.float64)
             pure_asks = group.get_column(pure_ask_column).to_numpy().astype(np.float64)
-            bridge = float(record["discount_factor"]) * float(
-                record["spot_normalized_implied_forward"]
-            )
-            for strike, bid, ask, pure_bid, pure_ask in zip(
+            for strike, pure_bid, pure_ask in zip(
                 strikes[selected],
-                bids[selected],
-                asks[selected],
                 pure_bids[selected],
                 pure_asks[selected],
                 strict=True,
             ):
-                half_spread = 0.5 * (float(ask) - float(bid))
+                half_spread = 0.5 * (float(pure_ask) - float(pure_bid))
                 if not math.isfinite(half_spread) or half_spread <= 0.0:
-                    _fail("Selected public book has a non-positive spot-normalized half-spread")
-                pure_half_spread = 0.5 * (float(pure_ask) - float(pure_bid))
-                if not math.isclose(
-                    half_spread / bridge,
-                    pure_half_spread,
-                    rel_tol=2.0e-5,
-                    abs_tol=2.0e-8,
-                ):
-                    _fail("Selected public book fails the approved spread unit bridge")
+                    _fail("Selected public book has a non-positive driftless half-spread")
+                strike_value = float(strike)
+                model_fields: dict[str, float | None] = {}
+                for label, pricer in (("sanos", surface_pricer), ("dlv", dlv_pricer)):
+                    call_price = float(pricer(time_years, np.asarray([strike_value]))[0])
+                    put_price = call_price - 1.0 + strike_value
+                    model_price = call_price if is_call else put_price
+                    excesses[label].append(
+                        (
+                            max(model_price - float(pure_ask), 0.0)
+                            + max(float(pure_bid) - model_price, 0.0)
+                        )
+                        / half_spread
+                    )
+                    model_fields.update(
+                        _model_iv_fields(
+                            label,
+                            strike_value,
+                            call_price,
+                            half_spread,
+                            time_years,
+                        )
+                    )
                 books.append(
                     {
                         "expiry_index": public_index_by_expiry_id[expiry_id],
                         "is_call": is_call,
-                        "normalized_strike": float(strike),
-                        "half_spread_spot": half_spread,
+                        "normalized_strike": strike_value,
+                        "half_spread": half_spread,
+                        **model_fields,
                     }
                 )
     if not books:
         _fail("A populated internal day has no public daily-front books")
-    return books
+    return books, {
+        **_market_quality(excesses["sanos"], "sanos"),
+        **_market_quality(excesses["dlv"], "dlv"),
+    }
 
 
 @version(
-    "1.0",
+        "3.0",
     dependencies=[
         ProjectedPublicDay,
         PublicProjectionConfig,
@@ -499,11 +1038,6 @@ def project_public_day(
         expiry_date = record["expiry_date"]
         if not isinstance(expiry_date, date):
             _fail("expiry_date is not a calendar date")
-        bridge = float(record["discount_factor"]) * float(
-            record["spot_normalized_implied_forward"]
-        )
-        if not math.isfinite(bridge) or bridge <= 0.0:
-            _fail("discounted_forward_over_spot must be positive and finite")
         expiries.append(
             {
                 "expiry_index": index,
@@ -512,23 +1046,24 @@ def project_public_day(
                 "calendar_dte": int(record["calendar_dte"]),
                 "is_am": bool(record["expiry_is_am"]),
                 "time_to_expiry_years": float(record["time_to_expiry_years"]),
-                "discounted_forward_over_spot": bridge,
                 "nms_atm_annual_volatility": float(atm_vol),
             }
         )
-    books = _book_payload(
+    books, market_quality = _book_payload(
         frame,
         expiry_records=ordered_records,
         public_index_by_expiry_id=public_index_by_expiry_id,
         surface_pricer=smooth_pricer,
+        dlv_pricer=dlv_pricer,
         epsilon_atm_vol=epsilon_atm_vol,
         config=config,
     )
     row = {
         "trading_date": trading_date,
         "is_half_day": bool(_one(frame, "is_half_day")),
-        "forward_adjusted_spot_return": None,
+        "driftless_spot_return": None,
         "nms_epsilon_atm_annual_volatility": epsilon_atm_vol,
+        **market_quality,
         "expiries": expiries,
         "books": books,
         "smooth_sanos": _state_payload(
@@ -545,9 +1080,9 @@ def project_public_day(
             dlv_squares=stored_dlv_squares,
         ),
     }
-    # Force the recursive Polars cast here so a projection cannot accumulate an
-    # untyped Python field which publication would later pass through.
-    pl.DataFrame([row], schema=public_polars_schema(), strict=True)
+    # Force the public scalar cast here so projection cannot accumulate an
+    # untyped private field which publication would later pass through.
+    _flatten_public_day(row)
     return ProjectedPublicDay(
         row=row,
         carry=_source_carry_curve(trading_date, spot, frame),
@@ -589,7 +1124,7 @@ def _log_curve_value(
         ProjectedPublicDay,
         _log_curve_value,
         count_business_days_between,
-        public_polars_schema,
+        _flatten_public_day,
     ],
 )
 def assemble_public_frame(
@@ -602,12 +1137,12 @@ def assemble_public_frame(
     ordered_dates = tuple(day.carry.trading_date for day in days)
     if ordered_dates != tuple(sorted(set(ordered_dates))):
         _fail("Projected public dates must be unique and strictly increasing")
-    rows: list[dict[str, Any]] = []
+    frames: list[pl.DataFrame] = []
     evidence: list[dict[str, Any]] = []
     for index, day in enumerate(days):
         row = dict(day.row)
         if index == 0:
-            row["forward_adjusted_spot_return"] = None
+            row["driftless_spot_return"] = None
         else:
             previous = days[index - 1]
             sessions = int(
@@ -630,10 +1165,10 @@ def assemble_public_frame(
                 float(sessions),
                 "discount-factor",
             )
-            value = (day.carry.spot / previous.carry.spot) / carry - 1.0
+            value = discount * (day.carry.spot / previous.carry.spot) / carry - 1.0
             if not math.isfinite(value):
-                _fail("forward_adjusted_spot_return is non-finite")
-            row["forward_adjusted_spot_return"] = value
+                _fail("driftless_spot_return is non-finite")
+            row["driftless_spot_return"] = value
             evidence.append(
                 {
                     "trading_date": day.carry.trading_date,
@@ -642,9 +1177,9 @@ def assemble_public_frame(
                     "interpolated_discount_factor": discount,
                 }
             )
-        rows.append(row)
+        frames.append(_flatten_public_day(row))
     return (
-        pl.DataFrame(rows, schema=public_polars_schema(), strict=True),
+        pl.concat(frames, how="vertical", rechunk=True),
         tuple(evidence),
     )
 

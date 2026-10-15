@@ -568,6 +568,84 @@ both accepted it. Only `approved` may alter reference behavior.
 - **Expected impact:** validation identity only; no daily or fitted artifact is
   changed or rebuilt.
 
+## CD-029 — Flat driftless public and Experiment contract
+
+- **Status:** approved by the repository owner on 2026-10-15; supersedes the
+  public-unit portion of CD-009 and the recursive physical layout.
+- **Evidence:** smooth SANOS and finite-DLV prices already use dimensionless
+  `C/(DF*F)` prices and `K/F` strikes. Publishing half-spreads in `C/S` forced
+  every normalized consumer to retain a forward/spot bridge. Nested Arrow list
+  columns also made ordinary Polars filtering and aggregation unnecessarily
+  expensive.
+- **Treatment:** project private bid/ask books into driftless `C/(DF*F)` units
+  first and publish `half_spread=(ask-bid)/2` in those units. Publish one tagged,
+  long-form Polars frame with scalar-only `day`, `expiry`, `book`,
+  `smooth_node`, and `dlv_node` rows. Do not publish
+  `discounted_forward_over_spot`. A normalized DySANOS Experiment is derived
+  only from this public Dataset; it reconstructs smooth fitted mids and stores
+  model-centred `fit` plus `half_spread`, not vendor midpoints, liquidity,
+  absolute spot, or vendor identifiers.
+- **Expected impact:** public and Experiment identities and schemas change.
+  SANOS/DLV state and selected book keys do not change; public spread values are
+  represented directly in driftless units. Training bands become symmetric
+  around the SANOS fitted mid, so exact legacy market-objective parity ends.
+
+## CD-030 — Discounted driftless spot return
+
+- **Status:** approved by the repository owner on 2026-10-15; supersedes the
+  return formula portion of CD-004.
+- **Evidence:** the previous implementation interpolated and validated the
+  preceding date's discount factor but omitted it from the published return.
+  That produced a forward-adjusted return, not the requested driftless spot
+  increment.
+- **Treatment:** for consecutive retained dates `t<u`, publish
+  `driftless_spot_return = DF(t,u)*S(u)/F_t(u)-1`. The first retained date is
+  null. After an omitted date, use the preceding retained date and the full
+  multi-session horizon. Neither `DF`, `F`, nor absolute spot crosses the
+  public boundary. Consumers reconstruct the normalized driftless spot path
+  from one by cumulative multiplication of `1+r`.
+- **Expected impact:** every non-first public return generally changes by the
+  interpolated discount factor; SANOS/DLV states, book populations and spreads
+  do not.
+
+## CD-031 — Canonical public 0DTE book exclusion
+
+- **Status:** approved by the repository owner on 2026-10-15; supersedes the
+  zero-DTE inclusion portion of the recovered daily-front profile.
+- **Evidence:** implied volatility is not identifiable at zero model time, and
+  the canonical public/DySANOS 1.1 population does not require same-day books.
+- **Treatment:** canonical public and DySANOS 1.1 configurations set
+  `excluded_business_dtes=[0.0,0.2]`, excluding both PM 0DTE and the
+  next-session AM 0.2D node from books. Preserve complete expiry geometry and
+  SANOS/DLV state. A populated date with no remaining book fails explicitly.
+  Custom configurations may retain 0DTE; their six model-derived IVs are null.
+- **Expected impact:** canonical Dataset and Experiment identities change;
+  nonzero-DTE books and all model state remain unchanged.
+
+## CD-032 — SANOS preprocessing boundary and downstream model namespace
+
+- **Status:** approved by the repository owner on 2026-10-15.
+- **Evidence:** the legacy `quantdata.dysanos.flex` tree mixes the SANOS data
+  producer, dozens of unrelated research models, materialization, training,
+  plotting, and one-off runners. The standalone repository's existing generic
+  `sanos.experiments` package similarly obscures that DySANOS is one concrete
+  downstream model, while SANOS itself is the fitted-Dataset preprocessor.
+- **Treatment:** keep preprocessing and Dataset production in the SANOS core.
+  Put downstream models in the plural `sanos.models` namespace; implement
+  DySANOS 1.1 as the self-contained `sanos.models.dysanos` package. Retire the
+  generic Python `sanos.experiments` package after callers migrate, while
+  retaining Experiment as the disposable artifact storage class and temporary
+  CLI compatibility aliases. Build DySANOS freshly from the public Dataset,
+  including native per-day calibration and Float64 affine initialization; do
+  not use legacy checkpoints or runtime `quant_data` imports. Port only the
+  canonical Direct-200 P path. Any future retained model becomes a sibling
+  package with its own contract and tests.
+- **Expected impact:** Python import paths and canonical CLI spelling change;
+  disposable DySANOS producer identity changes. Public and internal Dataset
+  identities are unaffected by source-code organization. Fresh model results
+  may differ from legacy warm-started training and require explicit numerical
+  review rather than hidden checkpoint reuse.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -576,5 +654,6 @@ CD-016 through CD-019 need a choice only if their preserved compatibility
 behavior is to change. The implementation can build
 configuration, artifact storage, offline numerical kernels and parity
 scaffolding while those specific behavior points remain blocked. CD-004,
-CD-009 and CD-021 through CD-028 are resolved by their approved or measured
-contracts and regressions.
+CD-009 and CD-021 through CD-028 are resolved historical contracts; CD-029,
+CD-030, CD-031, and CD-032 supersede their public-unit/layout, return,
+zero-DTE population, and downstream-model organization portions respectively.

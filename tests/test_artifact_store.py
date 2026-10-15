@@ -496,8 +496,17 @@ def test_lifecycle_lineage_policy_accepts_forward_edges_and_rejects_backward_edg
         producer_version="one",
         upstream=(internal.pointer,),
     )
+    trained_experiment = ArtifactSpec.create(
+        storage_class="experiment",
+        namespace="dysanos/direct200",
+        configuration={},
+        schema_version="one",
+        producer_version="one",
+        upstream=(experiment.pointer,),
+    )
     assert public.upstream == (internal.pointer,)
     assert experiment.upstream == (internal.pointer,)
+    assert trained_experiment.upstream == (experiment.pointer,)
 
     with pytest.raises(ValueError, match="raw cannot depend"):
         ArtifactSpec.create(
@@ -525,6 +534,24 @@ def test_lifecycle_lineage_policy_accepts_forward_edges_and_rejects_backward_edg
             configuration={},
             schema_version="one",
             producer_version="one",
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        ArtifactSpec.create(
+            storage_class="experiment",
+            namespace="bad/multiple-experiment-inputs",
+            configuration={},
+            schema_version="one",
+            producer_version="one",
+            upstream=(internal.pointer, public.pointer),
+        )
+    with pytest.raises(ValueError, match="experiment cannot depend"):
+        ArtifactSpec.create(
+            storage_class="experiment",
+            namespace="bad/intermediate-experiment-input",
+            configuration={},
+            schema_version="one",
+            producer_version="one",
+            upstream=(intermediate.pointer,),
         )
 
 

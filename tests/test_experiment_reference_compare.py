@@ -17,8 +17,8 @@ from click.testing import CliRunner
 import sanos.reference.experiment_compare as compare_module
 from sanos.artifacts import ArtifactPointer, ValidatedArtifact
 from sanos.cli import main
-from sanos.experiments import ExperimentConfig
-from sanos.experiments.daily_front import DailyFrontDay, EligibilityAudit
+from sanos.models.dysanos import ExperimentConfig
+from sanos.models.dysanos.data import DailyFrontDay, EligibilityAudit
 from sanos.reference import (
     ExperimentComparisonRequest,
     ExperimentReferenceTolerances,
@@ -204,12 +204,12 @@ def _dual_day() -> tuple[DailyFrontDay, _LegacyDay]:
         ticker="SPX",
         trading_date=trading_date,
         is_half_day=False,
-        spot_reference=4_800.0,
+        driftless_spot_return=float("nan"),
+        driftless_spot_return_valid=False,
         market_uid="a" * 64,
         market_fingerprint="b" * 64,
         expiry_time_y=np.asarray([1.0 / 252.0], dtype=np.float64),
         expiry_date_days=np.asarray([expiry_days], dtype=np.int32),
-        expiry_id=np.asarray([123], dtype=np.int64),
         expiry_is_am=np.asarray([False], dtype=np.bool_),
         expiry_atm_annual_vol=np.asarray([0.2], dtype=np.float64),
         expiry_strike_lower=np.asarray([0.8], dtype=np.float64),
@@ -219,11 +219,8 @@ def _dual_day() -> tuple[DailyFrontDay, _LegacyDay]:
         quote_price_index=np.asarray([0, 0], dtype=np.int64),
         quote_strike=np.asarray([1.0, 1.0], dtype=np.float64),
         quote_is_call=np.asarray([True, False], dtype=np.bool_),
-        quote_bid=np.asarray([0.01, 0.01], dtype=np.float64),
-        quote_ask=np.asarray([0.02, 0.02], dtype=np.float64),
         quote_fit=np.asarray([0.015, 0.015], dtype=np.float64),
-        quote_log_volume=np.asarray([1.0, 1.0], dtype=np.float64),
-        quote_log_open_interest=np.asarray([2.0, 2.0], dtype=np.float64),
+        quote_half_spread=np.asarray([0.005, 0.005], dtype=np.float64),
         price_expiry_y=np.asarray([1.0 / 252.0], dtype=np.float64),
         price_strike=np.asarray([1.0], dtype=np.float64),
         audit=audit,
@@ -233,7 +230,7 @@ def _dual_day() -> tuple[DailyFrontDay, _LegacyDay]:
         trading_date=fresh.trading_date,
         expiries_y=fresh.expiry_time_y.copy(),
         expiry_dates=fresh.expiry_dates,
-        expiry_ids=fresh.expiry_id.copy(),
+        expiry_ids=np.asarray([123], dtype=np.int64),
         expiry_is_am=fresh.expiry_is_am.copy(),
         expiry_index=fresh.quote_expiry_index.copy(),
         strikes=fresh.quote_strike.copy(),
@@ -241,8 +238,8 @@ def _dual_day() -> tuple[DailyFrontDay, _LegacyDay]:
         bids=fresh.quote_bid.copy(),
         asks=fresh.quote_ask.copy(),
         fit_prices=fresh.quote_fit.copy(),
-        log_volumes=fresh.quote_log_volume.copy(),
-        log_open_interests=fresh.quote_log_open_interest.copy(),
+        log_volumes=np.asarray([1.0, 1.0], dtype=np.float64),
+        log_open_interests=np.asarray([2.0, 2.0], dtype=np.float64),
         quote_ids=fresh.quote_ids,
         atm_annual_vols=fresh.expiry_atm_annual_vol.copy(),
         model_atm_total_vols=fresh.model_atm_total_vol.copy(),
@@ -250,7 +247,7 @@ def _dual_day() -> tuple[DailyFrontDay, _LegacyDay]:
         strike_upper_bounds=fresh.expiry_strike_upper.copy(),
         market_uid="legacy-uid",
         audit=_LegacyAudit(2, 2, 2, 1, 1),
-        spot_ref=fresh.spot_reference,
+        spot_ref=4_800.0,
     )
     return fresh, legacy
 
@@ -262,12 +259,12 @@ def test_logical_experiment_oracle_rebases_only_source_identity() -> None:
     assert comparison["mismatch_fields"] == []
     assert comparison["identity"]["legacy_market_uid"] == "legacy-uid"
     assert comparison["identity"]["fresh_market_uid"] == "a" * 64
-    assert comparison["identity"]["rebased_training_fingerprint_matched"] is True
+    assert comparison["identity"]["training_fingerprint_expected_to_change"] is True
 
-    changed = replace(legacy, bids=legacy.bids + np.asarray([0.0, 1.0e-6]))
+    changed = replace(legacy, asks=legacy.asks + np.asarray([0.0, 2.0e-6]))
     mismatch = _compare_logical_day(fresh, changed, float_atol=1.0e-12)
     assert mismatch["matched"] is False
-    assert "quote/bid" in mismatch["mismatch_fields"]
+    assert "quote/half_spread" in mismatch["mismatch_fields"]
 
 
 def test_experiment_array_comparison_distinguishes_nonfinite_values() -> None:

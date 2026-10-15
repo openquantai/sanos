@@ -76,7 +76,8 @@ configuration.
    validate it. Do not use the public approval commands without documented
    redistribution authority.
 7. Build and validate the disposable HDF5 materialization with `sanos
-   experiment build` and `sanos experiment validate`.
+   dysanos build` and `sanos dysanos validate`. The corresponding
+   `sanos experiment` spellings are temporary compatibility aliases.
 8. For the canonical 2022--2025 reference, follow the exact
    [Phase 10 pilot](phase-10-pilot.md), then the
    [Phase 11 production runbook](production-runbook.md). Those workflows add

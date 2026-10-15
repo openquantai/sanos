@@ -1,12 +1,14 @@
 # SANOS standalone program plan
 
-Status: implementation in progress; Phases 0 through 9 are complete with dual
-review. A fresh-WRDS 16-session Phase 10 pilot completed: 12 dates match the
+Status: implementation in progress; Phases 0 through 9A are complete with dual
+review. Phase 9B's fresh Direct-200 numerical/training core has passed dual
+review; its trained-model Experiment and `train`/`evaluate` CLI remain pending.
+A fresh-WRDS 16-session Phase 10 pilot completed: 12 dates match the
 legacy oracle, 2024-12-24 is the expected oracle gap, 2025-01-08 is the expected
-policy-empty day, and 2025-01-02/03 remain unexplained cross-expiry solve
-discrepancies. The code and quantitative reviewers approved that diagnosis but
-not a numerical-policy change. Phase 11 remains blocked on the owner's explicit
-classification of those two dates. Phase 11/12 offline production, packaging,
+policy-empty day, and 2025-01-02/03 have owner-approved technical migration
+classifications bound to report
+`bc5c5cf8aad4753e3f792f66f8b7a8e5751795771470615cd70fea57662bb434`.
+That approval does not authorize a numerical-policy change. Phase 11/12 offline production, packaging,
 and operator-readiness tooling otherwise passed final code and quantitative
 review on 2026-10-13. Exact numerical-runtime evidence binding was added and
 passed independent code and quantitative review on 2026-10-14. Public
@@ -120,8 +122,9 @@ sanos/
 ├── README.md
 ├── pyproject.toml
 ├── configs/
-│   ├── datasets/spx-sanos-2022-2025.toml
-│   └── experiments/
+│   ├── widb-spx-reference.json
+│   ├── sanos-public-candidate-reference.json
+│   └── dysanos-daily-front-reference.json
 ├── docs/
 │   ├── architecture.md
 │   ├── compatibility-decisions.md
@@ -137,7 +140,8 @@ sanos/
 │   ├── widb/
 │   ├── model/
 │   ├── datasets/
-│   └── experiments/
+│   └── models/
+│       └── dysanos/
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -454,15 +458,15 @@ under an existing identity.
 
 ### Phase 8 — Public research projection
 
-Status: complete; final code and quantitative/data reviews passed on
-2026-10-13. The repository publishes technical `public_candidate` artifacts
-and provides a distinct rights-gated `public` release workflow, but records no
-actual redistribution approval. See `reviews/phase-8/`.
+Status: reopened for the approved flat-scalar and driftless-book revision on
+2026-10-15. The previous recursive schema remains historical review evidence,
+not the target public contract.
 
-- Materialize a distinct one-row-per-trading-day Polars dataset from the
-  completed internal dataset.
+- Materialize one distinct, tagged long-form Polars dataset with scalar-only
+  `day`, `expiry`, `book`, `smooth_node`, and `dlv_node` rows from the completed
+  internal dataset.
 - Use an explicit allowlist containing only date, trading half-day status,
-  the approved `forward_adjusted_spot_return` into the date under CD-004,
+  the approved `driftless_spot_return` into the date under CD-030,
   smooth SANOS state and geometry, unsmoothed DLV state and geometry, normalized
   surviving strike/side/half-spread books, and retained
   expiry/DTE/settlement geometry.
@@ -470,28 +474,26 @@ actual redistribution approval. See `reviews/phase-8/`.
   and volatilities can be reconstructed, rather than publishing redundant
   fitted price or implied-volatility arrays on every retained book.
 - Preserve the legacy simple close-to-close `spot_return` in the internal
-  reference-compatible dataset, but do not label it forward-adjusted or use it
-  as the public field. The approved public calculation for retained dates
-  `t[i-1]` and `t[i]` uses previous-date carry
-  `c[i]=F_(t[i-1])(t[i])/S_(t[i-1])` and
-  `r_fwd[i]=(S[i]/S[i-1])/c[i]-1`. Positive forward and discount curves are
+  reference-compatible dataset, but do not label it driftless or use it as the
+  public field. The approved public calculation for retained dates `t[i-1]`
+  and `t[i]` is
+  `r[i]=DF_(t[i-1])(t[i])*S[i]/F_(t[i-1])(t[i])-1`. Positive forward and discount curves are
   interpolate log-linearly in business DTE with an anchor of one at
-  DTE zero. The first retained date has a null return. Approved CD-004 fixes
+  DTE zero. The first retained date has a null return. Approved CD-030 fixes
   this formula; its inputs need not themselves be public fields.
-- The approved unit bridge is `C/S=DF*(F/S)*C/(DF*F)` and
-  `h/(DF*F)=(h/S)/(DF*(F/S))`. Under CD-009, the interpreting
-  geometry stores `discounted_forward_over_spot=DF*(F/S)` and half-spreads in
-  spot-one units. Model prices are reconstructed in memory from state and
-  expressed in discounted-forward units; they are not redundant public fields.
+- CD-029 supersedes the public portion of CD-009: convert private books to
+  driftless `C/(DF*F)` units before projection and publish
+  `half_spread=(ask-bid)/2` in those same units. No forward/spot bridge crosses
+  the public boundary. Model prices are reconstructed in the identical units.
 - Freeze the other public units and geometry in Phase 1: strikes as `K/F`, SANOS
-  prices in `DF*F` units, half-spreads as `half_spread/S`, annualized
+  prices in `DF*F` units, half-spreads in the same units, annualized
   squared-DLV/time units, model time increments, expiry interpolation, and
   boundary flags.
 - Exclude absolute spot and all source identifiers, raw quotes, market mids,
   volume, open interest, vendor Greeks/IVs, contract symbols, and redundant
-  per-book model price/IV arrays. Leakage tests reconstruct model prices and
-  implied volatilities from the allowed states in memory without adding them to
-  the public schema.
+  per-book model-price arrays. The public allowlist includes only the approved
+  SANOS/DLV fit and synthetic-band model-derived IVs, not observed-market or
+  vendor IVs.
 - Record explicit capability flags in the manifest for supported normalized
   SANOS/DLV dynamics and spread experiments, and explicit non-capabilities for
   exact vendor-book reconstruction, quote-containment replay, liquidity models,
@@ -499,7 +501,7 @@ actual redistribution approval. See `reviews/phase-8/`.
 - Reproduce the recovered daily-front public-book profile: separate call and
   put books, active finite valid books after the pre-smooth no-arbitrage mask,
   European style, finite smooth fitted values, at most 70 business days,
-  explicit 0.2D exclusion, and inclusive AF-ATM NMS `[-3,2]`. A different
+  explicit 0DTE and 0.2D exclusions, and inclusive AF-ATM NMS `[-3,2]`. A different
   estimation grid or experiment hedge screen is an explicit downstream
   experiment configuration, not an implicit public serialization rule.
 - Keep SANOS smoothing-kernel input total variances explicitly named as inputs,
@@ -515,29 +517,76 @@ Acceptance: forbidden-column and reconstruction/leakage tests pass; the dataset
 loads with WRDS disabled and no internal artifacts; every advertised normalized
 experiment capability executes from it.
 
-### Phase 9 — Experiment materialization
+### Phase 9 — Model namespace and DySANOS 1.1
 
-Implementation status: complete with code and quantitative review. This
-Experiment is disposable. The freshly rebuilt and promoted SANOS Dataset
-remains the canonical reference object.
+Implementation status: reopened on 2026-10-15. SANOS is the preprocessing and
+fitted-Dataset producer. Downstream learned or statistical models live as
+sibling packages below `sanos.models`; the first retained model is the fresh,
+self-contained `sanos.models.dysanos` implementation. The generic
+`sanos.experiments` source package is retired after callers migrate. Experiment
+remains the storage class of a disposable model materialization, not a Python
+model namespace.
 
-- Convert a selected immutable dataset into model-specific HDF5 with explicit
-  padding, masks, selections, and train/validation splits.
-- Record source dataset identity and full canonical experiment configuration
-  beside the HDF5 file.
-- Keep experiment artifacts disposable and output-first reusable.
+#### Phase 9A — Public-only materialization
 
-Acceptance: the reference training data consumer can ingest the new
-materialization with value/mask/shape parity, or any intentional interface
-change has an approved compatibility decision and adapter.
+- Make the public SANOS Dataset, never the internal Dataset, the sole source of
+  normalized DySANOS inputs.
+- Reimplement public projection, day/batch contracts, model-specific HDF5,
+  restart shards, artifact planning, build, validation, and inspection under
+  `src/sanos/models/dysanos/`.
+- Reconstruct SANOS fitted mids from public smooth state and use public
+  driftless half-spreads to form synthetic `fit +/- half_spread` books. Do not
+  carry vendor liquidity, absolute spot, or vendor expiry identifiers into the
+  normalized Experiment.
+- Record source Dataset identity and full canonical DySANOS configuration
+  beside the HDF5 file. Keep the materialization disposable, atomic, restartable,
+  tamper-detecting, and output-first reusable.
+- Expose model-specific CLI commands. Keep `sanos experiment build|validate`
+  only as documented temporary aliases which delegate to DySANOS; do not keep a
+  generic Experiment framework without a second concrete consumer.
+
+Acceptance: isolated loading/building/validation succeeds with WRDS, Raw,
+Intermediate, and the internal Dataset absent; HDF values, masks, ordering,
+returns, and cumulative driftless path satisfy the public contract.
+
+#### Phase 9B — Fresh Direct-200 training
+
+- Port only the canonical DySANOS Direct-200 P path from the read-only legacy
+  implementation. Do not import or depend on `quant_data` at runtime.
+- Start from a fresh native per-day fit. The old all-history joint runner's
+  accepted legacy checkpoints are migration evidence, not valid initialization
+  inputs for the standalone implementation.
+- Standardize the fitted states in float64 with the exact affine/SVD
+  transformation, initialize the affine Direct decoder without changing its
+  decoded surface, then fit stable weekly dynamics and the joint spread-aware
+  objective.
+- Own the constrained differentiable SANOS decoder, objective, deterministic
+  training schedule, convergence diagnostics, checkpoints, restart, evaluation,
+  and structured progress reporting inside `sanos.models.dysanos`.
+- Publish the trained Direct-200 model as a second immutable Experiment whose
+  sole upstream is the reusable daily-front HDF5 Experiment. Store model tensors
+  in a pickle-free HDF5 payload; keep restart checkpoints in the plan-owned
+  workspace rather than the completed artifact.
+- Omit legacy native/PCA/hierarchical variants, exploratory Q/OCE/hedging/path
+  models, plotting scripts, warm starts, and the many one-off `run_*` programs.
+  A future retained model becomes another sibling below `sanos.models` with its
+  own configuration, CLI, artifacts, and tests. Sibling models are independently
+  authored packages, not clients of a shared model framework; only narrow,
+  deliberately adopted repository contracts may be common between them.
+
+Acceptance: synthetic CPU tests prove surface constraints, call/put parity,
+affine initialization invariance, stable dynamics, deterministic tiny training,
+checkpoint interruption/resume, and public-only end-to-end CLI operation.
+Numerical comparison to the pinned legacy Direct-200 oracle is recorded, with
+fresh-initialization differences reviewed rather than hidden by legacy inputs.
 
 ### Phase 10 — Fresh-download pilot
 
 Pilot status: the fresh-WRDS 16-session representative pilot completed. Twelve
 dates match, one declared oracle gap and one typed-empty policy day behave as
 expected, and 2025-01-02/03 differ in the final cross-expiry `MkArbFree` solve.
-Independent code and quantitative review approved the diagnosis. Owner approval
-is still required before those two differences can be classified; Phase 11
+Independent code and quantitative review approved the diagnosis, and the owner
+approved the exact report-bound technical migration classifications; Phase 11
 remains blocked.
 
 The reviewed `sanos reference approval-document` workflow can record that
@@ -564,8 +613,8 @@ docs are complete; discrepancies are explained or approved.
 Offline contract status: the exact full-range comparator, Experiment tensor
 comparator, deterministic downstream-config finalizer, indexed evidence
 contract, canonical designation, and human runbook are implemented, tested, and
-independently approved. Live execution remains blocked by the unresolved Phase
-10 owner classification and monitored safety gates. The accepted evidence
+independently approved. Live execution remains subject to the monitored safety
+gates and completion of the fresh full-range build. The accepted evidence
 index and canonical-reference designation additionally bind a closed,
 path-free fingerprint of the exact Python, package, solver, BLAS/LAPACK, CPU
 availability, and numerical-thread runtime.
@@ -628,7 +677,7 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
   validation therefore appears unreachable on that path.
 - Legacy `spot_ret` is `spot / previous_spot - 1` and remains an internal
   compatibility field. The public projection uses the distinct approved
-  `forward_adjusted_spot_return` contract from CD-004 and must not relabel the
+  `driftless_spot_return` contract from CD-030 and must not relabel the
   legacy field.
 - Some fit-percentage documentation/log messages disagree about whether the
   reported fraction is inside or outside the bid/ask spread.
@@ -641,9 +690,9 @@ Phase 1 supplies focused evidence and the user approves any semantic change:
   legacy dataset's actual population rule must be recovered, not guessed.
 - A FLEX 4.8-business-day first-node convention may encode a different 20%
   overnight clock from WIDB AM settlement. Preserve each behavior until traced.
-- Public half-spreads in spot-one units and model prices reconstructed in
-  discounted-forward units use the approved dimensionless `DF*(F/S)` bridge
-  from CD-009. This technical approval does not grant redistribution rights.
+- Public half-spreads and reconstructed model prices share driftless
+  `C/(DF*F)` units under CD-029; no forward/spot bridge is public. This technical
+  approval does not grant redistribution rights.
 - The ndarray branch of `_compute_market_fit` references undefined variables;
   CD-013 blocks silently copying or fixing the unexercised interface.
 - Both retained legacy pricers jump from the time-zero intrinsic branch to the

@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import numpy as np
 import polars as pl
@@ -32,6 +32,12 @@ from sanos.datasets.public.config import (
     PublicReleaseConfig,
 )
 from sanos.datasets.public.documents import candidate_readme, release_readme
+from sanos.datasets.public.project import (
+    PublicProjectionError,
+    _excluded_public_business_dte,
+    _inflate_public_day,
+    _model_iv_fields,
+)
 from sanos.datasets.public.schema import (
     PUBLIC_VALIDATION_VERSION,
     public_capabilities,
@@ -92,7 +98,7 @@ class PublicDataset:
         return pl.read_parquet(self.artifact.path / "data.parquet", hive_partitioning=False)
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise PublicDatasetValidationError(message)
 
 
@@ -123,7 +129,7 @@ def _finite_tree(value: Any, label: str) -> None:
 
 
 @version(
-    "1.0",
+    "2.0",
     dependencies=[canonical_sha256, public_polars_schema, public_schema_document],
 )
 def public_frame_logical_sha256(frame: pl.DataFrame) -> str:
@@ -139,7 +145,7 @@ def public_frame_logical_sha256(frame: pl.DataFrame) -> str:
     )
 
 
-@version("1.0", dependencies=[canonical_sha256])
+@version("2.0", dependencies=[canonical_sha256])
 def public_return_values_sha256(frame: pl.DataFrame) -> str:
     """Bind the ordered public return vector without exposing private inputs."""
 
@@ -147,11 +153,11 @@ def public_return_values_sha256(frame: pl.DataFrame) -> str:
         [
             {
                 "trading_date": row["trading_date"],
-                "forward_adjusted_spot_return": row["forward_adjusted_spot_return"],
+                "driftless_spot_return": row["driftless_spot_return"],
             }
-            for row in frame.select(
-                "trading_date", "forward_adjusted_spot_return"
-            ).iter_rows(named=True)
+            for row in frame.filter(pl.col("record_kind") == "day")
+            .select("trading_date", "driftless_spot_return")
+            .iter_rows(named=True)
         ]
     )
 
@@ -199,7 +205,7 @@ def _validate_density(
 
 
 @version(
-    "1.1",
+    "2.0",
     dependencies=[SanosPricer, _canonical_discrete_dlv_densities, _validate_density],
 )
 def _state_pricer(
@@ -419,12 +425,21 @@ def _validate_smooth_dlv_projection(
     return maximum
 
 
-@version("1.0", dependencies=[normalized_strike_policy])
+@version(
+    "3.1",
+    dependencies=[
+        _excluded_public_business_dte,
+        _model_iv_fields,
+        normalized_strike_policy,
+    ],
+)
 def _validate_books(
     books: list[Mapping[str, Any]],
     expiries: list[Mapping[str, Any]],
     epsilon_atm_vol: float,
     config: PublicProjectionConfig,
+    smooth_pricer: SanosPricer,
+    dlv_pricer: SanosPricer,
 ) -> None:
     if not books:
         _fail("Public row has no books")
@@ -434,7 +449,13 @@ def _validate_books(
             "expiry_index",
             "is_call",
             "normalized_strike",
-            "half_spread_spot",
+            "half_spread",
+            "sanos_fit_annual_iv",
+            "sanos_synthetic_bid_annual_iv",
+            "sanos_synthetic_ask_annual_iv",
+            "dlv_fit_annual_iv",
+            "dlv_synthetic_bid_annual_iv",
+            "dlv_synthetic_ask_annual_iv",
         }:
             _fail("Public book fields changed")
         expiry_index = int(item["expiry_index"])
@@ -443,7 +464,7 @@ def _validate_books(
         if not isinstance(item["is_call"], bool):
             _fail("Public book side is not Boolean")
         strike = float(item["normalized_strike"])
-        half_spread = float(item["half_spread_spot"])
+        half_spread = float(item["half_spread"])
         if (
             not math.isfinite(strike)
             or strike <= 0.0
@@ -453,14 +474,7 @@ def _validate_books(
             _fail("Public book strike and half-spread must be positive and finite")
         expiry = expiries[expiry_index]
         business_dte = float(expiry["business_dte"])
-        if (
-            business_dte < 0.0
-            or business_dte > config.maximum_business_dte
-            or any(
-                abs(business_dte - excluded) <= config.exclusion_tolerance
-                for excluded in config.excluded_business_dtes
-            )
-        ):
+        if _excluded_public_business_dte(business_dte, config):
             _fail("Public book refers to an excluded or out-of-horizon expiry")
         bounds = np.asarray(
             NMS.from_nms(
@@ -473,11 +487,44 @@ def _validate_books(
         )
         if strike < bounds[0] or strike > bounds[1]:
             _fail("Public book lies outside the inclusive configured NMS range")
+        time_years = float(expiry["time_to_expiry_years"])
+        for label, pricer in (("sanos", smooth_pricer), ("dlv", dlv_pricer)):
+            call_price = float(pricer(time_years, np.asarray([strike]))[0])
+            expected = _model_iv_fields(
+                label, strike, call_price, half_spread, time_years
+            )
+            for field, expected_value in expected.items():
+                observed = item[field]
+                if expected_value is None:
+                    if observed is not None:
+                        _fail(f"Public {field} must be null for a non-identifiable bound")
+                elif observed is None or not math.isclose(
+                    float(observed), expected_value, rel_tol=0.0, abs_tol=1.0e-12
+                ):
+                    _fail(f"Public {field} is inconsistent with model and half-spread")
         keys.append((expiry_index, 0 if item["is_call"] else 1, strike))
     if keys != sorted(keys):
         _fail("Public books are not ordered by expiry, call-before-put, and strike")
     if len(keys) != len(set(keys)):
         _fail("Public books contain a duplicate expiry/side/strike key")
+
+
+@version("1.0")
+def _validate_market_quality(row: Mapping[str, Any]) -> None:
+    for label in ("sanos", "dlv"):
+        percent = float(row[f"{label}_market_percent_books_outside"])
+        mean = float(row[f"{label}_market_conditional_mean_excess_halfspreads"])
+        median = float(row[f"{label}_market_conditional_median_excess_halfspreads"])
+        if (
+            not all(math.isfinite(value) for value in (percent, mean, median))
+            or percent < 0.0
+            or percent > 100.0
+            or mean < 0.0
+            or median < 0.0
+            or (percent == 0.0 and (mean != 0.0 or median != 0.0))
+            or (percent > 0.0 and (mean <= 0.0 or median <= 0.0))
+        ):
+            _fail(f"Public {label} market-quality aggregates are invalid")
 
 
 @version("1.1", dependencies=[business_dates, count_business_days_between])
@@ -545,12 +592,14 @@ def _validate_coverage_evidence(
 
 
 @version(
-    "1.1",
+    "2.1",
     dependencies=[
         PublicDatasetValidationSummary,
         PublicProjectionConfig,
+        _inflate_public_day,
         _finite_tree,
         _state_pricer,
+        _validate_market_quality,
         _validate_smooth_dlv_projection,
         _validate_books,
         business_clock_policy,
@@ -569,19 +618,31 @@ def validate_public_frame(
 
     if frame.schema != public_polars_schema():
         _fail(
-            f"Public recursive schema changed: expected={public_polars_schema()}, "
+            f"Public flat scalar schema changed: expected={public_polars_schema()}, "
             f"observed={frame.schema}"
         )
     if frame.is_empty():
         _fail("Public Dataset frame is empty")
-    rows = frame.to_dicts()
-    dates = tuple(cast(date, row["trading_date"]) for row in rows)
+    day_rows = frame.filter(pl.col("record_kind") == "day")
+    dates = tuple(cast(date, value) for value in day_rows["trading_date"].to_list())
     if dates != tuple(sorted(set(dates))):
         _fail("Public dates must be unique and strictly increasing")
-    if rows[0]["forward_adjusted_spot_return"] is not None:
-        _fail("The first public forward-adjusted return must be null")
-    if any(row["forward_adjusted_spot_return"] is None for row in rows[1:]):
-        _fail("Only the first public forward-adjusted return may be null")
+    try:
+        day_frames = tuple(
+            frame.filter(pl.col("trading_date") == trading_date)
+            for trading_date in dates
+        )
+        rows = [_inflate_public_day(day_frame) for day_frame in day_frames]
+    except PublicProjectionError as exc:
+        raise PublicDatasetValidationError(str(exc)) from exc
+    if not day_frames or not pl.concat(day_frames, how="vertical").equals(frame):
+        _fail("Public dates are interleaved or outside canonical order")
+    if rows[0]["driftless_spot_return"] is not None:
+        _fail("The first public driftless return must be null")
+    if any(row["driftless_spot_return"] is None for row in rows[1:]):
+        _fail("Only the first public driftless return may be null")
+    if any(float(row["driftless_spot_return"]) <= -1.0 for row in rows[1:]):
+        _fail("Public driftless returns must be greater than -1")
 
     expiry_count = 0
     book_count = 0
@@ -609,7 +670,6 @@ def validate_public_frame(
                 "calendar_dte",
                 "is_am",
                 "time_to_expiry_years",
-                "discounted_forward_over_spot",
                 "nms_atm_annual_volatility",
             }:
                 _fail("Public expiry fields changed")
@@ -638,18 +698,17 @@ def validate_public_frame(
             ):
                 _fail("Public model time differs from business_dte/252")
             if (
-                not math.isfinite(float(expiry["discounted_forward_over_spot"]))
-                or float(expiry["discounted_forward_over_spot"]) <= 0.0
-                or not math.isfinite(float(expiry["nms_atm_annual_volatility"]))
+                not math.isfinite(float(expiry["nms_atm_annual_volatility"]))
                 or float(expiry["nms_atm_annual_volatility"]) <= 0.0
             ):
-                _fail("Public expiry bridge/ATM geometry must be positive and finite")
+                _fail("Public expiry ATM geometry must be positive and finite")
             times.append(time_years)
         if any(right <= left for left, right in zip(times, times[1:])):
             _fail("Public expiry times are not strictly increasing")
         epsilon_atm = float(row["nms_epsilon_atm_annual_volatility"])
         if not math.isfinite(epsilon_atm) or epsilon_atm <= 0.0:
             _fail("Public NMS epsilon ATM volatility must be positive and finite")
+        _validate_market_quality(row)
         smooth_state = cast(Mapping[str, Any], row["smooth_sanos"])
         dlv_state = cast(Mapping[str, Any], row["discrete_dlv"])
         smooth_pricer, smooth_mass, smooth_moment, _ = _state_pricer(
@@ -672,7 +731,17 @@ def validate_public_frame(
         if smooth_indices != expected_indices or dlv_indices != expected_indices:
             _fail("Public model states must cover every retained expiry exactly")
         books = cast(list[Mapping[str, Any]], row["books"])
-        _validate_books(books, expiries, epsilon_atm, config)
+        try:
+            _validate_books(
+                books,
+                expiries,
+                epsilon_atm,
+                config,
+                smooth_pricer,
+                dlv_pricer,
+            )
+        except PublicProjectionError as exc:
+            raise PublicDatasetValidationError(str(exc)) from exc
         maximum_projection = max(
             maximum_projection,
             _validate_smooth_dlv_projection(
@@ -754,7 +823,7 @@ def validate_public_frame(
 
 
 @version(
-    "1.1",
+    "2.0",
     dependencies=[
         PublicDatasetValidationSummary,
         public_coverage_sha256,
@@ -772,7 +841,12 @@ def public_validation_document(
 ) -> dict[str, Any]:
     """Create the exact self-contained validation and projection evidence."""
 
-    dates = tuple(cast(date, value) for value in frame["trading_date"].to_list())
+    dates = tuple(
+        cast(date, value)
+        for value in frame.filter(pl.col("record_kind") == "day")[
+            "trading_date"
+        ].to_list()
+    )
     return {
         "schema": PUBLIC_VALIDATION_VERSION,
         "outcome": "passed",
@@ -946,7 +1020,12 @@ def validate_public_payload(
     if evidence["schema"] != PUBLIC_VALIDATION_VERSION or evidence["outcome"] != "passed":
         _fail("validation.json is not a passed current validation record")
     frame = pl.read_parquet(path / "data.parquet", hive_partitioning=False)
-    dates = tuple(cast(date, value) for value in frame["trading_date"].to_list())
+    dates = tuple(
+        cast(date, value)
+        for value in frame.filter(pl.col("record_kind") == "day")[
+            "trading_date"
+        ].to_list()
+    )
     omitted = _validate_coverage_evidence(evidence, dates, config)
     if evidence["return_values_sha256"] != public_return_values_sha256(frame):
         _fail("Public return vector differs from immutable projection evidence")

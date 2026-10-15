@@ -255,7 +255,7 @@ def verify(dist_dir: Path, work_root: Path, expected_revision: str) -> None:
             "from sanos.reference import repository_source_revision; "
             "from sanos.resources import reference_config_path; "
             "from sanos.datasets import InternalDatasetConfig; "
-            "from sanos.experiments import ExperimentConfig; "
+            "from sanos.models.dysanos import ExperimentConfig; "
             "from sanos.datasets.public import PublicProjectionConfig; "
             "import json; "
             "assert repository_source_revision(); "

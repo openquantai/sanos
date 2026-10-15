@@ -1,14 +1,13 @@
-"""Output-first construction and validation of immutable Experiment artifacts."""
+"""Output-first construction and validation of immutable DySANOS artifacts."""
 
 from __future__ import annotations
 
 import json
-import multiprocessing
 import shutil
 import time
 import warnings
 from collections.abc import Callable, Mapping
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -29,19 +28,20 @@ from sanos.artifacts import (
     atomic_write_json,
 )
 from sanos.config import StorageLocations, canonical_json, canonical_sha256, canonical_value
-from sanos.datasets import (
-    DatasetValidationSummary,
-    open_internal_dataset,
-    validate_internal_dataset,
+from sanos.datasets.public import (
+    PUBLIC_DATASET_SCHEMA_VERSION,
+    PublicDatasetValidationSummary,
+    open_public_dataset,
+    public_polars_schema,
+    validate_public_dataset,
 )
-from sanos.datasets.internal import INTERNAL_DATASET_SCHEMA_VERSION
-from sanos.experiments.config import ExperimentBuildOptions, ExperimentConfig
-from sanos.experiments.daily_front import (
+from sanos.models.dysanos.config import ExperimentBuildOptions, ExperimentConfig
+from sanos.models.dysanos.data import (
     daily_quote_objective,
     project_daily_front,
     recompute_market_fingerprint,
 )
-from sanos.experiments.hdf5 import (
+from sanos.models.dysanos.hdf5 import (
     EXPERIMENT_HDF5_NAME,
     EXPERIMENT_HDF5_SCHEMA,
     DailyFrontExperiment,
@@ -53,12 +53,10 @@ from sanos.experiments.hdf5 import (
     write_experiment_hdf5,
 )
 from sanos.pipeline import RunJournal
-from sanos.widb.bad import bad_day_reason
-from sanos.widb.surface import FITTED_SCHEMA
 
-EXPERIMENT_CONFIG_SCHEMA = "sanos-experiment-config-v1"
-EXPERIMENT_SOURCE_SCHEMA = "sanos-experiment-source-v1"
-EXPERIMENT_SCHEMA_DOCUMENT = "sanos-dysanos-daily-front-schema-v1"
+EXPERIMENT_CONFIG_SCHEMA = "sanos-experiment-config-v2"
+EXPERIMENT_SOURCE_SCHEMA = "sanos-experiment-public-source-v2"
+EXPERIMENT_SCHEMA_DOCUMENT = "sanos-dysanos-1.1-schema-v1"
 EXPERIMENT_SPLITS_SCHEMA = "sanos-experiment-splits-v1"
 EXPERIMENT_VALIDATION_SCHEMA = "sanos-experiment-validation-v1"
 
@@ -94,7 +92,7 @@ class ExperimentValidationSummary:
 
 
 @version(
-    "1.0",
+    "2.0",
     dependencies=[ExperimentPlan, ExperimentValidationSummary, ReuseResult],
 )
 @dataclass(frozen=True, slots=True)
@@ -126,8 +124,8 @@ def _parse_manifest_config(value: object) -> ExperimentConfig:
 
 
 @version(
-    "1.0",
-    dependencies=[ExperimentConfig, validate_internal_dataset, open_internal_dataset],
+    "2.0",
+    dependencies=[ExperimentConfig, validate_public_dataset, open_public_dataset],
 )
 def _source_gate(
     store: ArtifactStore,
@@ -135,46 +133,58 @@ def _source_gate(
     *,
     progress: ProgressCallback | None,
     progress_interval_seconds: float,
-) -> tuple[ValidatedArtifact, DatasetValidationSummary]:
+) -> tuple[ValidatedArtifact, PublicDatasetValidationSummary]:
     source = store.validate(config.source_dataset.pointer)
     if source.pointer.storage_class is not StorageClass.DATASET:
         raise ExperimentValidationError("Reference Experiment source is not a Dataset")
     distribution = source.manifest.get("distribution")
-    if not isinstance(distribution, Mapping) or distribution.get("status") != (
-        DistributionStatus.INTERNAL.value
+    if not isinstance(distribution, Mapping) or distribution.get("status") not in {
+        DistributionStatus.PUBLIC_CANDIDATE.value,
+        DistributionStatus.PUBLIC.value,
+    }:
+        raise ExperimentValidationError(
+            "DySANOS 1.1 requires a public-candidate or public Dataset"
+        )
+    source_schema = source.manifest.get("schema_version")
+    if (
+        not isinstance(source_schema, str)
+        or source_schema.split("+", maxsplit=1)[0] != PUBLIC_DATASET_SCHEMA_VERSION
     ):
         raise ExperimentValidationError(
-            "dysanos-daily-front-market-v1 requires an internal Dataset source"
+            "Reference Experiment source has an unsupported public Dataset schema"
         )
-    source_metadata = source.manifest.get("metadata")
-    if not isinstance(source_metadata, Mapping) or source_metadata.get(
-        "dataset_schema_version"
-    ) != (INTERNAL_DATASET_SCHEMA_VERSION):
-        raise ExperimentValidationError(
-            "Reference Experiment source has an unsupported internal Dataset schema"
-        )
-    summary = validate_internal_dataset(
+    summary = validate_public_dataset(
         store,
         source,
         semantic=True,
         deep_lineage=False,
         progress=progress,
-        progress_interval_seconds=progress_interval_seconds,
     )
     if summary is None:
-        raise ExperimentValidationError("Internal Dataset semantic validation produced no result")
-    dataset = open_internal_dataset(store, source)
-    if dataset.config.daily.clock.overnight_variance_fraction != (
+        raise ExperimentValidationError("Public Dataset semantic validation produced no result")
+    dataset = open_public_dataset(store, source)
+    if dataset.config.overnight_variance_fraction != (
         config.market.overnight_variance_fraction
     ):
         raise ExperimentValidationError(
             "Experiment overnight_variance_fraction differs from its source Dataset"
         )
-    if dataset.config.surface.smooth_sanos.smoothness != config.market.smoothness:
+    if dataset.config.smoothness != config.market.smoothness:
         raise ExperimentValidationError("Experiment smoothness differs from its source Dataset")
-    if dataset.config.surface.options_filter.max_num_options != config.market.max_num_options:
+    if dataset.config.excluded_business_dtes != config.market.excluded_business_dtes:
         raise ExperimentValidationError(
-            "Experiment max_num_options differs from the source Dataset population"
+            "Experiment excluded_business_dtes differs from its source Dataset"
+        )
+    if dataset.config.nms_range != config.geometry.nms_range:
+        raise ExperimentValidationError("Experiment NMS range differs from its source Dataset")
+    if dataset.config.maximum_business_dte != config.geometry.model_business_dtes[-1]:
+        raise ExperimentValidationError(
+            "Experiment maximum model DTE differs from its source Dataset"
+        )
+    if dataset.config.nms_epsilon_business_dte != config.geometry.model_business_dtes[0]:
+        raise ExperimentValidationError(
+            "Experiment first model DTE differs from the source Dataset ATM-volatility "
+            "proxy horizon"
         )
     return source, summary
 
@@ -194,17 +204,17 @@ def _shard_path(workspace: Path, trading_date: date) -> Path:
     ],
 )
 def _project_partition(
-    partition: Path,
+    frame: pl.DataFrame,
     shard: Path,
     *,
     source: ArtifactPointer,
     config: ExperimentConfig,
 ) -> Path:
-    frame = pl.read_parquet(partition, hive_partitioning=False)
-    if frame.schema != pl.Schema(FITTED_SCHEMA):
-        raise ExperimentValidationError(f"Source partition schema changed: {partition}")
+    if frame.schema != public_polars_schema():
+        raise ExperimentValidationError("Source public frame schema changed")
     day = project_daily_front(
         frame,
+        ticker=config.ticker,
         source_dataset=source,
         market=config.market,
         geometry=config.geometry,
@@ -222,7 +232,7 @@ def _project_partition(
         ExperimentPlan,
         _project_partition,
         _shard_path,
-        bad_day_reason,
+        public_polars_schema,
         read_day_shard,
         recompute_market_fingerprint,
     ],
@@ -237,21 +247,18 @@ def _prepare_shards(
     progress: ProgressCallback | None,
     journal: RunJournal,
 ) -> tuple[tuple[Path, ...], tuple[dict[str, Any], ...]]:
-    requested: list[tuple[date, Path, Path]] = []
-    exclusions: list[dict[str, Any]] = []
-    for record in dataset.partitions:
-        trading_date = date.fromisoformat(str(record["trading_date"]))
-        source_path = dataset.artifact.path / str(record["path"])
-        if record.get("typed_empty") is True:
-            reason = record.get("typed_empty_reason")
-            expected = bad_day_reason(dataset.config.ticker, trading_date)
-            if not isinstance(reason, str) or expected != reason:
-                raise ExperimentValidationError(
-                    f"Unexpected typed-empty source partition {trading_date}: {reason!r}"
-                )
-            exclusions.append({"trading_date": trading_date, "reason": reason})
-            continue
-        requested.append((trading_date, source_path, _shard_path(workspace, trading_date)))
+    source_frame = dataset.load()
+    if source_frame.schema != public_polars_schema():
+        raise ExperimentValidationError("Source public Dataset schema changed")
+    grouped = {
+        group.get_column("trading_date")[0]: group
+        for group in source_frame.partition_by("trading_date", maintain_order=True)
+    }
+    requested = [
+        (trading_date, frame, _shard_path(workspace, trading_date))
+        for trading_date, frame in grouped.items()
+    ]
+    exclusions = [item.as_dict() for item in dataset.config.expected_typed_empty_omissions]
     if not requested:
         raise ExperimentValidationError("Source Dataset has no populated partitions")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -280,7 +287,7 @@ def _prepare_shards(
     else:
         atomic_write_json(plan_path, plan_value)
 
-    pending: list[tuple[date, Path, Path]] = []
+    pending: list[tuple[date, pl.DataFrame, Path]] = []
     reused = 0
     for trading_date, source_path, shard in requested:
         if shard.exists() or shard.is_symlink():
@@ -314,70 +321,38 @@ def _prepare_shards(
         reused=reused,
         failures=0,
     )
-    if pending:
-        executor: ProcessPoolExecutor | None = None
-        futures: dict[Future[Path], date] = {}
-        try:
-            executor = ProcessPoolExecutor(
-                max_workers=min(options.max_workers, len(pending)),
-                mp_context=multiprocessing.get_context("spawn"),
+    with ThreadPoolExecutor(max_workers=min(options.max_workers, max(1, len(pending)))) as executor:
+        futures = {
+            executor.submit(
+                _project_partition,
+                source_day,
+                shard,
+                source=config.source_dataset.pointer,
+                config=config,
+            ): trading_date
+            for trading_date, source_day, shard in pending
+        }
+        for future in as_completed(futures):
+            completed_path = future.result()
+            completed += 1
+            journal.emit(
+                "unit_completed",
+                key=futures[future].isoformat(),
+                shard=completed_path.name,
             )
-            for trading_date, source_path, shard in pending:
-                future = executor.submit(
-                    _project_partition,
-                    source_path,
-                    shard,
-                    source=config.source_dataset.pointer,
-                    config=config,
-                )
-                futures[future] = trading_date
-            remaining = set(futures)
-            while remaining:
-                done, remaining = wait(
-                    remaining,
-                    timeout=options.progress_interval_seconds,
-                    return_when=FIRST_COMPLETED,
-                )
-                for future in done:
-                    completed_path = future.result()
-                    completed += 1
-                    journal.emit(
-                        "unit_completed",
-                        key=futures[future].isoformat(),
-                        shard=completed_path.name,
-                    )
-                elapsed = time.monotonic() - started
-                rate = (completed - reused) / elapsed if elapsed > 0.0 else 0.0
-                eta = (total - completed) / rate if rate > 0.0 else None
-                _emit(
-                    progress,
-                    "experiment_preparation_progress",
-                    completed=completed,
-                    total=total,
-                    reused=reused,
-                    failures=0,
-                    elapsed_seconds=round(elapsed, 6),
-                    eta_seconds=None if eta is None else round(eta, 6),
-                )
-        except BaseException:
-            for future in futures:
-                future.cancel()
-            if executor is not None:
-                processes = tuple(getattr(executor, "_processes", {}).values())
-                _, unfinished = wait(tuple(futures), timeout=1.0)
-                if unfinished:
-                    for process in processes:
-                        if process.is_alive():
-                            process.terminate()
-                    for process in processes:
-                        process.join(timeout=1.0)
-                    for process in processes:
-                        if process.is_alive():
-                            process.kill()
-                executor.shutdown(wait=True, cancel_futures=True)
-            raise
-        assert executor is not None
-        executor.shutdown(wait=True)
+            elapsed = time.monotonic() - started
+            rate = (completed - reused) / elapsed if elapsed > 0.0 else 0.0
+            eta = (total - completed) / rate if rate > 0.0 else None
+            _emit(
+                progress,
+                "experiment_preparation_progress",
+                completed=completed,
+                total=total,
+                reused=reused,
+                failures=0,
+                elapsed_seconds=round(elapsed, 6),
+                eta_seconds=None if eta is None else round(eta, 6),
+            )
     shards = tuple(item[2] for item in requested)
     for shard in shards:
         read_day_shard(shard)
@@ -408,12 +383,12 @@ def _restart_workspace(workspace: Path, experiments_root: Path) -> None:
         shutil.rmtree(workspace)
 
 
-@version("2.0", dependencies=[experiment_hdf5_schema_document])
+@version("3.0", dependencies=[experiment_hdf5_schema_document])
 def _experiment_schema_document() -> dict[str, Any]:
     return {
         "schema": EXPERIMENT_SCHEMA_DOCUMENT,
         "hdf5_schema": EXPERIMENT_HDF5_SCHEMA,
-        "profile": "dysanos-daily-front-market-v1",
+        "profile": "dysanos-1.1",
         "layout": {
             "day": "one row per populated retained trading date",
             "quote": "global-max padded separate call/put books with prefix mask",
@@ -425,35 +400,35 @@ def _experiment_schema_document() -> dict[str, Any]:
             "strike": "K/F",
             "prices": "option cash value divided by DF*F",
             "time": "NYSE business sessions divided by 252",
-            "spot_ref": "absolute source spot; internal-only",
+            "driftless_spot_return": "dimensionless; validity mask is authoritative",
         },
         "padding": "global_max_with_masks_v1; masks/counts are authoritative",
         "hdf5": experiment_hdf5_schema_document(),
     }
 
 
-@version("1.0")
+@version("2.0")
 def _experiment_readme(
     config: ExperimentConfig,
     summary: ExperimentValidationSummary,
 ) -> str:
-    return f"""# SANOS internal daily-front Experiment
+    return f"""# DySANOS 1.1 Experiment
 
-This immutable, disposable HDF5 materialization adapts one completed internal
-SANOS Dataset to the recovered DySANOS daily-front `FlexMarketDay` input
+This immutable, disposable HDF5 materialization adapts one completed public
+SANOS Dataset to the normalized DySANOS daily-front input
 contract. It contains `{summary.dates}` dates and `{summary.books}` separate
 call/put books. Prices are normalized by discounted forward and strikes are
 `K/F`.
 
-This artifact is **internal** and is not redistributable: it contains exact
-source bids/asks, liquidity fields, vendor expiry identities, and absolute spot
-references. It is not the public SANOS projection and does not use legacy
-`widb.timeseries`.
+Synthetic bid and ask are reconstructed as smooth SANOS fit minus/plus the
+published driftless half-spread. The HDF5 contains no WRDS liquidity fields,
+absolute spot, vendor expiry IDs, or observed vendor mid displacement. It can be
+built with WRDS, Raw, Intermediate, and the internal Dataset unavailable.
 
 Source Dataset: `{config.source_dataset.namespace}/`
 `{config.source_dataset.artifact_id}`.
 
-Validate with `sanos experiment validate --config CONFIG.json`. Rebuilding or
+Validate with `sanos dysanos validate --config CONFIG.json`. Rebuilding or
 deleting this Experiment does not change its immutable source Dataset.
 """
 
@@ -478,10 +453,10 @@ def _experiment_summary(value: Mapping[str, Any]) -> ExperimentValidationSummary
     )
 
 
-@version("1.0", dependencies=[DatasetValidationSummary, ValidatedArtifact])
+@version("2.0", dependencies=[PublicDatasetValidationSummary, ValidatedArtifact])
 def _experiment_source_document(
     source: ValidatedArtifact,
-    source_summary: DatasetValidationSummary,
+    source_summary: PublicDatasetValidationSummary,
     *,
     manifest_sha256: str,
 ) -> dict[str, Any]:
@@ -663,7 +638,11 @@ def validate_experiment(
             for character in str(source_document["manifest_sha256"])
         )
         or not isinstance(source_distribution, Mapping)
-        or source_distribution.get("status") != DistributionStatus.INTERNAL.value
+        or source_distribution.get("status")
+        not in {
+            DistributionStatus.PUBLIC_CANDIDATE.value,
+            DistributionStatus.PUBLIC.value,
+        }
     ):
         raise ExperimentValidationError("Experiment source.json changed")
     if deep_lineage:
@@ -833,7 +812,7 @@ def build_experiment(
                 progress=progress,
                 progress_interval_seconds=options.progress_interval_seconds,
             )
-            dataset = open_internal_dataset(store, source)
+            dataset = open_public_dataset(store, source)
             shards, exclusions = _prepare_shards(
                 dataset,
                 plan=plan,
@@ -847,7 +826,7 @@ def build_experiment(
             metadata = {
                 "profile": config.profile,
                 "source_dataset": source.pointer,
-                "source_distribution": "internal",
+                "source_distribution": dataset.distribution.value,
                 "source_validation": source_summary.as_dict(),
                 "typed_empty_exclusions": exclusions,
                 "network_accessed": False,

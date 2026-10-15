@@ -26,7 +26,7 @@ from sanos.artifacts import (
 )
 from sanos.config import StorageLocations, canonical_sha256, canonical_value
 from sanos.datasets.internal import validate_internal_dataset
-from sanos.experiments import validate_experiment
+from sanos.models.dysanos import validate_experiment
 from sanos.reference import (
     EXPERIMENT_REFERENCE_REPORT_SCHEMA,
     REFERENCE_REPORT_SCHEMA,

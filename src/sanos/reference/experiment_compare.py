@@ -19,7 +19,7 @@ from cdxcore.version import version
 
 from sanos.artifacts import ArtifactPointer, ArtifactStore, ValidatedArtifact
 from sanos.config import StorageLocations, canonical_sha256, canonical_value
-from sanos.experiments import ExperimentConfig, validate_experiment
+from sanos.models.dysanos import ExperimentConfig, validate_experiment
 from sanos.reference._experiment_oracle_worker import (
     PINNED_SOURCE_SHA256,
     experiment_oracle_worker_version,
@@ -35,12 +35,14 @@ from sanos.reference.compare import (
 
 EXPERIMENT_REFERENCE_REPORT_SCHEMA = "sanos-legacy-experiment-comparison-v1"
 PHASE11_EXPERIMENT_ARTIFACT_ID = (
-    "b621170c92b039aefb8987e9e20fc49927020834b28ff68665b51c4b99f3f792"
+    "b920d2c75975d1bdecb8c16a4e0f6eb4f9b9030c6353be446215b9d9c518e5b5"
 )
 PHASE11_DATASET_ARTIFACT_ID = (
-    "2ea20498735adf1e625b84f99c812bae78c90e9aeb81b36c9e0a330a21bd4585"
+    "d09a55ee4806916f0fc355f56c76401e9e21de09cfb6de99d5630e59439f1fc1"
 )
-PHASE11_DATASET_NAMESPACE = "widb/internal/name-widb-spx-2022-2025-reference"
+PHASE11_DATASET_NAMESPACE = (
+    "sanos/public-candidate/name-sanos-spx-2022-2025-public-candidate"
+)
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _EXPERIMENT_VALIDATION_VERSION = str(validate_experiment.version)

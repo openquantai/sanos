@@ -12,7 +12,9 @@ dataset will be the canonical reference dataset.
 
 ## Current status
 
-Phases 0 through 9 are complete with code and quantitative review. Phase 10's
+Phases 0 through 9A are complete with code and quantitative review. Phase 9B's
+fresh Direct-200 numerical and training core is complete; publication of the
+trained-model Experiment and its `train`/`evaluate` CLI remains pending. Phase 10's
 offline safety prerequisites and Phase 11's frozen offline production tooling
 are implemented. The daily no-arbitrage, filtering, smooth-SANOS, and canonical
 finite-DLV projection stages are available through the CLI, together with
@@ -192,7 +194,7 @@ Dataset but cannot build one. See the full
 
 ## Public-candidate Dataset projection
 
-Project the complete internal Dataset into the one-row-per-day normalized
+Project the complete internal Dataset into the flat scalar, driftless
 SANOS/DLV research contract:
 
 ```bash
@@ -205,8 +207,9 @@ sanos --root /path/to/quant-data dataset public validate \
 ```
 
 The output is a self-contained `public_candidate`, not a redistribution
-approval. It contains normalized returns, SANOS/DLV state and geometry, and
-spot-one half-spreads, while excluding absolute levels, source identifiers,
+approval. It contains discounted driftless returns, SANOS/DLV state and
+geometry, and half-spreads in the same `C/(DF*F)` space, while excluding
+absolute levels, source identifiers,
 vendor analytics, liquidity fields, and raw books. Output-first reuse and
 shallow validation do not need the internal Dataset to remain present. See the
 [public Dataset runbook](docs/public-datasets.md) for the exact schema, units,
@@ -217,23 +220,29 @@ the exact internal source to re-establish source-bound values.
 
 ## Internal Experiment materialization
 
-Once the pinned internal Dataset exists, build the disposable all-history
+DySANOS is implemented as the downstream model package
+`sanos.models.dysanos`; it is not part of the SANOS preprocessing pipeline.
+Future retained models become sibling packages under `sanos.models` rather
+than additions to a generic experiment framework.
+
+Once the pinned public SANOS Dataset exists, build the disposable all-history
 DySANOS daily-front HDF5 input:
 
 ```bash
-sanos --root /path/to/quant-data --dry-run experiment build \
+sanos --root /path/to/quant-data --dry-run dysanos build \
   --config configs/dysanos-daily-front-reference.json
-sanos --root /path/to/quant-data experiment build \
+sanos --root /path/to/quant-data dysanos build \
   --config configs/dysanos-daily-front-reference.json --max-workers 2
-sanos --root /path/to/quant-data experiment validate \
+sanos --root /path/to/quant-data dysanos validate \
   --config configs/dysanos-daily-front-reference.json
 ```
 
-This internal Experiment contains vendor-derived books and an absolute spot
-reference; it is not the public projection and not the canonical Dataset.
+This Experiment reconstructs model-centred books from public smooth-SANOS mids
+and driftless half-spreads. It does not contain vendor liquidity, absolute spot,
+or vendor identifiers; the public Dataset remains the canonical source.
 Completed Experiments are output-first and self-contained, so shallow reuse and
 validation do not require the source Dataset. See the
-[Experiment runbook](docs/experiments.md) for recovery, wildcard reuse, schema,
+[DySANOS runbook](docs/dysanos.md) for recovery, wildcard reuse, schema,
 and legacy-parity details.
 
 ## Canonical reference designation

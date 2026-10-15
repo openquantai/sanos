@@ -279,13 +279,13 @@ Build, deeply validate, and compare the disposable Experiment:
 
 ```bash
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
-  experiment build \
+  dysanos build \
   --config "$PRODUCTION_EVIDENCE/final-configs/experiment.json" \
   --max-workers 2 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/experiment-build.jsonl"
 
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
-  experiment validate \
+  dysanos validate \
   --config "$PRODUCTION_EVIDENCE/final-configs/experiment.json" \
   --deep-lineage \
   2>&1 | tee "$PRODUCTION_EVIDENCE/experiment-validation.jsonl"

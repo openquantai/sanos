@@ -83,7 +83,7 @@ class PublicExpectedOmission:
         return cls(_date(value["trading_date"], "trading_date"), value["reason"])
 
 
-@version("1.1", dependencies=[ArtifactPointer, PublicExpectedOmission])
+@version("1.2", dependencies=[ArtifactPointer, PublicExpectedOmission])
 @dataclass(frozen=True, slots=True)
 class PublicProjectionConfig:
     """All content-affecting choices for one public-candidate projection."""
@@ -94,16 +94,16 @@ class PublicProjectionConfig:
     coverage_end_date: date
     expected_typed_empty_omissions: tuple[PublicExpectedOmission, ...] = ()
     profile: Literal["daily-front-v1"] = "daily-front-v1"
-    return_convention: Literal["previous-retained-log-carry-v1"] = (
-        "previous-retained-log-carry-v1"
+    return_convention: Literal["previous-retained-discounted-driftless-v1"] = (
+        "previous-retained-discounted-driftless-v1"
     )
-    unit_convention: Literal["discounted-forward-over-spot-v1"] = (
-        "discounted-forward-over-spot-v1"
+    unit_convention: Literal["driftless-discounted-forward-v1"] = (
+        "driftless-discounted-forward-v1"
     )
     nms_range: tuple[float, float] = (-3.0, 2.0)
     nms_epsilon_business_dte: float = 1.0
     maximum_business_dte: float = 70.0
-    excluded_business_dtes: tuple[float, ...] = (0.2,)
+    excluded_business_dtes: tuple[float, ...] = (0.0, 0.2)
     exclusion_tolerance: float = 1.0e-4
     smoothness: float = 0.25
     european_only: bool = True
@@ -138,9 +138,9 @@ class PublicProjectionConfig:
         object.__setattr__(self, "expected_typed_empty_omissions", omissions)
         if self.profile != "daily-front-v1":
             raise ValueError("Unsupported public projection profile")
-        if self.return_convention != "previous-retained-log-carry-v1":
+        if self.return_convention != "previous-retained-discounted-driftless-v1":
             raise ValueError("Unsupported public return convention")
-        if self.unit_convention != "discounted-forward-over-spot-v1":
+        if self.unit_convention != "driftless-discounted-forward-v1":
             raise ValueError("Unsupported public unit convention")
         if self.state_scope != "complete-common-surface-v1":
             raise ValueError("Unsupported public state scope")
@@ -304,7 +304,10 @@ class PublicProjectionConfig:
             profile=value["profile"],
             return_convention=value["return_convention"],
             unit_convention=value["unit_convention"],
-            nms_range=tuple(_finite(item, "nms_range[]") for item in nms),
+            nms_range=(
+                _finite(nms[0], "nms_range[]"),
+                _finite(nms[1], "nms_range[]"),
+            ),
             nms_epsilon_business_dte=_finite(
                 value["nms_epsilon_business_dte"], "nms_epsilon_business_dte"
             ),

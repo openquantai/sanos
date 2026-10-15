@@ -45,7 +45,7 @@ sanos --root /path/to/quant-data dataset public validate \
 ```
 
 Normal validation is shallow with respect to lineage. It checks the candidate's
-own checksums, exact payload allowlist, deterministic documents, exact recursive
+own checksums, exact payload allowlist, deterministic documents, exact flat
 Parquet schema, finite values, identity-owned coverage, model geometry, density
 normalization, corrected generic Float64 DLV inverse, canonical stored-DLV
 reconstruction, off-grid SANOS/DLV pricing, measured retained-expiry in-domain
@@ -58,9 +58,9 @@ absent.
 
 Use `--deep-lineage` only when the exact internal source and its ancestors are
 expected to remain available. Deep validation re-runs the exact projection from
-the internal Dataset and compares every ordered nested value and omission; this
-is the mode which independently re-establishes private-input CD-004 returns and
-CD-009 bridges. Shallow validation establishes artifact integrity and advertised
+the internal Dataset and compares every ordered scalar value and omission; this
+is the mode which independently re-establishes the private-input CD-030 returns
+and CD-029 driftless books. Shallow validation establishes artifact integrity and advertised
 public-only capabilities, but cannot recreate private source inputs which are
 deliberately absent. `--integrity-only` skips numerical capability execution.
 `--version '*'` is an explicit warning-emitting reuse override and cannot build
@@ -70,19 +70,20 @@ a missing candidate.
 
 The artifact contains:
 
-- `data.parquet`: one Polars row per populated retained date;
+- `data.parquet`: one tagged long-form scalar Polars frame;
 - `README.md`: a portable human-readable summary;
 - `config.json`: the exact projection identity;
-- `schema.json`: recursive fields, units, return, and pricing conventions;
+- `schema.json`: flat fields, row kinds, units, return, and pricing conventions;
 - `capabilities.json`: a closed list of supported and unsupported uses;
 - `validation.json`: recomputable population evidence, typed-empty exclusions,
   return-horizon evidence, and exact return/content/coverage digests; and
 - store-owned checksummed `manifest.json` and completion marker.
 
-Each row contains only the trading date and half-day flag, the approved
-forward-adjusted return, expiry geometry, normalized side-separated books,
-complete common-surface smooth SANOS state, and complete common-surface
-canonical finite-DLV projection state. The DLV vectors are copied from the
+The `day`, `expiry`, `book`, `smooth_node`, and `dlv_node` rows collectively
+contain only the trading date and half-day flag, the approved driftless return,
+expiry geometry, normalized side-separated books, complete common-surface
+smooth SANOS state, and complete common-surface canonical finite-DLV projection
+state. The DLV vectors are copied from the
 strictly validated internal anchor state rather than regenerated during export.
 The public state, interpreting geometry, and normalized
 books remain in the same Polars frame; source fit diagnostics stay in the
@@ -92,36 +93,44 @@ quote, expiry, or surface files.
 The approved units are:
 
 ```text
-normalized strike             K/F
-model call price              C/(DF*F), reconstructed in memory
-half_spread_spot              (ask-bid)/(2*S)
-discounted_forward_over_spot  DF*(F/S)
-C/S                           [DF*(F/S)] * [C/(DF*F)]
-h/(DF*F)                      [h/S] / [DF*(F/S)]
+normalized strike  K/F
+model call price   C/(DF*F), reconstructed in memory
+half_spread        (driftless ask-driftless bid)/2 in C/(DF*F)
 ```
 
 The first return is null. Later rows use consecutive populated public dates:
 
 ```text
-r_t = (S_t/S_previous) / (F_previous(t)/S_previous) - 1
+r_t = DF_previous(t) * S_t / F_previous(t) - 1
 ```
 
-The previous date's positive forward and discount curves have an `(0,1)`
-anchor and are interpolated log-linearly in NYSE business-session DTE. There is
-no extrapolation. A typed-empty date is omitted, recorded in validation
-evidence, and the next return uses the preceding populated public row and its
-multi-session horizon. A half-day counts as one session.
+The previous date's positive forward and discount curves have an `(0,1)` anchor
+and are interpolated log-linearly in NYSE business-session DTE. There is no
+extrapolation. A typed-empty date is omitted, recorded in validation evidence,
+and the next return uses the preceding populated public row and its multi-session
+horizon. A half-day counts as one session. Cumulative multiplication of `1+r_t`
+reconstructs a normalized driftless spot path starting at one.
 
 ## Deliberate exclusions
 
-The exact recursive allowlist prevents pass-through. The Dataset has no
+The exact flat scalar allowlist prevents pass-through. The Dataset has no
 absolute spot, forward, strike, or price; no raw bid, ask, or midpoint; no
 ticker, security, option, contract, or vendor identifier; no volume, open
 interest, or liquidity diagnostic; no vendor implied volatility or Greek; and
-no stored per-book fitted price or implied volatility.
+no stored per-book fitted price. Book rows do store six model-derived Black
+IVs: SANOS and DLV fit IV plus synthetic fit-minus-half-spread and
+fit-plus-half-spread IVs. A non-identifiable synthetic bound is null. Custom
+configurations retaining a zero-time book store all six as null; the canonical
+public and DySANOS 1.1 configurations exclude every 0DTE book. These are not
+observed market or vendor IVs.
+
+Day rows store SANOS and DLV market-quality triples computed privately against
+the omitted source bid/ask: percentage of books outside, and conditional mean
+and median excess in market half-spreads. No per-book market excess or source
+quote is published.
 
 It supports normalized SANOS/DLV pricing and dynamics, model ATM volatility,
-daily-front normalized books, and spot-one spread experiments. It does not
+daily-front normalized books, and driftless spread experiments. It does not
 claim that smooth SANOS and the finite-DLV projection agree away from retained
 expiries. At retained expiries, approximation error is measured and reported
 inside inclusive NMS `[-3,2]`, without a maximum-error guarantee. It does not

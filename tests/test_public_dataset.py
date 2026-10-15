@@ -13,7 +13,6 @@ import numpy as np
 import polars as pl
 import pytest
 from click.testing import CliRunner
-from test_widb_build import _dataset_config, _locations, _publish_raw_inputs
 
 import sanos.datasets.internal as internal_dataset_module
 import sanos.datasets.public.publish as public_publish_module
@@ -49,8 +48,11 @@ from sanos.datasets.public import (
 )
 from sanos.datasets.public.documents import candidate_readme
 from sanos.datasets.public.project import (
+    _book_payload,
     _daily_front_mask,
+    _inflate_public_day,
     _log_curve_value,
+    _model_iv_fields,
     _source_carry_curve,
     _stored_dlv_squares,
 )
@@ -71,10 +73,19 @@ from sanos.widb.calendar import (
     count_business_days_between,
 )
 from sanos.widb.surface import discrete_dlv_pricer, smooth_sanos_pricer
+from tests.test_widb_build import _dataset_config, _locations, _publish_raw_inputs
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _public_days(frame: pl.DataFrame) -> list[dict[str, object]]:
+    dates = frame.filter(pl.col("record_kind") == "day")["trading_date"].to_list()
+    return [
+        _inflate_public_day(frame.filter(pl.col("trading_date") == trading_date))
+        for trading_date in dates
+    ]
 
 
 def _resign_files(artifact_path: Path, *relative_paths: str) -> None:
@@ -168,18 +179,55 @@ def test_public_configuration_is_strict_and_identity_sensitive() -> None:
     config = PublicProjectionConfig.from_document(document)
     assert PublicProjectionConfig.from_document(config.to_document()) == config
     original = plan_public_candidate(config).dataset_spec.artifact_id
+    experiment_document = json.loads(
+        (
+            Path(__file__).parents[1]
+            / "configs"
+            / "dysanos-daily-front-reference.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert experiment_document["experiment"]["source_dataset"]["artifact_id"] == original
     changed = replace(config, exclusion_tolerance=2.0e-4)
     assert plan_public_candidate(changed).dataset_spec.artifact_id != original
     assert plan_public_candidate(config).dataset_spec.artifact_id == original
+    assert config.excluded_business_dtes == (0.0, 0.2)
+    include_zero = replace(config, excluded_business_dtes=(0.2,))
+    assert plan_public_candidate(include_zero).dataset_spec.artifact_id != original
 
     malformed = json.loads(json.dumps(document))
     malformed["machine_path"] = "/private/data"
     with pytest.raises(ValueError, match="only 'public_dataset'"):
         PublicProjectionConfig.from_document(malformed)
+
     malformed = json.loads(json.dumps(document))
     malformed["public_dataset"]["european_only"] = 1
     with pytest.raises(ValueError, match="booleans"):
         PublicProjectionConfig.from_document(malformed)
+
+    for field, legacy_value in (
+        ("return_convention", "previous-retained-log-carry-v1"),
+        ("unit_convention", "discounted-forward-over-spot-v1"),
+    ):
+        malformed = json.loads(json.dumps(document))
+        malformed["public_dataset"][field] = legacy_value
+        with pytest.raises(ValueError, match="Unsupported public"):
+            PublicProjectionConfig.from_document(malformed)
+
+
+def test_zero_time_public_book_has_six_null_model_ivs() -> None:
+    fields = {
+        **_model_iv_fields("sanos", 1.0, 0.0, 0.01, 0.0),
+        **_model_iv_fields("dlv", 1.0, 0.0, 0.01, 0.0),
+    }
+    assert set(fields) == {
+        "sanos_fit_annual_iv",
+        "sanos_synthetic_bid_annual_iv",
+        "sanos_synthetic_ask_annual_iv",
+        "dlv_fit_annual_iv",
+        "dlv_synthetic_bid_annual_iv",
+        "dlv_synthetic_ask_annual_iv",
+    }
+    assert all(value is None for value in fields.values())
 
 
 def test_candidate_build_validate_and_output_first_isolation(
@@ -202,9 +250,9 @@ def test_candidate_build_validate_and_output_first_isolation(
     assert built.path.joinpath("data.parquet").is_file()
     frame = open_public_dataset(ArtifactStore(locations), built.artifact).load()
     assert frame.schema == public_polars_schema()
-    assert frame.get_column("forward_adjusted_spot_return").null_count() == 1
-    assert frame.item(0, "forward_adjusted_spot_return") is None
-    assert frame.item(1, "forward_adjusted_spot_return") < 0.0
+    days = _public_days(frame)
+    assert days[0]["driftless_spot_return"] is None
+    assert days[1]["driftless_spot_return"] < 0.0
     source_dataset = open_internal_dataset(ArtifactStore(locations), source.artifact)
     previous_day = source_dataset.load_day(date(2024, 1, 3))
     current_day = source_dataset.load_day(date(2024, 1, 4))
@@ -216,30 +264,90 @@ def test_candidate_build_validate_and_output_first_isolation(
     )
     previous_spot = float(previous_day.get_column("spot_reference").item(0))
     carry_at_one_session = (previous_forward / previous_spot) ** (1.0 / business_dte)
+    discount_at_one_session = float(
+        previous_day.get_column("discount_factor").drop_nulls().unique().item()
+    ) ** (1.0 / business_dte)
     expected_return = (
         float(current_day.get_column("spot_reference").item(0))
         / float(previous_day.get_column("spot_reference").item(0))
-    ) / carry_at_one_session - 1.0
-    assert frame.item(1, "forward_adjusted_spot_return") == pytest.approx(
+    ) * discount_at_one_session / carry_at_one_session - 1.0
+    assert days[1]["driftless_spot_return"] == pytest.approx(
         expected_return,
         abs=1.0e-14,
     )
-    expiry = frame.item(0, "expiries")[0]
-    assert expiry["discounted_forward_over_spot"] == pytest.approx(
-        float(previous_day.get_column("discount_factor").item(0))
-        * float(previous_day.get_column("spot_normalized_implied_forward").item(0)),
-        abs=1.0e-14,
+    assert "discounted_forward_over_spot" not in frame.columns
+    assert all(not isinstance(dtype, pl.List | pl.Struct) for dtype in frame.dtypes)
+    assert set(frame["record_kind"]) == {
+        "day", "expiry", "book", "smooth_node", "dlv_node"
+    }
+    first_public = days[0]
+    first_book = first_public["books"][0]
+    first_expiry = first_public["expiries"][first_book["expiry_index"]]
+    source_book = previous_day.filter(
+        (pl.col("expiry_date") == first_expiry["expiry_date"])
+        & (pl.col("expiry_is_am") == first_expiry["is_am"])
+        & (pl.col("normalized_strike") == first_book["normalized_strike"])
     )
-    assert frame.columns == [
-        "trading_date",
-        "is_half_day",
-        "forward_adjusted_spot_return",
-        "nms_epsilon_atm_annual_volatility",
-        "expiries",
-        "books",
-        "smooth_sanos",
-        "discrete_dlv",
-    ]
+    assert source_book.height == 1
+    side = "call" if first_book["is_call"] else "put"
+    expected_half_spread = 0.5 * (
+        float(source_book[f"pure_market_{side}_ask"].item())
+        - float(source_book[f"pure_market_{side}_bid"].item())
+    )
+    assert first_book["half_spread"] == pytest.approx(expected_half_spread, abs=0.0)
+    assert first_book["sanos_fit_annual_iv"] > 0.0
+    assert first_book["dlv_fit_annual_iv"] > 0.0
+    assert all(
+        first_book[field] is None or first_book[field] > 0.0
+        for field in (
+            "sanos_fit_annual_iv",
+            "sanos_synthetic_bid_annual_iv",
+            "sanos_synthetic_ask_annual_iv",
+            "dlv_fit_annual_iv",
+            "dlv_synthetic_bid_annual_iv",
+            "dlv_synthetic_ask_annual_iv",
+        )
+    )
+    public_sanos, *_ = _state_pricer(
+        first_public["smooth_sanos"], first_public["expiries"], smooth=True
+    )
+    public_dlv, *_ = _state_pricer(
+        first_public["discrete_dlv"], first_public["expiries"], smooth=False
+    )
+    source_excesses = {"sanos": [], "dlv": []}
+    for book in first_public["books"]:
+        expiry = first_public["expiries"][book["expiry_index"]]
+        source_row = previous_day.filter(
+            (pl.col("expiry_date") == expiry["expiry_date"])
+            & (pl.col("expiry_is_am") == expiry["is_am"])
+            & (pl.col("normalized_strike") == book["normalized_strike"])
+        )
+        side = "call" if book["is_call"] else "put"
+        bid = float(source_row[f"pure_market_{side}_bid"].item())
+        ask = float(source_row[f"pure_market_{side}_ask"].item())
+        for label, pricer in (("sanos", public_sanos), ("dlv", public_dlv)):
+            call = float(
+                pricer(
+                    expiry["time_to_expiry_years"],
+                    np.asarray([book["normalized_strike"]]),
+                )[0]
+            )
+            model = call if book["is_call"] else call - 1.0 + book["normalized_strike"]
+            source_excesses[label].append(
+                (max(model - ask, 0.0) + max(bid - model, 0.0))
+                / book["half_spread"]
+            )
+    for label, excesses in source_excesses.items():
+        positive = [value for value in excesses if value > 0.0]
+        assert first_public[f"{label}_market_percent_books_outside"] == pytest.approx(
+            100.0 * len(positive) / len(excesses), abs=0.0
+        )
+        assert first_public[
+            f"{label}_market_conditional_mean_excess_halfspreads"
+        ] == pytest.approx(float(np.mean(positive)) if positive else 0.0, abs=0.0)
+        assert first_public[
+            f"{label}_market_conditional_median_excess_halfspreads"
+        ] == pytest.approx(float(np.median(positive)) if positive else 0.0, abs=0.0)
     assert built.path.joinpath("capabilities.json").read_text(encoding="utf-8") == (
         json.dumps(public_capabilities(), sort_keys=True, separators=(",", ":")) + "\n"
     )
@@ -318,12 +426,13 @@ def test_recursive_allowlist_rejects_unexpected_or_nonfinite_fields(
     config = _config(source)
     built = build_public_candidate(locations, config)
     frame = open_public_dataset(ArtifactStore(locations), built.artifact).load()
-    with pytest.raises(PublicDatasetValidationError, match="recursive schema changed"):
+    with pytest.raises(PublicDatasetValidationError, match="flat scalar schema changed"):
         validate_public_frame(frame.with_columns(pl.lit(None).alias("spot")), config)
     corrupted = frame.with_columns(
-        pl.lit(float("inf"), dtype=pl.Float64).alias(
-            "nms_epsilon_atm_annual_volatility"
-        )
+        pl.when(pl.col("record_kind") == "day")
+        .then(pl.lit(float("inf"), dtype=pl.Float64))
+        .otherwise(pl.col("nms_epsilon_atm_annual_volatility"))
+        .alias("nms_epsilon_atm_annual_volatility")
     )
     with pytest.raises(PublicDatasetValidationError, match="non-finite"):
         validate_public_frame(corrupted, config)
@@ -342,7 +451,7 @@ def test_public_validation_requires_complete_expiries_and_canonical_dlv_grid(
     config = _config(source)
     built = build_public_candidate(locations, config)
     frame = open_public_dataset(ArtifactStore(locations), built.artifact).load()
-    row = frame.row(0, named=True)
+    row = _public_days(frame)[0]
 
     extra_expiry_row = copy.deepcopy(row)
     last = extra_expiry_row["expiries"][-1]
@@ -359,14 +468,13 @@ def test_public_validation_requires_complete_expiries_and_canonical_dlv_grid(
             "time_to_expiry_years": business_dte / business_clock_policy()[0],
         }
     )
-    extra_expiry = pl.DataFrame(
-        [extra_expiry_row], schema=public_polars_schema(), strict=True
-    )
+    from sanos.datasets.public.project import _flatten_public_day
+
     with pytest.raises(
-        PublicDatasetValidationError,
-        match="cover every retained expiry exactly",
+        PublicProjectionError,
+        match="does not cover expiry",
     ):
-        validate_public_frame(extra_expiry, config)
+        _flatten_public_day(extra_expiry_row)
 
     smooth, *_ = _state_pricer(row["smooth_sanos"], row["expiries"], smooth=True)
     discrete, *_ = _state_pricer(
@@ -543,7 +651,7 @@ def test_trading_session_half_day_is_distinct_from_expiry_settlement(
         ),
     )
     candidate = build_public_candidate(locations, _config(source))
-    row = open_public_dataset(store, candidate.artifact).load().row(0, named=True)
+    row = _public_days(open_public_dataset(store, candidate.artifact).load())[0]
     assert row["is_half_day"] is True
     assert all(expiry["is_am"] is False for expiry in row["expiries"])
 
@@ -561,7 +669,7 @@ def test_semantic_validation_rejects_resigned_parquet_corruption(
     result = build_public_candidate(locations, _config(source))
     data_path = result.path / "data.parquet"
     frame = pl.read_parquet(data_path, hive_partitioning=False).with_columns(
-        pl.lit(0.0, dtype=pl.Float64).alias("forward_adjusted_spot_return")
+        pl.lit(0.0, dtype=pl.Float64).alias("driftless_spot_return")
     )
     frame.write_parquet(data_path, compression="zstd", compression_level=3, statistics=True)
 
@@ -593,12 +701,29 @@ def test_resigned_finite_return_mutation_is_bound_to_projection_evidence(
     result = build_public_candidate(locations, _config(source))
     data_path = result.path / "data.parquet"
     frame = pl.read_parquet(data_path, hive_partitioning=False)
-    frame[1, "forward_adjusted_spot_return"] = 42.0
+    day_indices = frame.with_row_index().filter(pl.col("record_kind") == "day")["index"]
+    frame[int(day_indices[1]), "driftless_spot_return"] = 42.0
     frame.write_parquet(data_path, compression="zstd", compression_level=3, statistics=True)
     _resign_files(result.path, "data.parquet")
 
     with pytest.raises(PublicDatasetValidationError, match="return vector"):
         validate_public_dataset(ArtifactStore(locations), result.artifact)
+
+
+@pytest.mark.parametrize("invalid_return", [-1.0, -1.000001])
+def test_public_semantics_reject_nonpositive_driftless_path_increment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_return: float,
+) -> None:
+    locations, source = _publish_source(tmp_path, monkeypatch)
+    config = _config(source)
+    result = build_public_candidate(locations, config)
+    frame = open_public_dataset(ArtifactStore(locations), result.artifact).load()
+    day_indices = frame.with_row_index().filter(pl.col("record_kind") == "day")["index"]
+    frame[int(day_indices[1]), "driftless_spot_return"] = invalid_return
+    with pytest.raises(PublicDatasetValidationError, match="greater than -1"):
+        validate_public_frame(frame, config)
 
 
 def test_resigned_fabricated_omission_is_rejected_by_identity_policy(
@@ -658,7 +783,7 @@ def test_extra_checksummed_payload_is_rejected(
         validate_public_dataset(ArtifactStore(locations), result.artifact)
 
 
-def test_deep_validation_reprojects_source_bound_bridge(
+def test_deep_validation_reprojects_source_bound_half_spread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -672,12 +797,14 @@ def test_deep_validation_reprojects_source_bound_bridge(
     data_path = result.path / "data.parquet"
     frame = pl.read_parquet(data_path, hive_partitioning=False)
     frame = frame.with_columns(
-        pl.col("expiries").list.eval(
-            pl.element().struct.with_fields(
-                (
-                    pl.element().struct.field("discounted_forward_over_spot") * 2.0
-                ).alias("discounted_forward_over_spot")
-            )
+        pl.when(pl.col("record_kind") == "day")
+        .then(pl.lit(value, dtype=pl.Float64))
+        .otherwise(pl.col(column))
+        .alias(column)
+        for column, value in (
+            ("sanos_market_percent_books_outside", 99.9),
+            ("sanos_market_conditional_mean_excess_halfspreads", 1.234),
+            ("sanos_market_conditional_median_excess_halfspreads", 1.345),
         )
     )
     frame.write_parquet(data_path, compression="zstd", compression_level=3, statistics=True)
@@ -764,9 +891,13 @@ def test_daily_front_boundary_mask_and_clock_endpoints() -> None:
         False,
     ]
     assert not _daily_front_mask(business_dte=70.0001, **common).any()
+    assert not _daily_front_mask(business_dte=0.0, **common).any()
     assert not _daily_front_mask(business_dte=0.2, **common).any()
     assert not _daily_front_mask(business_dte=0.20009, **common).any()
     assert _daily_front_mask(business_dte=0.20011, **common).any()
+    include_zero = dict(common)
+    include_zero["config"] = replace(config, excluded_business_dtes=(0.2,))
+    assert _daily_front_mask(business_dte=0.0, **include_zero).any()
     inactive = dict(common)
     inactive["active"] = np.zeros(5, dtype=bool)
     assert not _daily_front_mask(business_dte=10.0, **inactive).any()
@@ -779,6 +910,93 @@ def test_daily_front_boundary_mask_and_clock_endpoints() -> None:
     nonfinite = dict(common)
     nonfinite["smooth_fit"] = np.full(5, np.nan)
     assert not _daily_front_mask(business_dte=10.0, **nonfinite).any()
+
+
+def test_public_book_projection_excludes_zero_dte_but_preserves_later_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pl.DataFrame(
+        {
+            "options_filter_eligible": [True, True],
+            "expiry_id": [202401030, 202401100],
+            "time_to_expiry_years": [0.0, 1.0 / 252.0],
+            "normalized_strike": [1.0, 1.0],
+            "call_active": [True, True],
+            "put_active": [True, True],
+            "is_american": [False, False],
+            "smooth_mid_available": [True, True],
+            "smooth_call_mid": [0.01, 0.02],
+            "smooth_put_mid": [0.01, 0.02],
+            "pure_market_call_bid": [0.005, 0.015],
+            "pure_market_call_ask": [0.015, 0.025],
+            "pure_market_put_bid": [0.005, 0.015],
+            "pure_market_put_ask": [0.015, 0.025],
+        }
+    )
+    records = (
+        {"expiry_id": 202401030, "business_dte": 0.0, "time_to_expiry_years": 0.0},
+        {
+            "expiry_id": 202401100,
+            "business_dte": 1.0,
+            "time_to_expiry_years": 1.0 / 252.0,
+        },
+    )
+
+    class _Pricer:
+        def __call__(self, _time: float, strikes: np.ndarray) -> np.ndarray:
+            return np.full(strikes.shape, 0.02, dtype=np.float64)
+
+    monkeypatch.setattr(
+        "sanos.datasets.public.project._atm_volatility",
+        lambda _time, _pricer: np.asarray(0.2),
+    )
+    books, _ = _book_payload(
+        frame,
+        expiry_records=records,
+        public_index_by_expiry_id={202401030: 0, 202401100: 1},
+        surface_pricer=_Pricer(),  # type: ignore[arg-type]
+        dlv_pricer=_Pricer(),  # type: ignore[arg-type]
+        epsilon_atm_vol=0.2,
+        config=PublicProjectionConfig(
+            name="zero-dte-filter",
+            source_dataset=PublicProjectionConfig.from_document(
+                json.loads(
+                    (
+                        Path(__file__).parents[1]
+                        / "configs"
+                        / "sanos-public-candidate-reference.json"
+                    ).read_text(encoding="utf-8")
+                )
+            ).source_dataset,
+            coverage_start_date=date(2024, 1, 3),
+            coverage_end_date=date(2024, 1, 3),
+        ),
+    )
+    assert books and {book["expiry_index"] for book in books} == {1}
+
+    with pytest.raises(PublicProjectionError, match="no public daily-front books"):
+        _book_payload(
+            frame.filter(pl.col("expiry_id") == 202401030),
+            expiry_records=records[:1],
+            public_index_by_expiry_id={202401030: 0},
+            surface_pricer=_Pricer(),  # type: ignore[arg-type]
+            dlv_pricer=_Pricer(),  # type: ignore[arg-type]
+            epsilon_atm_vol=0.2,
+            config=PublicProjectionConfig(
+                name="only-zero-dte",
+                source_dataset=PublicProjectionConfig.from_document(
+                    json.loads(
+                        (
+                            Path(__file__).parents[1]
+                            / "configs"
+                            / "sanos-public-candidate-reference.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                ).source_dataset,
+                coverage_start_date=date(2024, 1, 3),
+                coverage_end_date=date(2024, 1, 3),
+            ),
+        )
 
 
 def test_carry_curve_uses_non_model_source_nodes() -> None:
@@ -846,8 +1064,8 @@ def test_approved_release_is_distinct_reprojected_and_output_first(
     release_frame = release_dataset.load().with_columns(
         pl.when(pl.col("trading_date") == pl.col("trading_date").max())
         .then(pl.lit(42.0))
-        .otherwise(pl.col("forward_adjusted_spot_return"))
-        .alias("forward_adjusted_spot_return")
+        .otherwise(pl.col("driftless_spot_return"))
+        .alias("driftless_spot_return")
     )
     release_frame.write_parquet(
         released.path / "data.parquet",
@@ -890,13 +1108,13 @@ def test_approved_release_is_distinct_reprojected_and_output_first(
 
 
 def test_public_validation_version_dependencies_are_exact() -> None:
-    assert str(_state_pricer.version).startswith("1.1 ")
+    assert str(_state_pricer.version).startswith("2.0 ")
     assert str(_validate_smooth_dlv_projection.version).startswith("1.2 ")
-    assert str(public_schema_document.version).startswith("2.1 ")
-    assert str(public_capabilities.version) == "2.1"
-    assert str(validate_public_frame.version).startswith("1.1 ")
-    assert str(public_validation_document.version).startswith("1.1 ")
-    assert str(candidate_readme.version).startswith("1.2 ")
+    assert str(public_schema_document.version).startswith("3.0 ")
+    assert str(public_capabilities.version) == "3.0"
+    assert str(validate_public_frame.version).startswith("2.1 ")
+    assert str(public_validation_document.version).startswith("2.0 ")
+    assert str(candidate_readme.version).startswith("2.0 ")
     payload_dependencies = set(dict(validate_public_payload.version.dependencies[1]))
     assert payload_dependencies == {
         "DistributionStatus",
@@ -1141,7 +1359,10 @@ def test_typed_empty_gap_uses_previous_published_date_and_two_sessions(
     )
     candidate = build_public_candidate(locations, config)
     frame = open_public_dataset(store, candidate.artifact).load()
-    assert frame["trading_date"].to_list() == [date(2025, 1, 7), date(2025, 1, 10)]
+    days = _public_days(frame)
+    assert [row["trading_date"] for row in days] == [
+        date(2025, 1, 7), date(2025, 1, 10)
+    ]
     evidence = json.loads(
         candidate.path.joinpath("validation.json").read_text(encoding="utf-8")
     )
@@ -1161,11 +1382,14 @@ def test_typed_empty_gap_uses_previous_published_date_and_two_sessions(
         float(previous["implied_forward"].drop_nulls().unique().item())
         / float(previous["spot_reference"].item(0))
     ) ** (2.0 / dte)
+    discount = float(previous["discount_factor"].drop_nulls().unique().item()) ** (
+        2.0 / dte
+    )
     expected = (
         float(current["spot_reference"].item(0))
         / float(previous["spot_reference"].item(0))
-    ) / carry - 1.0
-    assert frame[1, "forward_adjusted_spot_return"] == pytest.approx(expected)
+    ) * discount / carry - 1.0
+    assert days[1]["driftless_spot_return"] == pytest.approx(expected)
 
 
 def test_public_state_reconstructs_source_pricers_across_cd014_boundaries(
@@ -1179,9 +1403,9 @@ def test_public_state_reconstructs_source_pricers_across_cd014_boundaries(
         end=date(2024, 1, 3),
     )
     candidate = build_public_candidate(locations, _config(source))
-    public_row = open_public_dataset(ArtifactStore(locations), candidate.artifact).load().row(
-        0, named=True
-    )
+    public_row = _public_days(
+        open_public_dataset(ArtifactStore(locations), candidate.artifact).load()
+    )[0]
     internal_frame = open_internal_dataset(
         ArtifactStore(locations), source.artifact
     ).load_day(date(2024, 1, 3))
@@ -1305,7 +1529,13 @@ def test_duplicate_public_book_key_is_rejected(
     candidate = build_public_candidate(locations, config)
     frame = open_public_dataset(ArtifactStore(locations), candidate.artifact).load()
     rows = frame.to_dicts()
-    rows[0]["books"].insert(1, dict(rows[0]["books"][0]))
+    first_book = next(index for index, row in enumerate(rows) if row["record_kind"] == "book")
+    duplicate = dict(rows[first_book])
+    for row in rows[first_book:]:
+        if row["record_kind"] == "book" and row["expiry_index"] == duplicate["expiry_index"]:
+            row["book_index"] += 1
+    duplicate["book_index"] = 0
+    rows.insert(first_book, duplicate)
     corrupted = pl.DataFrame(rows, schema=public_polars_schema(), strict=True)
     with pytest.raises(PublicDatasetValidationError, match="duplicate"):
         validate_public_frame(corrupted, config)

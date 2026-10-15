@@ -43,6 +43,35 @@
 - Keep CLI behavior stable and scriptable. Commands must have meaningful exit
   codes, non-interactive defaults, `--help`, and actionable error messages.
 
+## Model namespace
+
+- SANOS is the preprocessing, surface-fitting, and Dataset-producing layer.
+  Learned, statistical, hedging, and other downstream research models belong
+  below the plural `sanos.models` namespace, with one self-contained package
+  per retained model.
+- DySANOS 1.1 lives under `sanos.models.dysanos`. It owns its public-Dataset
+  adapter, disposable HDF5 materialization, differentiable decoder, objective,
+  initialization, dynamics, training, validation, artifacts, and CLI. Do not
+  recreate the legacy `dysanos.flex` research forest or a generic Python
+  `experiments` namespace around this single concrete model.
+- A future retained model becomes a sibling of `dysanos`; it must declare its
+  own Dataset capabilities, configuration identity, CLI, artifacts, and tests.
+  Treat every model package as independently authored and self-contained. Do
+  not create shared model implementation infrastructure merely because two
+  packages perform similar work. Share only narrow, stable repository-level
+  contracts (for example artifact pointers or Dataset interfaces) when model
+  authors explicitly choose to depend on them; keep model algorithms,
+  configuration, training, persistence, and CLI orchestration within each
+  model package.
+- The Experiment lifecycle name remains the fourth storage class. It describes
+  disposable model-specific artifacts and does not imply a generic source-code
+  package or framework.
+- A model may produce a chain of immutable Experiment artifacts when each has a
+  useful independent lifecycle. DySANOS uses one public-derived HDF5 Experiment
+  and one trained-model Experiment whose sole upstream is that HDF5 artifact;
+  shallow validation remains output-first and deep validation follows the
+  chain to the Dataset.
+
 ## Data lifecycle terminology
 
 Use exactly these four storage classes in code, configuration, CLI help, and
@@ -91,21 +120,35 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   columns and must not include raw bids, asks, mid prices, spot levels, volumes,
   open interest, option identifiers or symbols, vendor Greeks, vendor implied
   volatilities, security identifiers, or other unapproved source fields.
-- The intended public SANOS research projection has one Polars row per trading
-  day and may use typed list/struct columns. It contains only:
+- The intended public SANOS research projection is one canonically ordered,
+  tagged long-form Polars frame with scalar columns only. Its `day`, `expiry`,
+  `book`, `smooth_node`, and `dlv_node` rows contain only:
 
   - date and trading-session half-day indicator;
-  - forward-adjusted spot return into the date;
+  - discounted driftless spot return into the date;
   - the complete smooth SANOS parameter state and its interpreting geometry;
   - the complete unsmoothed/discrete DLV parameter state and its interpreting
     geometry;
-  - normalized strike, expiry association, call/put side, and spot-normalized
-    half-spread for every listed book surviving the declared filter;
+  - normalized strike, expiry association, call/put side, and driftless
+    half-spread in `C/(DF*F)` units for every listed book surviving the declared
+    filter;
+  - six model-derived per-book Black IVs: SANOS and DLV fit IV plus synthetic
+    fit-minus-half-spread and fit-plus-half-spread IVs; all six are null when
+    model time is zero or the corresponding bound is not identifiable;
+  - SANOS and DLV daily market-quality triples derived privately from the
+    omitted market quotes: percentage of books outside and conditional mean
+    and median excess measured in market half-spreads;
   - expiry date, business/calendar DTE as defined by the schema, and AM/PM
     settlement indicator for every retained expiry.
 
+  Model-derived IVs are not vendor or observed-market IVs. Do not publish
+  source quotes, per-book market excesses, vendor IVs, or vendor Greeks.
+  Canonical public and DySANOS 1.1 book populations exclude both zero-business-
+  day PM expiries and the 0.2-business-day AM node; expiry geometry and complete
+  model state remain published even when that expiry contributes no books.
+
 - Do not include an absolute spot level in the public projection. SANOS/DLV
-  states, normalized strikes and spreads, and forward-adjusted returns contain
+  states, normalized strikes and spreads, and driftless returns contain
   the information needed by the advertised normalized experiments. Consumers
   needing an absolute spot series must join an independently sourced series.
 - Keep the trading-session half-day indicator distinct from an option expiry's
@@ -113,6 +156,11 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 - Define every normalization convention precisely in the schema and README,
   including whether strike and price fields are in spot, forward, or discounted
   forward units.
+- Convert private bids and asks into driftless `C/(DF*F)` units before the
+  public boundary. SANOS/DLV prices and public half-spreads then share one
+  coordinate system. Do not publish or later reconstruct a forward/spot unit
+  bridge; private carry may be used only while computing the published
+  driftless return.
 - Record capability flags in the public manifest. The intended projection
   supports normalized SANOS/DLV dynamics and normalized spread experiments but
   does not claim to reproduce exact vendor books, quote-containment tests,
@@ -269,7 +317,7 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   - `sanos intermediate build`
   - `sanos dataset build`
   - `sanos dataset validate`
-  - `sanos experiment build`
+  - `sanos dysanos build` (with `sanos experiment build` as a temporary alias)
   - `sanos status`
 
 - Raw download commands must support explicit source/ticker/date selection,
@@ -322,6 +370,11 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 ## Testing and documentation
 
 - Tests run offline by default and must never contact WRDS implicitly.
+- Every test must protect a relevant contract, numerical invariant, regression,
+  or user-visible workflow. Keep tests concise and pertinent; do not add cases
+  merely to increase test counts or nominal coverage. Prefer compact
+  parameterization and shared focused fixtures over repetitive scenarios, and
+  remove redundant tests once a stronger test fully subsumes them.
 - Maintain small stored or synthetic fixtures for unit and integration tests.
   Put live WRDS checks behind an explicit marker and command.
 - Test configuration identity, schema validation, cache reuse, interrupted-run
