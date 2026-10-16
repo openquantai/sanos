@@ -103,11 +103,12 @@ c - p = 1 - k
 
 For every expiry, the unsmoothed state retains normalized strikes `k_i` and
 density masses `q_i` with non-negative mass, `sum(q_i) = 1`, and
-`sum(k_i q_i) = 1`. It must contain model time increments, interior squared-DLV
-values, boundary convention, and enough grid geometry to invert DLV to density.
-The smooth SANOS state uses the same density support and the reference Black
-mixture. The existing production smoothing fraction is `0.25`; this is distinct
-from `overnight_variance_fraction=0.2`.
+`sum(k_i q_i) = 1`. It must contain the exact retained expiry chain,
+total-variance geometry, ordered common support, density masses, and interpreting
+mappings. Squared-DLV coefficients are optional derived quantities, not
+mandatory persisted state. The smooth SANOS state is an independent fit using
+the reference Black mixture. The existing production smoothing fraction is
+`0.25`; this is distinct from `overnight_variance_fraction=0.2`.
 
 These equations, current tolerances, filter ordering, and solver behavior are
 the starting contract. Tests compare invariant prices as well as parameters;
@@ -440,6 +441,13 @@ self-describing Polars frame.
 Acceptance: per-stage row/expiry counts and numerical values match reference
 fixtures within declared tolerances; all no-arbitrage invariants hold; restart
 after a deliberately interrupted multi-day build succeeds.
+
+CD-034 removes the historical post-SANOS finite-DLV projection from the current
+contract. The initial full no-arbitrage common-surface support/density state is
+the unsmoothed DLV model and is serialized exactly alongside independent smooth
+SANOS. No squared-DLV field or SANOS/DLV price equality is required. Fresh
+fitted artifacts are authoritative; no exact historical-artifact exception is
+retained.
 
 ### Phase 7 — Internal dataset assembly and publication
 

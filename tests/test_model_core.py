@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import cvxpy as cp
@@ -24,8 +25,16 @@ from sanos.model import (
     solve_sanos_tridiagonal,
 )
 from sanos.model.backbone import BackboneNumpy
+from sanos.model.tools import _highs_failure_details
 
 FIXTURE = Path(__file__).parent / "fixtures" / "reference_numerics_v1.json"
+
+
+@pytest.mark.parametrize("cache", [None, [], {"HIGHS": ()}, {"HIGHS": (None, None, None)}])
+def test_solver_failure_diagnostics_tolerate_unsupported_cache(cache: Any) -> None:
+    problem = cp.Problem(cp.Minimize(0))
+    problem._solver_cache = cache
+    assert _highs_failure_details(problem) == ""
 
 
 def _reference_inputs() -> tuple[
@@ -139,9 +148,7 @@ def test_density_dlv_round_trip_and_call_invariants_on_unequal_grids() -> None:
     )
     assert prices[0] == pytest.approx(1.0, abs=1.0e-12)
     assert prices[-1] == pytest.approx(0.0, abs=1.0e-12)
-    assert (prices[1] - prices[0]) / (query[1] - query[0]) == pytest.approx(
-        -1.0, abs=1.0e-12
-    )
+    assert (prices[1] - prices[0]) / (query[1] - query[0]) == pytest.approx(-1.0, abs=1.0e-12)
     assert np.all(prices >= np.maximum(1.0 - query, 0.0) - 1.0e-12)
     assert np.all(prices <= 1.0 + 1.0e-12)
     assert np.all(np.diff(prices) <= 1.0e-12)
@@ -381,9 +388,9 @@ def test_strict_fitter_rejects_solver_fallback(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_strict_fitter_configures_all_highs_feasibility_tolerances() -> None:
-    solver, options = fitter_module._StrictSanosLPSolver(
-        kkt_tolerance=1.0e-10
-    )._lp_solver_settings(for_expiry=False, is_fallback=False)
+    solver, options = fitter_module._StrictSanosLPSolver(kkt_tolerance=1.0e-10)._lp_solver_settings(
+        for_expiry=False, is_fallback=False
+    )
     assert solver == "HIGHS"
     highs_options = options["highs_options"]
     for name in (
@@ -403,9 +410,7 @@ def test_fitter_applies_optional_per_node_price_bounds() -> None:
             dtype=np.float64,
         )
     ]
-    supports = [
-        np.asarray([0.5, 0.9, 1.0, 1.1, 1.5], dtype=np.float64)
-    ]
+    supports = [np.asarray([0.5, 0.9, 1.0, 1.1, 1.5], dtype=np.float64)]
     bounds = [(mids[0] - 1.0e-6, mids[0] + 1.0e-6)]
     fitted = SanosFitter(smoothness=None, timeout_seconds=20.0)(
         expiry,
@@ -505,9 +510,7 @@ def test_arbfree_surface_contains_quotes_and_preserves_geometry() -> None:
     assert np.all(calls[1] >= calls[0] - 1.0e-7)
 
     restored = ArbFreePricer.from_dict(result.to_dict())
-    restored_calls = np.asarray(
-        restored.price(expiries[:, None], query[None, :], mode="surface")
-    )
+    restored_calls = np.asarray(restored.price(expiries[:, None], query[None, :], mode="surface"))
     np.testing.assert_allclose(restored_calls, calls, rtol=0.0, atol=0.0)
     assert restored.to_dict().keys() == result.to_dict().keys()
 
@@ -544,9 +547,7 @@ def test_lp_solver_diagnostics_are_numerically_neutral() -> None:
             objective=variable,
             constraints=[variable >= 1.0],
             variables=[(variable, np.asarray(0.0))],
-            diagnostic_sink=(
-                None if events is None else lambda event: events.append(dict(event))
-            ),
+            diagnostic_sink=(None if events is None else lambda event: events.append(dict(event))),
             verbose=cast(Any, Context).quiet,
         )
         assert success
@@ -584,10 +585,7 @@ def test_lp_solver_forced_primary_failure_uses_fallback(
     assert success
     assert status in {"optimal", "optimal_inaccurate"}
     assert fell_back
-    assert [
-        (event["solver"], event["status"], event["is_fallback"])
-        for event in events
-    ] == [
+    assert [(event["solver"], event["status"], event["is_fallback"]) for event in events] == [
         ("HIGHS", "solver_error", False),
         ("CLARABEL", status, True),
     ]
@@ -618,10 +616,7 @@ def test_lp_solver_forced_primary_user_limit_uses_fallback(
     assert success
     assert status in {"optimal", "optimal_inaccurate"}
     assert fell_back
-    assert [
-        (event["solver"], event["status"], event["is_fallback"])
-        for event in events
-    ] == [
+    assert [(event["solver"], event["status"], event["is_fallback"]) for event in events] == [
         ("HIGHS", "user_limit", False),
         ("CLARABEL", status, True),
     ]
@@ -635,13 +630,22 @@ def test_lp_solver_smooth_policy_uses_ipm_before_clarabel(
     def reject_simplex(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
         highs = kwargs.get("highs_options", {})
         if kwargs.get("solver") == "HIGHS" and highs.get("solver") == "simplex":
+            problem._solver_cache["HIGHS"] = (
+                None,
+                None,
+                {
+                    "model_status": "kUnknown",
+                    "run_time": 1.5,
+                    "info": SimpleNamespace(max_primal_infeasibility=0.25),
+                },
+            )
             raise ValueError("Cannot unpack invalid solution")
         return original_solve(problem, *args, **kwargs)
 
     monkeypatch.setattr(cp.Problem, "solve", reject_simplex)
     variable = cp.Variable()
     events: list[dict[str, object]] = []
-    with pytest.warns(UserWarning, match="ipm fallback solver"):
+    with pytest.warns(UserWarning, match="ipm fallback solver") as caught:
         success, status, fell_back = SanosLPSolver(
             timeout_seconds=10.0,
             fallback_algorithms=("ipm", "clarabel"),
@@ -653,6 +657,8 @@ def test_lp_solver_smooth_policy_uses_ipm_before_clarabel(
             verbose=cast(Any, Context).quiet,
         )
     assert success and fell_back
+    assert "kUnknown" in str(caught[0].message)
+    assert "max_primal_infeasibility" in str(caught[0].message)
     assert status in {"optimal", "optimal_inaccurate"}
     assert [(event["solver"], event["algorithm"], event["status"]) for event in events] == [
         ("HIGHS", "simplex", "invalid_solution"),
@@ -726,10 +732,7 @@ def test_lp_solver_terminal_user_limit_is_reported(
     assert not success
     assert status == "user_limit"
     assert fell_back
-    assert [
-        (event["solver"], event["status"], event["is_fallback"])
-        for event in events
-    ] == [
+    assert [(event["solver"], event["status"], event["is_fallback"]) for event in events] == [
         ("HIGHS", "user_limit", False),
         ("CLARABEL", "user_limit", True),
     ]
@@ -757,9 +760,7 @@ def test_lp_solver_direct_clarabel_user_limit_is_terminal(
         verbose=cast(Any, Context).quiet,
     )
     assert (success, status, fell_back) == (False, "user_limit", False)
-    assert [(event["solver"], event["is_fallback"]) for event in events] == [
-        ("CLARABEL", False)
-    ]
+    assert [(event["solver"], event["is_fallback"]) for event in events] == [("CLARABEL", False)]
 
 
 def test_lp_solver_direct_clarabel_error_is_not_retried(
@@ -785,9 +786,7 @@ def test_lp_solver_direct_clarabel_error_is_not_retried(
             verbose=cast(Any, Context).quiet,
         )
     assert calls == 1
-    assert [(event["solver"], event["is_fallback"]) for event in events] == [
-        ("CLARABEL", False)
-    ]
+    assert [(event["solver"], event["is_fallback"]) for event in events] == [("CLARABEL", False)]
 
 
 def test_lp_solver_terminal_unexpected_error_is_reported(
@@ -817,10 +816,7 @@ def test_lp_solver_terminal_unexpected_error_is_reported(
             diagnostic_sink=lambda event: events.append(dict(event)),
             verbose=cast(Any, Context).quiet,
         )
-    assert [
-        (event["solver"], event["status"], event["is_fallback"])
-        for event in events
-    ] == [
+    assert [(event["solver"], event["status"], event["is_fallback"]) for event in events] == [
         ("HIGHS", "solver_error", False),
         ("CLARABEL", "unexpected_error", True),
     ]

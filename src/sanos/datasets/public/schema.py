@@ -7,10 +7,10 @@ from typing import Any, Final, cast
 import polars as pl
 from cdxcore.version import version
 
-PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-flat-v3"
-PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v4"
-PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v4"
-PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v5"
+PUBLIC_DATASET_SCHEMA_VERSION: Final = "sanos-public-flat-v4"
+PUBLIC_SCHEMA_DOCUMENT_VERSION: Final = "sanos-public-schema-document-v5"
+PUBLIC_CAPABILITIES_VERSION: Final = "sanos-public-capabilities-v5"
+PUBLIC_VALIDATION_VERSION: Final = "sanos-public-validation-v6"
 
 PUBLIC_RECORD_KINDS: Final = (
     "day",
@@ -21,7 +21,7 @@ PUBLIC_RECORD_KINDS: Final = (
 )
 
 
-@version("sanos-public-flat-polars-schema-v3")
+@version("sanos-public-flat-polars-schema-v4")
 def public_polars_schema() -> pl.Schema:
     """Return the only accepted flat public Parquet schema.
 
@@ -66,12 +66,11 @@ def public_polars_schema() -> pl.Schema:
             "input_total_variance": pl.Float64,
             "normalized_support": pl.Float64,
             "density_mass": pl.Float64,
-            "squared_dlv": pl.Float64,
         }
     )
 
 
-@version("3.0", dependencies=[public_polars_schema])
+@version("4.0", dependencies=[public_polars_schema])
 def public_schema_document() -> dict[str, Any]:
     """Return the human- and machine-readable immutable schema contract."""
 
@@ -111,7 +110,6 @@ def public_schema_document() -> dict[str, Any]:
         "input_total_variance": "Float64 dlv-node-only, repeated within expiry",
         "normalized_support": "Float64 model-node-only",
         "density_mass": "Float64 model-node-only",
-        "squared_dlv": "Float64 dlv-node-only",
     }
     return {
         "schema": PUBLIC_SCHEMA_DOCUMENT_VERSION,
@@ -152,7 +150,6 @@ def public_schema_document() -> dict[str, Any]:
             "half_spread": "(pure_ask-pure_bid)/2 in C/(DF*F)",
             "book_implied_volatility": "annualized Black volatility",
             "market_excess": "outside-market distance divided by market half-spread",
-            "squared_dlv": "annualized 1/year with exact zero boundaries",
             "model_time": "NYSE business sessions/252",
         },
         "return": {
@@ -174,17 +171,19 @@ def public_schema_document() -> dict[str, Any]:
             "after_last_expiry": "final fitted density",
             "put_call_parity": "p=c-1+k",
             "state_mode": "common surface",
-            "dlv_source": "finite projection of the completed smooth SANOS surface",
-            "dlv_projection_scope": (
-                "retained expiries and inclusive normalized-moneyness domain [-3,2]"
+            "dlv_source": "initial full no-arbitrage common surface",
+            "model_expiry_populations": (
+                "DLV is the complete union geometry; smooth SANOS is a subset"
             ),
-            "dlv_projection_fit_quality": "measured, not guaranteed",
-            "arbitrary_time_smooth_dlv_equivalence": False,
+            "calendar_call_validation": (
+                "full later-state support with conservative sanctioned producer "
+                "maximum tolerance 5e-5; deep validation owns exact solver provenance"
+            ),
         },
     }
 
 
-@version("3.0")
+@version("4.0")
 def public_capabilities() -> dict[str, bool | str]:
     """Return the closed advertised capability and non-capability object."""
 
@@ -195,10 +194,9 @@ def public_capabilities() -> dict[str, bool | str]:
             "integrated_contract": "DySANOS 1.1",
             "flat_scalar_polars": True,
             "normalized_smooth_sanos_pricing": True,
-            "normalized_discrete_dlv_pricing": True,
-            "discrete_dlv_projection_scope": "retained-expiries-inclusive-nms-[-3,2]",
-            "discrete_dlv_projection_fit_quality": "measured-not-guaranteed",
-            "arbitrary_time_smooth_dlv_equivalence": False,
+            "normalized_dlv_pricing": True,
+            "independent_model_expiry_populations": True,
+            "complete_initial_dlv_expiry_chain": True,
             "model_atm_implied_volatility": True,
             "daily_front_normalized_books": True,
             "driftless_spread_experiments": True,

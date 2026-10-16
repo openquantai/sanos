@@ -90,6 +90,23 @@ def _with_second_expiry(frame: pl.DataFrame) -> pl.DataFrame:
     return pl.concat((frame, expiry, books, smooth, dlv), how="vertical")
 
 
+def _with_dlv_only_second_expiry(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add union geometry and DLV state without adding smooth state or books."""
+
+    expiry = frame.filter(pl.col("record_kind") == "expiry").with_columns(
+        pl.lit(1, dtype=pl.Int32).alias("expiry_index"),
+        (pl.col("expiry_date") + pl.duration(days=7)).alias("expiry_date"),
+        (2.0 * pl.col("business_dte")).alias("business_dte"),
+        (pl.col("calendar_dte") + 7).alias("calendar_dte"),
+        (2.0 * pl.col("time_to_expiry_years")).alias("time_to_expiry_years"),
+    )
+    dlv = frame.filter(pl.col("record_kind") == "dlv_node").with_columns(
+        pl.lit(1, dtype=pl.Int32).alias("expiry_index"),
+        (2.0 * pl.col("input_total_variance")).alias("input_total_variance"),
+    )
+    return pl.concat((frame, expiry, dlv), how="vertical")
+
+
 def test_public_fit_and_half_spread_are_authoritative(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -122,6 +139,35 @@ def test_public_fit_and_half_spread_are_authoritative(
         rtol=0.0,
         atol=1.0e-14,
     )
+
+
+def test_dlv_only_expiry_does_not_change_daily_front_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locations, _, public = _publish_public(tmp_path, monkeypatch)
+    config = _config(public.artifact)
+    frame = _first_day_frame(locations, public)
+    baseline = project_daily_front(
+        frame,
+        ticker=config.ticker,
+        source_dataset=public.artifact,
+        market=config.market,
+        geometry=config.geometry,
+    )
+    expanded = project_daily_front(
+        _with_dlv_only_second_expiry(frame),
+        ticker=config.ticker,
+        source_dataset=public.artifact,
+        market=config.market,
+        geometry=config.geometry,
+    )
+    assert expanded.expiry_count == baseline.expiry_count
+    np.testing.assert_array_equal(expanded.quote_expiry_index, baseline.quote_expiry_index)
+    np.testing.assert_array_equal(expanded.quote_is_call, baseline.quote_is_call)
+    np.testing.assert_array_equal(expanded.quote_strike, baseline.quote_strike)
+    np.testing.assert_array_equal(expanded.quote_fit, baseline.quote_fit)
+    np.testing.assert_array_equal(expanded.quote_half_spread, baseline.quote_half_spread)
 
 
 def test_negative_synthetic_bid_is_not_clipped(

@@ -35,10 +35,10 @@ from sanos.reference.compare import (
 
 EXPERIMENT_REFERENCE_REPORT_SCHEMA = "sanos-legacy-experiment-comparison-v1"
 PHASE11_EXPERIMENT_ARTIFACT_ID = (
-    "b920d2c75975d1bdecb8c16a4e0f6eb4f9b9030c6353be446215b9d9c518e5b5"
+    "62a9a20f5973b1c023a979e72cfbca2e36e9094d13329d8676ba56a25c8f6b71"
 )
 PHASE11_DATASET_ARTIFACT_ID = (
-    "d09a55ee4806916f0fc355f56c76401e9e21de09cfb6de99d5630e59439f1fc1"
+    "30e5076785be164cac5e677d43f2270cce5fd8ced7bbc7cf270d11e8c3c7a4e5"
 )
 PHASE11_DATASET_NAMESPACE = (
     "sanos/public-candidate/name-sanos-spx-2022-2025-public-candidate"

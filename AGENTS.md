@@ -28,6 +28,14 @@
 - Keep generated data, caches, datasets, experiment files, logs, and temporary
   artifacts outside the Git working tree. Under a shared temporary directory,
   place all SANOS files below a project-specific `sanos/` directory.
+- Keep source, configuration, tests, documentation, paper sources, and
+  deliberately retained project artifacts in Git. A generated result may enter
+  Git only when it is intentionally retained and its provenance is clear.
+- Every non-cached training, evaluation, or simulation run must use its own
+  uniquely identified directory below `QUANT_DATA_EXPERIMENTS`. Deterministic
+  artifact-store paths must be keyed by their complete artifact identity.
+  Concurrent users, agents, and linked Git worktrees must never share a mutable
+  run directory.
 
 ## Human-operable software
 
@@ -287,16 +295,16 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   dataset must never be silently reconstructed or replaced under the same
   identity.
 
-## Finite-DLV fit and restart policy
+## DLV source and restart policy
 
-- Fit the bounded discrete-DLV projection with the configured call-price and
-  conditioned-IV bands first. Retry without only those fit-quality bands if the
-  authenticated HiGHS result is `infeasible`/`infeasible_inaccurate`, or if a
-  nominally successful result fails the post-solve check of those same bands.
-- The fallback keeps the identical support, density, martingale, calendar, and
-  DLV-bound constraints and uses the uniform-L1 objective. A timeout, solver
-  error, unbounded status, malformed event, or structural validation failure is
-  fatal and never authorizes a relaxed solve.
+- Publish the existing initial full no-arbitrage surface as the unsmoothed
+  DLV model, preserving its ordered support and probability masses. SANOS is
+  the independent smooth fit. Their prices need not agree.
+- Do not fit a fourth, SANOS-to-DLV projection. Remove its fit-quality bands,
+  bounded projection configuration, and strict-to-L1 fallback machinery.
+- Sparse support can make nodewise squared-DLV coefficients non-identifiable.
+  Preserve the exact support/density state for pricing; never invent finite
+  coefficients by clipping, flooring, or refitting the surface.
 - Treat a successfully published fitted-day artifact as immutable completed
   work. A resumed range skips it; failure or fallback on another date does not
   authorize refitting it.
@@ -314,8 +322,8 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 - Only the smooth-SANOS stage uses the ordered fallback chain HiGHS IPM then
   CLARABEL, and only after `solver_error`, the recognized `invalid_solution`,
   or `user_limit`. Authenticated infeasible/unbounded statuses and unexpected
-  runtime errors remain fatal. Initial no-arbitrage and discrete-DLV stages
-  retain their existing solver policies.
+  runtime errors remain fatal. Initial no-arbitrage retains its existing
+  solver policy.
 - Record every attempted solver and algorithm in order. HiGHS simplex and IPM
   use the `1e-7` calendar gate; CLARABEL uses its status-dependent feasibility
   gate. The configured timeout applies separately to each attempt.

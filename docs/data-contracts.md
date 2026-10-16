@@ -115,8 +115,8 @@ columns include:
 
 - ordered model expiry times and settlement geometry;
 - normalized strike support for every expiry;
-- canonical finite-DLV density masses and squared-DLV values, including
-  boundaries and model time increments;
+- canonical initial full no-arbitrage support and density masses, retained
+  expiry chain, total-variance geometry, and mappings;
 - smooth SANOS parameters/density state and separately named smoothing-kernel
   input total variances; and
 - solver status, objective, tolerances, quote-containment and failure
@@ -137,11 +137,11 @@ The minimum exact reconstructing state is not a generic parameter blob:
   `xix_to_mix` so the per-expiry support is not confused with the surface
   support. Each mass vector is non-negative, sums to one, and has normalized
   first moment one within the versioned numerical tolerances.
-- Discrete DLV mode records its own ordered normalized `xstrikes`, probability
-  masses `xdensities`, and annualized squared-DLV values in `1/year` on the
-  interior strikes. A full-support encoding is allowed only with explicit zero
-  values at both boundaries. The time step for the first expiry is measured
-  from zero and later steps from the preceding model expiry.
+- Unsmoothed DLV mode records the initial full no-arbitrage surface's ordered
+  common normalized supports and probability masses, exact retained expiry
+  chain, total variances, and interpreting mappings. Squared-DLV coefficients
+  are optional derived values and are not required because a zero-mass node can
+  have no finite coefficient.
 
 The legacy pricing rule is part of the state contract. For `t < ONE_MINUTE`, a
 call is intrinsic, `max(1-k, 0)`. For every positive query before the first
@@ -235,31 +235,19 @@ Business DTE validation replays the producer's operation order exactly:
 Float32 integer session count, Float64 configurable AM subtraction, clipping,
 then one final Float32 cast. This matters at the front AM expiry and is fixed
 by CD-028.
-It then fits the CD-023 canonical finite-DLV projection to the completed smooth
-surface at the same retained expiries. The projection has 200 inner nodes over
-inclusive source-smooth NMS `[-3,2]`, one exact ATM node, support boundaries at
-0.5 times the lower and 1.5 times the upper inner strike, and a uniform price
-objective. One deterministic anchor row per retained expiry stores its state.
-Its DLV rows are geometry-and-bound-scaled and use the configured `1e-10`
-strict-solver feasibility target. The first solve imposes a `9e-5` fitted-node
-call-error cap and, where source Black vega divided by `sqrt(T)` is at least
-`0.05`, the exact Black-price band for an annual-IV move of at most `0.005`.
-If HiGHS reports that strict problem as infeasible, or a nominally successful
-result fails the post-solve check of those same bands, a second solve removes
-only those fit-quality bands and returns the uniform-L1 closest fit. The solver
-mode, fallback reason, and every breached fit-quality threshold are persisted.
-A `1e-8` support-mass floor and `1e-5` solver-only inset
-from each DLV bound keep the persisted inverse well-conditioned without
-post-fit clipping. Canonical DLV serialization and stabilization use wider
-NumPy precision but persist Float64; validation separately proves the ordinary
-Float64 consumer decoder recovers density and off-grid calls within `1e-12`.
-These numerical settings are part of projection identity and do not alter the
-solver policy of the preceding fits.
+The canonical unsmoothed DLV state is the preceding initial full no-arbitrage
+common surface, not a projection of the smooth fit. Its exact retained expiry
+chain, total variances, common supports, probability masses, and per-expiry
+mappings remain in the daily frame. Validation does not compress zero-density
+nodes, change fitted prices, or require finite squared-DLV coefficients.
+Smooth SANOS is fitted independently after OptionsFilter, and no price-equality
+constraint links the two models.
+
 Real books are represented in `C/(DF*F)` units. Solver events record stage,
 solver, status, fallback and objective; elapsed time remains in the run journal
-rather than deterministic frame content. A failed solver or projection gate
-publishes no terminal artifact.
-
+rather than deterministic frame content. A failed initial or smooth surface
+solve publishes no terminal fitted artifact. `user_limit` records a solver
+resource limit and does not alone prove whether time or iterations exhausted.
 All three artifacts keep one Polars frame per day. Model support and density
 vectors are typed list columns repeated within an expiry; Parquet compression
 avoids a separate state table while every rejected input row remains auditable.
@@ -271,9 +259,9 @@ strike.
 
 The internal WIDB dataset is curated, validated and immutable. It normally uses
 partitioned Parquet (ticker/year/date) and includes the nearly complete filtered
-option history, all eligibility masks, expiry geometry, no-arbitrage results,
-smooth SANOS state, canonical finite-DLV projection, fitted values and
-diagnostics. A
+option history, all eligibility masks, expiry geometry, the initial full
+no-arbitrage support/density DLV state, independent smooth SANOS state, fitted
+values and diagnostics. A
 published identity contains:
 
 - `README.md` with coverage, fields, units, sources, exclusions and exact CLI
@@ -304,7 +292,7 @@ flat layout, retained-date policy, driftless units, and return formula:
 | expiry | expiry date, business DTE, calendar DTE, expiry `is_am`, model time, and model-derived ATM volatility |
 | book | `expiry_index`, call/put side, `normalized_strike = K/F`, driftless `half_spread = (ask-bid)/2` in `C/(DF*F)` units for every book surviving the exact daily-front filter below |
 | smooth SANOS | complete smooth parameter/density state, supports, expiry/time increments and separately named smoothing input variances |
-| discrete DLV | complete CD-023 finite projection density and squared-DLV state, supports, boundaries and expiry/time increments |
+| unsmoothed DLV | complete initial full no-arbitrage common-surface support and probability-mass state, retained expiry chain, total-variance geometry and mappings; squared DLV is not required |
 
 The flat-v3 public book population defines the daily-front
 reference. For
@@ -360,9 +348,8 @@ deep validation additionally reprojects from the internal source to prove the
 private-input CD-030 return and CD-029 driftless-book calculations.
 
 Capability flags may advertise normalized SANOS/DLV dynamics and normalized
-spread experiments. Smooth-to-DLV approximation error is measured and reported
-only at retained expiries on the inclusive `[-3,2]` NMS projection domain; no
-maximum-error or arbitrary-time equivalence guarantee is made. They
+spread experiments. Smooth SANOS and unsmoothed DLV are independent market
+fits; no cross-model price equality or projection-error guarantee is made. They
 explicitly do not advertise vendor-book
 reconstruction, quote-containment replay, liquidity models, absolute-dollar
 tick effects or contract-level trading replay. Public validation runs all

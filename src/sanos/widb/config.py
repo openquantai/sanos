@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from cdxcore.version import version
 
@@ -225,128 +225,12 @@ class SmoothSanosConfig:
             raise ValueError("smoothness must be strictly greater than 0.01")
 
 
-@version("1.0", dependencies=[_finite])
-@dataclass(frozen=True, slots=True)
-class DlvProjectionTolerances:
-    """Strict acceptance limits for the canonical discrete-DLV projection."""
-
-    density_mass_abs: float = 1.0e-10
-    density_moment_abs: float = 1.0e-10
-    density_inverse_max_abs: float = 1.0e-12
-    call_inverse_max_abs: float = 1.0e-12
-    dlv_fixed_point_max_abs: float = 1.0e-9
-    dlv_bound_abs: float = 1.0e-9
-    projection_call_max_abs: float = 1.0e-4
-    atm_annual_iv_max_abs: float = 1.0e-4
-    conditioned_annual_iv_max_abs: float = 5.0e-3
-    conditioned_annual_iv_p99_abs: float = 1.0e-3
-
-    def __post_init__(self) -> None:
-        for name in self.__dataclass_fields__:
-            value = getattr(self, name)
-            _finite(name, value)
-            if value <= 0.0:
-                raise ValueError(f"{name} must be positive")
-
-
-@version("1.4", dependencies=[_finite, DlvProjectionTolerances])
-@dataclass(frozen=True, slots=True)
-class DiscreteDlvConfig:
-    """Canonical daily-front DLV projection of the smooth SANOS surface.
-
-    The projection is deliberately a second representation of the completed
-    smooth SANOS state. It is not the initial no-arbitrage audit surface and it
-    is not an independent calibration to vendor books.
-    """
-
-    nms_range: tuple[float, float] = (-3.0, 2.0)
-    inner_nodes: int = 200
-    lower_support_multiplier: float = 0.5
-    upper_support_multiplier: float = 1.5
-    objective_weighting: Literal["uniform"] = "uniform"
-    min_dlv: float = 0.01
-    max_dlv: float = 3.0
-    constraint_dlv_buffer: float = 1.0e-5
-    density_mass_floor: float = 1.0e-8
-    min_density_vol: float | None = 1.0e-4
-    min_density_cap: float | None = 1.0e-5
-    solver_timeout_seconds: float = 300.0
-    solver_kkt_tolerance: float = 1.0e-10
-    fit_call_max_abs: float = 9.0e-5
-    allow_solver_epsilon_warnings: bool = True
-    conditioned_iv_vega_sqrt_floor: float = 5.0e-2
-    tolerances: DlvProjectionTolerances = DlvProjectionTolerances()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.nms_range, tuple) or len(self.nms_range) != 2:
-            raise ValueError("nms_range must be a two-element tuple")
-        lower, upper = self.nms_range
-        _finite("nms_range[0]", lower)
-        _finite("nms_range[1]", upper)
-        if not lower < 0.0 < upper:
-            raise ValueError("nms_range must straddle zero")
-        if isinstance(self.inner_nodes, bool) or not isinstance(self.inner_nodes, int):
-            raise ValueError("inner_nodes must be an integer")
-        if self.inner_nodes < 5:
-            raise ValueError("inner_nodes must be at least five")
-        for name in (
-            "lower_support_multiplier",
-            "upper_support_multiplier",
-            "min_dlv",
-            "max_dlv",
-            "constraint_dlv_buffer",
-            "density_mass_floor",
-            "solver_timeout_seconds",
-            "solver_kkt_tolerance",
-            "fit_call_max_abs",
-            "conditioned_iv_vega_sqrt_floor",
-        ):
-            _finite(name, getattr(self, name))
-        if not 0.0 < self.lower_support_multiplier < 1.0:
-            raise ValueError("lower_support_multiplier must lie in (0, 1)")
-        if self.upper_support_multiplier <= 1.0:
-            raise ValueError("upper_support_multiplier must exceed one")
-        if self.min_dlv <= 0.0 or self.max_dlv <= self.min_dlv:
-            raise ValueError("DLV bounds must satisfy 0 < min_dlv < max_dlv")
-        if (
-            self.constraint_dlv_buffer <= 0.0
-            or 2.0 * self.constraint_dlv_buffer >= self.max_dlv - self.min_dlv
-        ):
-            raise ValueError("constraint_dlv_buffer must fit strictly inside DLV bounds")
-        if not 0.0 < self.density_mass_floor < 1.0 / (self.inner_nodes + 2):
-            raise ValueError("density_mass_floor must leave free probability mass")
-        if self.solver_timeout_seconds <= 0.0:
-            raise ValueError("solver_timeout_seconds must be positive")
-        if not 1.0e-10 <= self.solver_kkt_tolerance <= 1.0e-4:
-            raise ValueError("solver_kkt_tolerance must lie in [1e-10, 1e-4]")
-        if not isinstance(self.tolerances, DlvProjectionTolerances):
-            raise TypeError("tolerances must be DlvProjectionTolerances")
-        if not 0.0 < self.fit_call_max_abs <= self.tolerances.projection_call_max_abs:
-            raise ValueError(
-                "fit_call_max_abs must be positive and no greater than the "
-                "projection-call acceptance tolerance"
-            )
-        if self.conditioned_iv_vega_sqrt_floor <= 0.0:
-            raise ValueError("conditioned_iv_vega_sqrt_floor must be positive")
-        for name in ("min_density_vol", "min_density_cap"):
-            value = getattr(self, name)
-            if value is not None:
-                _finite(name, value)
-                if value <= 0.0:
-                    raise ValueError(f"{name} must be positive or null")
-        if self.objective_weighting != "uniform":
-            raise ValueError("Only the reference-faithful uniform objective is supported")
-        if not isinstance(self.allow_solver_epsilon_warnings, bool):
-            raise ValueError("allow_solver_epsilon_warnings must be a boolean")
-
-
 @version(
-    "2.0",
+    "3.0",
     dependencies=[
         OptionsFilterConfig,
         NoArbitrageConfig,
         SmoothSanosConfig,
-        DiscreteDlvConfig,
     ],
 )
 @dataclass(frozen=True, slots=True)
@@ -356,7 +240,6 @@ class DailySurfaceConfig:
     options_filter: OptionsFilterConfig = OptionsFilterConfig()
     no_arbitrage: NoArbitrageConfig = NoArbitrageConfig()
     smooth_sanos: SmoothSanosConfig = SmoothSanosConfig()
-    discrete_dlv: DiscreteDlvConfig = DiscreteDlvConfig()
 
     def __post_init__(self) -> None:
         if not self.options_filter.normalize:
@@ -366,21 +249,19 @@ class DailySurfaceConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> DailySurfaceConfig:
         """Parse a strict portable mapping without accepting unknown fields."""
 
-        allowed = {"options_filter", "no_arbitrage", "smooth_sanos", "discrete_dlv"}
+        allowed = {"options_filter", "no_arbitrage", "smooth_sanos"}
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(f"Unknown daily surface configuration keys: {sorted(unknown)}")
         filter_value = value.get("options_filter", {})
         no_arb_value = value.get("no_arbitrage", {})
         smooth_value = value.get("smooth_sanos", {})
-        dlv_value = value.get("discrete_dlv", {})
         if not all(
             isinstance(item, Mapping)
-            for item in (filter_value, no_arb_value, smooth_value, dlv_value)
+            for item in (filter_value, no_arb_value, smooth_value)
         ):
             raise ValueError(
-                "options_filter, no_arbitrage, smooth_sanos, and discrete_dlv values "
-                "must be mappings"
+                "options_filter, no_arbitrage, and smooth_sanos values must be mappings"
             )
         filter_payload = dict(filter_value)
         if "max_nms" in filter_payload:
@@ -388,23 +269,11 @@ class DailySurfaceConfig:
             if not isinstance(max_nms, list | tuple) or len(max_nms) != 2:
                 raise ValueError("options_filter.max_nms must contain exactly two values")
             filter_payload["max_nms"] = tuple(max_nms)
-        dlv_payload = dict(dlv_value)
-        if "nms_range" in dlv_payload:
-            nms_range = dlv_payload["nms_range"]
-            if not isinstance(nms_range, list | tuple) or len(nms_range) != 2:
-                raise ValueError("discrete_dlv.nms_range must contain exactly two values")
-            dlv_payload["nms_range"] = tuple(nms_range)
-        if "tolerances" in dlv_payload:
-            tolerance_payload = dlv_payload["tolerances"]
-            if not isinstance(tolerance_payload, Mapping):
-                raise ValueError("discrete_dlv.tolerances must be a mapping")
-            dlv_payload["tolerances"] = DlvProjectionTolerances(**dict(tolerance_payload))
         try:
             return cls(
                 options_filter=OptionsFilterConfig(**filter_payload),
                 no_arbitrage=NoArbitrageConfig(**dict(no_arb_value)),
                 smooth_sanos=SmoothSanosConfig(**dict(smooth_value)),
-                discrete_dlv=DiscreteDlvConfig(**dlv_payload),
             )
         except TypeError as exc:
             raise ValueError(f"Invalid daily surface configuration field: {exc}") from exc
@@ -414,8 +283,6 @@ __all__ = [
     "ClockConfig",
     "DailySurfaceConfig",
     "DailyWidbConfig",
-    "DiscreteDlvConfig",
-    "DlvProjectionTolerances",
     "ExpiryEnrichmentConfig",
     "NoArbitrageConfig",
     "OptionsFilterConfig",

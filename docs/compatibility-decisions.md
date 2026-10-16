@@ -672,6 +672,34 @@ both accepted it. Only `approved` may alter reference behavior.
   producer identity changes and canonical fitted artifacts must be rebuilt
   consistently; Raw and pre-fit Intermediate artifacts remain reusable.
 
+## CD-034 — Initial full surface is the canonical unsmoothed DLV model
+
+- **Status:** approved by the repository owner on 2026-10-16; supersedes the
+  post-SANOS projection treatments in CD-021 and CD-023. Those entries remain
+  as historical records and are not selectable compatibility modes.
+- **Evidence:** the initial full no-arbitrage fit already is the discrete,
+  jointly calendar-consistent unsmoothed model fitted to market books. The
+  later finite-DLV projection instead approximated the independent smooth
+  SANOS fit, introduced infeasible accuracy/bound combinations, and made DLV
+  availability depend on an unnecessary second optimization. Some valid
+  initial states contain zero-mass nodes with positive call-time increments,
+  for which no finite squared-DLV coefficient exists.
+- **Treatment:** persist and publish the initial surface's exact retained expiry
+  chain, common ordered support, probability masses, total-variance geometry,
+  and mappings without compression, price correction, or refit. Validate mass,
+  martingale moment, strike shape, bounds, and full-support calendar order at
+  the authenticated terminal solver tolerance. Squared DLV is not mandatory.
+  Smooth SANOS remains the separate post-filter smooth model; its prices need
+  not equal DLV prices. Delete projection configuration, strict/L1 projection
+  solves, projection diagnostics, and the exact four-artifact historical reuse
+  exception. Fresh regeneration is authoritative.
+- **Expected impact:** fitted, internal, public, and DySANOS identities and
+  schemas change. The initial no-arbitrage and smooth SANOS numerical fits are
+  unchanged. Dates that failed only in the obsolete post-SANOS projection no
+  longer fail; a smooth-surface solver failure remains a genuine fitted-day
+  failure. A `user_limit` status identifies a solver resource limit but does
+  not by itself distinguish elapsed-time from iteration-limit exhaustion.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -683,4 +711,6 @@ scaffolding while those specific behavior points remain blocked. CD-004,
 CD-009 and CD-021 through CD-028 are resolved historical contracts; CD-029,
 CD-030, CD-031, and CD-032 supersede their public-unit/layout, return,
 zero-DTE population, and downstream-model organization portions respectively;
-CD-033 owns the smooth-surface runtime recovery policy.
+CD-033 owns the smooth-surface runtime recovery policy. CD-034 owns the
+canonical unsmoothed DLV state and supersedes all post-SANOS DLV projection
+contracts.

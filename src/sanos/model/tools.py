@@ -24,6 +24,35 @@ from sanos.model.constants import DAYS_PER_YEAR, ONE_MINUTE, one_minute_year_fra
 from sanos.model.tridiag import solve_sanos_tridiagonal
 
 
+@version("1.0")
+def _highs_failure_details(problem: cp.Problem) -> str:
+    """Describe a failed native solve without changing its acceptance policy."""
+
+    cache = getattr(problem, "_solver_cache", None)
+    if not isinstance(cache, Mapping):
+        return ""
+    cached = cache.get("HIGHS")
+    if not isinstance(cached, tuple) or len(cached) != 3:
+        return ""
+    result = cached[2]
+    if not isinstance(result, dict):
+        return ""
+    details = {name: result[name] for name in ("model_status", "run_time") if name in result}
+    info = result.get("info")
+    for name in (
+        "simplex_iteration_count",
+        "ipm_iteration_count",
+        "max_primal_infeasibility",
+        "max_dual_infeasibility",
+        "num_primal_infeasibilities",
+        "num_dual_infeasibilities",
+    ):
+        value = getattr(info, name, None)
+        if value is not None:
+            details[name] = value
+    return f" Native HiGHS diagnostics: {details}." if details else ""
+
+
 @dataclass(frozen=True)
 class SanosPricer:
     """
@@ -686,14 +715,12 @@ class SanosLPSolver:
         attempt_algorithm = (
             "clarabel"
             if is_fallback and _attempt_algorithm is None
-            else self.algorithm if _attempt_algorithm is None else _attempt_algorithm
+            else self.algorithm
+            if _attempt_algorithm is None
+            else _attempt_algorithm
         )
         remaining_fallbacks = (
-            (
-                ()
-                if is_fallback or attempt_algorithm == "clarabel"
-                else self.fallback_algorithms
-            )
+            (() if is_fallback or attempt_algorithm == "clarabel" else self.fallback_algorithms)
             if _remaining_fallbacks is None
             else _remaining_fallbacks
         )
@@ -755,6 +782,7 @@ class SanosLPSolver:
                     next_algorithm, *rest = remaining_fallbacks
                     warnings.warn(
                         f"{message()}{attempt_algorithm} solver error: {str(e)}. "
+                        f"{_highs_failure_details(prob)} "
                         f"Attempting {next_algorithm} fallback solver."
                     )
                     return self(
@@ -769,7 +797,9 @@ class SanosLPSolver:
                         diagnostic_sink=diagnostic_sink,
                         verbose=verbose,
                     )
-                raise type(e)(f"{message()}Solver error: {str(e)}.") from e
+                raise type(e)(
+                    f"{message()}Solver error: {str(e)}.{_highs_failure_details(prob)}"
+                ) from e
             except RuntimeWarning as e:
                 prob_status = f"overflow error ({str(e.__class__.__name__)})"
             except Exception as e:
@@ -779,6 +809,7 @@ class SanosLPSolver:
                     emit("invalid_solution")
                     warnings.warn(
                         f"{message()}{attempt_algorithm} returned an invalid solution. "
+                        f"{_highs_failure_details(prob)} "
                         f"Attempting {next_algorithm} fallback solver."
                     )
                     return self(
@@ -837,7 +868,9 @@ class SanosLPSolver:
         attempt_algorithm = (
             "clarabel"
             if is_fallback and attempt_algorithm is None
-            else self.algorithm if attempt_algorithm is None else attempt_algorithm
+            else self.algorithm
+            if attempt_algorithm is None
+            else attempt_algorithm
         )
         if attempt_algorithm != "clarabel":
             highs_options = {

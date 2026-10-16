@@ -43,8 +43,6 @@ from sanos.widb.bad import bad_data_policy, bad_day_reason
 from sanos.widb.build import (
     DailyArtifactPlan,
     IntermediateBuildRequest,
-    _daily_namespace,
-    _surface_artifact_configuration,
     build_intermediates,
     enriched_day_producer_version,
     filtered_day_producer_version,
@@ -56,7 +54,6 @@ from sanos.widb.build import (
 )
 from sanos.widb.calendar import (
     DAYS_PER_YEAR,
-    business_dates,
     count_business_days_between,
     half_days,
     is_half_day,
@@ -73,14 +70,7 @@ from sanos.widb.surface import (
     FITTED_SCHEMA_VERSION,
     NO_ARB_SCHEMA,
     SOLVER_TIMEOUT_SECONDS,
-    _canonical_discrete_dlv_densities,
-    _canonical_discrete_dlv_squares,
-    _discrete_dlv_grid,
-    _is_discrete_dlv_solver_event,
-    _strict_dlv_fit_rejections_are_valid,
-    _validate_discrete_dlv_projection,
     apply_options_filter,
-    discrete_dlv_pricer,
     fit_smooth_sanos,
     initial_no_arb_pricer,
     smooth_sanos_pricer,
@@ -88,13 +78,12 @@ from sanos.widb.surface import (
 from sanos.wrds import raw_content_producer_version
 
 RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
-INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v5"
+INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v6"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
-LINEAGE_SCHEMA = "sanos-internal-lineage-v2"
-VALIDATION_SCHEMA = "sanos-internal-validation-v6"
-DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v4"
+LINEAGE_SCHEMA = "sanos-internal-lineage-v3"
+VALIDATION_SCHEMA = "sanos-internal-validation-v7"
+DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v5"
 LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v4"
-REVIEWED_FITTED_REUSE_POLICY = "phase-11-reviewed-fitted-reuse-v1"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _PARTITION_PATH = re.compile(
@@ -272,7 +261,7 @@ class _TerminalSolverEvidence:
     terminal_solver_call: _SolverCall
 
 
-_SolverPolicy = Literal["legacy_two_tier", "smooth_three_tier", "no_fallback"]
+_SolverPolicy = Literal["legacy_two_tier", "smooth_three_tier"]
 
 
 @version("1.3", dependencies=[_SolverCall])
@@ -285,11 +274,7 @@ def _solver_calls(
     """Parse and validate the exact diagnostic event and fallback grammar."""
 
     expiry_stages = {"expiry_soft", "expiry_hard"}
-    allowed_stages = expiry_stages | {
-        "surface",
-        "discrete_dlv_strict",
-        "discrete_dlv_l1",
-    }
+    allowed_stages = expiry_stages | {"surface"}
     successful = {"optimal", "optimal_inaccurate"}
     retry_triggers = {"solver_error", "invalid_solution", "user_limit"}
     base_fields = {
@@ -337,7 +322,7 @@ def _solver_calls(
                     ("CLARABEL", "simplex", True),
                 }
             )
-        elif solver_policy != "no_fallback":
+        else:
             _fail(f"{label} diagnostics has an unknown solver policy")
         if solver_identity not in allowed_identities:
             _fail(f"{label} diagnostics {stage} has inconsistent solver identity")
@@ -433,14 +418,7 @@ def _solver_calls(
     return calls
 
 
-@version(
-    "5.5",
-    dependencies=[
-        _solver_calls,
-        _strict_dlv_fit_rejections_are_valid,
-        _TerminalSolverEvidence,
-    ],
-)
+@version("6.0", dependencies=[_solver_calls, _TerminalSolverEvidence])
 def _terminal_solver_events(
     value: Mapping[str, Any],
     label: str,
@@ -459,64 +437,7 @@ def _terminal_solver_events(
     successful = {"optimal", "optimal_inaccurate"}
     hard_fallback = successful | {"infeasible", "infeasible_inaccurate"}
 
-    if expected_expiry_indices is None:
-        calls = _solver_calls(events, label, solver_policy=solver_policy)
-        fit_mode = value.get("fit_mode")
-        fallback_reason = value.get("fallback_reason")
-        strict_fit_rejections = value.get("strict_fit_rejections")
-        if fallback_reason is None and strict_fit_rejections is None:
-            strict_fit_rejections = []
-            if fit_mode == "uniform_l1_fallback":
-                fallback_reason = "solver_infeasible"
-        if fallback_reason not in {None, "solver_infeasible", "strict_fit_quality"}:
-            _fail(f"{label} diagnostics has an invalid DLV fallback reason")
-        if not isinstance(strict_fit_rejections, list) or any(
-            not isinstance(item, str) or not item for item in strict_fit_rejections
-        ):
-            _fail(f"{label} diagnostics has invalid strict-fit rejections")
-        rejection_tuple = tuple(strict_fit_rejections)
-        if not _strict_dlv_fit_rejections_are_valid(rejection_tuple):
-            _fail(f"{label} diagnostics has unauthenticated strict-fit rejections")
-        strict_path = (
-            fit_mode == "strict_feasible"
-            and fallback_reason is None
-            and not strict_fit_rejections
-            and len(calls) == 1
-            and calls[0].stage == "discrete_dlv_strict"
-            and calls[0].terminal_status in successful
-        )
-        infeasible_l1_path = (
-            fit_mode == "uniform_l1_fallback"
-            and fallback_reason == "solver_infeasible"
-            and not strict_fit_rejections
-            and len(calls) == 2
-            and calls[0].stage == "discrete_dlv_strict"
-            and calls[0].terminal_status in {"infeasible", "infeasible_inaccurate"}
-            and calls[1].stage == "discrete_dlv_l1"
-            and calls[1].terminal_status in successful
-        )
-        quality_l1_path = (
-            fit_mode == "uniform_l1_fallback"
-            and fallback_reason == "strict_fit_quality"
-            and bool(strict_fit_rejections)
-            and len(calls) == 2
-            and calls[0].stage == "discrete_dlv_strict"
-            and calls[0].terminal_status in successful
-            and calls[1].stage == "discrete_dlv_l1"
-            and calls[1].terminal_status in successful
-        )
-        if not strict_path and not infeasible_l1_path and not quality_l1_path:
-            _fail(f"{label} diagnostics has an invalid discrete-DLV solver path")
-        if any(call.used_fallback for call in calls):
-            _fail(f"{label} diagnostics discrete-DLV solve used a solver fallback")
-        if retained_expiry_indices is not None:
-            _fail(f"{label} diagnostics received unexpected retained expiry indices")
-        return _TerminalSolverEvidence(
-            relaxed_support=frozenset(),
-            terminal_solver_call=calls[-1],
-        )
-
-    if retained_expiry_indices is None:
+    if expected_expiry_indices is None or retained_expiry_indices is None:
         _fail(f"{label} diagnostics has no retained-expiry contract")
 
     predicted_retained: list[int] = []
@@ -649,69 +570,6 @@ def _terminal_solver_events(
     )
 
 
-@version("1.1", dependencies=[_is_discrete_dlv_solver_event])
-def _normalize_discrete_dlv_diagnostics(
-    value: Mapping[str, Any],
-    label: str,
-) -> tuple[dict[str, Any], bool]:
-    """Normalize accepted historical DLV diagnostics to the current envelope."""
-
-    schema = value.get("schema")
-    if schema == "sanos-discrete-dlv-projection-diagnostics-v5":
-        return dict(value), False
-    if schema == "sanos-discrete-dlv-projection-diagnostics-v4":
-        if "fallback_reason" in value or "strict_fit_rejections" in value:
-            _fail(f"{label} v4 diagnostics contains v5 fields")
-        if value.get("outcome") == "no_smooth_state":
-            if set(value) != {"schema", "outcome", "source"}:
-                _fail(f"{label} v4 empty diagnostics fields changed")
-            normalized = dict(value)
-            normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v5"
-            return normalized, True
-        fit_mode = value.get("fit_mode")
-        if fit_mode not in {"strict_feasible", "uniform_l1_fallback"}:
-            _fail(f"{label} v4 diagnostics has an invalid fit mode")
-        normalized = dict(value)
-        normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v5"
-        normalized["fallback_reason"] = (
-            None if fit_mode == "strict_feasible" else "solver_infeasible"
-        )
-        normalized["strict_fit_rejections"] = []
-        return normalized, True
-    if schema != "sanos-discrete-dlv-projection-diagnostics-v3":
-        _fail(f"{label} diagnostics schema is unsupported")
-    if any(
-        field in value
-        for field in (
-            "fit_mode",
-            "fit_quality",
-            "fallback_reason",
-            "strict_fit_rejections",
-        )
-    ):
-        _fail(f"{label} legacy diagnostics contains post-policy fields")
-    events = value.get("solver_events")
-    if (
-        not isinstance(events, list)
-        or len(events) != 1
-        or not _is_discrete_dlv_solver_event(
-            events[0],
-            stage="discrete_dlv_surface",
-            statuses=frozenset({"optimal", "optimal_inaccurate"}),
-        )
-    ):
-        _fail(f"{label} legacy diagnostics has an invalid strict solver event")
-    normalized = dict(value)
-    normalized["schema"] = "sanos-discrete-dlv-projection-diagnostics-v5"
-    normalized["fit_mode"] = "strict_feasible"
-    normalized["fallback_reason"] = None
-    normalized["strict_fit_rejections"] = []
-    normalized["solver_events"] = [
-        {**cast(Mapping[str, Any], events[0]), "stage": "discrete_dlv_strict"}
-    ]
-    return normalized, True
-
-
 @version("1.0")
 def _expected_solver_expiry_indices(
     frame: pl.DataFrame,
@@ -754,12 +612,11 @@ def _validate_calendar_residual(
         _fail(f"{label} normalized calls violate calendar monotonicity")
 
 
-@version("1.2", dependencies=[_validate_calendar_residual])
+@version("2.0", dependencies=[_validate_calendar_residual])
 def _validate_pricer_state(
     pricer: Any,
     label: str,
     *,
-    check_dlvs: bool,
     calendar_tolerance: float = 1.0e-7,
 ) -> dict[str, float]:
     expiries = np.asarray(pricer.expiries, dtype=np.float64)
@@ -779,13 +636,12 @@ def _validate_pricer_state(
     mass_residual = 0.0
     moment_residual = 0.0
     minimum_density = float("inf")
-    dlvs = pricer.dlvsqs(on_all_strikes=True) if check_dlvs else [None] * len(expiries)
-    for index, (strikes, density, dlv_value) in enumerate(
-        zip(pricer.xstrikes, pricer.xdensities, dlvs, strict=True)
+    supports: list[np.ndarray[Any, Any]] = []
+    for index, (strikes, density) in enumerate(
+        zip(pricer.xstrikes, pricer.xdensities, strict=True)
     ):
         strikes = np.asarray(strikes, dtype=np.float64)
         density = np.asarray(density, dtype=np.float64)
-        dlv = None if dlv_value is None else np.asarray(dlv_value, dtype=np.float64)
         if (
             strikes.shape != density.shape
             or len(strikes) < 3
@@ -795,20 +651,10 @@ def _validate_pricer_state(
             or np.any(np.diff(strikes) <= 0.0)
         ):
             _fail(f"{label} expiry index {index} has invalid support/state geometry")
+        supports.append(strikes)
         minimum_density = min(minimum_density, float(np.min(density)))
         mass_residual = max(mass_residual, abs(float(np.sum(density)) - 1.0))
         moment_residual = max(moment_residual, abs(float(strikes @ density) - 1.0))
-        if dlv is not None and (
-            dlv.shape != strikes.shape
-            or np.any(~np.isfinite(dlv))
-            or np.any(dlv[1:-1] < 0.0)
-            or dlv[0] != 0.0
-            or dlv[-1] != 0.0
-        ):
-            _fail(
-                f"{label} expiry index {index} has invalid squared-DLV "
-                "boundaries/interior"
-            )
     if minimum_density < -1.0e-7:
         _fail(f"{label} minimum density is {minimum_density}")
     if mass_residual > 1.0e-4 or moment_residual > 1.0e-4:
@@ -842,6 +688,22 @@ def _validate_pricer_state(
                 float(np.max(np.maximum(previous_calls - calls, 0.0))),
             )
         previous_calls = calls
+    for index in range(1, len(expiries)):
+        support = np.union1d(supports[index - 1], supports[index])
+        previous_support_calls = np.asarray(
+            pricer(expiries[index - 1], support), dtype=np.float64
+        )
+        current_support_calls = np.asarray(
+            pricer(expiries[index], support), dtype=np.float64
+        )
+        calendar_residual = max(
+            calendar_residual,
+            float(
+                np.max(
+                    np.maximum(previous_support_calls - current_support_calls, 0.0)
+                )
+            ),
+        )
     if strike_shape_residual > 1.0e-7:
         _fail(f"{label} normalized calls violate decreasing/convex strike shape")
     if bounds_residual > 1.0e-7:
@@ -2007,14 +1869,13 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
 
 
 @version(
-    "4.7",
+    "5.0",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
         _reason_counts,
         _expected_solver_expiry_indices,
         _terminal_solver_events,
-        _normalize_discrete_dlv_diagnostics,
         _max_abs,
         _validate_pricer_state,
         _validate_calendar_residual,
@@ -2031,16 +1892,11 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _masked_quote_band_residual,
         _validate_initial_fit_quote_contract,
         _validate_fitted_numeric_finiteness,
-        _canonical_discrete_dlv_densities,
-        _canonical_discrete_dlv_squares,
-        _discrete_dlv_grid,
-        _validate_discrete_dlv_projection,
         bad_data_policy,
         bad_day_reason,
         count_business_days_between,
         is_half_day,
         apply_options_filter,
-        discrete_dlv_pricer,
         fit_smooth_sanos,
         initial_no_arb_pricer,
         smooth_sanos_pricer,
@@ -2053,7 +1909,6 @@ def validate_fitted_partition(
     trading_date: date,
     typed_empty_reason: str | None,
     expected_raw_options_artifact_id: str | None = None,
-    accepted_stage_version_sha256: str | None = None,
 ) -> PartitionStatistics:
     """Recompute population, unit, mask, state, and solver invariants for one day."""
 
@@ -2126,7 +1981,6 @@ def validate_fitted_partition(
         "no_arb_diagnostics_json",
         "filter_diagnostics_json",
         "smooth_diagnostics_json",
-        "discrete_dlv_diagnostics_json",
     )
     for column in daily_constant_columns:
         if frame.get_column(column).n_unique() != 1:
@@ -2197,37 +2051,6 @@ def validate_fitted_partition(
     ):
         if not np.array_equal(frame.get_column(column).is_null().to_numpy(), smooth_index_null):
             _fail(f"{trading_date}: {column} nullability differs from smooth model index")
-    dlv_anchor = frame.get_column("discrete_dlv_anchor").to_numpy().astype(bool)
-    dlv_index_null = frame.get_column("discrete_dlv_input_expiry_index").is_null().to_numpy()
-    if not np.array_equal(dlv_anchor, ~dlv_index_null):
-        _fail(f"{trading_date}: DLV anchor flag differs from state-index presence")
-    for column in (
-        "discrete_dlv_time_increment_years",
-        "discrete_dlv_atm_annual_volatility",
-        "discrete_dlv_input_total_variance",
-        "discrete_dlv_nms",
-        "discrete_dlv_model_strikes",
-        "discrete_dlv_model_density",
-        "discrete_dlv_squares",
-        "discrete_dlv_target_calls",
-        "discrete_dlv_fitted_calls",
-    ):
-        if not np.array_equal(frame.get_column(column).is_null().to_numpy(), dlv_index_null):
-            _fail(f"{trading_date}: {column} must be present exactly on DLV anchors")
-    dlv_indices = frame.get_column("discrete_dlv_input_expiry_index").drop_nulls().to_list()
-    if dlv_indices != list(range(len(dlv_indices))):
-        _fail(f"{trading_date}: DLV anchor indices must be contiguous from zero")
-    for source_index in frame.get_column("smooth_input_expiry_index").drop_nulls().unique(
-        maintain_order=True
-    ):
-        positions = np.flatnonzero(
-            frame.get_column("smooth_input_expiry_index").to_numpy() == source_index
-        )
-        if len(positions) == 0 or not dlv_anchor[int(positions[0])]:
-            _fail(f"{trading_date}: DLV anchor is not the first canonical row of its expiry")
-        if int(np.sum(dlv_anchor[positions])) != 1:
-            _fail(f"{trading_date}: smooth expiry does not have exactly one DLV anchor")
-
     expected_ids = {
         "configuration_id": canonical_sha256(config.daily),
         "no_arb_configuration_id": canonical_sha256(
@@ -2242,9 +2065,6 @@ def validate_fitted_partition(
                 "smooth_sanos": config.surface.smooth_sanos,
             }
         ),
-        "discrete_dlv_configuration_id": canonical_sha256(
-            {"discrete_dlv": config.surface.discrete_dlv}
-        ),
     }
     for column, expected in expected_ids.items():
         if frame.get_column(column).unique().to_list() != [expected]:
@@ -2252,15 +2072,7 @@ def validate_fitted_partition(
     stage_versions = frame.get_column("stage_version").unique().to_list()
     current_stage_version = [str(fit_smooth_sanos.version)]
     if stage_versions != current_stage_version:
-        accepted = (
-            len(stage_versions) == 1
-            and isinstance(stage_versions[0], str)
-            and accepted_stage_version_sha256 is not None
-            and hashlib.sha256(stage_versions[0].encode("utf-8")).hexdigest()
-            == accepted_stage_version_sha256
-        )
-        if not accepted:
-            _fail(f"{trading_date}: stage_version is not an accepted fitted-stage version")
+        _fail(f"{trading_date}: stage_version differs from the current fitted stage")
     if frame.get_column("raw_options_artifact_id").unique().to_list() != [
         expected_raw_options_artifact_id
     ]:
@@ -2326,25 +2138,9 @@ def validate_fitted_partition(
     no_arb_text = frame.get_column("no_arb_diagnostics_json").item(0)
     filter_text = frame.get_column("filter_diagnostics_json").item(0)
     smooth_text = frame.get_column("smooth_diagnostics_json").item(0)
-    dlv_text = frame.get_column("discrete_dlv_diagnostics_json").item(0)
     no_arb = _canonical_object(no_arb_text, "no-arbitrage diagnostics")
     filter_diagnostics = _canonical_object(filter_text, "filter diagnostics")
     smooth = _canonical_object(smooth_text, "smooth diagnostics")
-    dlv_diagnostics = _canonical_object(dlv_text, "discrete-DLV diagnostics")
-    normalized_dlv_diagnostics, legacy_dlv_diagnostics = (
-        _normalize_discrete_dlv_diagnostics(
-            dlv_diagnostics,
-            "discrete-DLV",
-        )
-    )
-    legacy_dlv_schema = (
-        dlv_diagnostics.get("schema") if legacy_dlv_diagnostics else None
-    )
-    if legacy_dlv_diagnostics and accepted_stage_version_sha256 is None:
-        _fail(
-            f"{trading_date}: legacy discrete-DLV diagnostics require exact "
-            "reviewed-source authorization"
-        )
     no_arb_solver_indices = _expected_solver_expiry_indices(
         frame,
         np.ones(frame.height, dtype=bool),
@@ -2393,12 +2189,6 @@ def validate_fitted_partition(
             retained_expiry_indices=smooth_retained_indices,
         )
         smooth_relaxed_support = smooth_solver_evidence.relaxed_support
-        _terminal_solver_events(
-            normalized_dlv_diagnostics,
-            "discrete-DLV",
-            solver_policy="no_fallback",
-            expected_expiry_indices=None,
-        )
     _validate_support_mask_geometry(
         frame,
         mask_column="mask_arb_free",
@@ -2632,14 +2422,6 @@ def validate_fitted_partition(
     if int(smooth.get("selected_rows", -1)) != int(np.sum(selected)):
         _fail(f"{trading_date}: smooth diagnostic selected count is inconsistent")
     if np.any(selected):
-        if (
-            normalized_dlv_diagnostics.get("schema")
-            != "sanos-discrete-dlv-projection-diagnostics-v5"
-            or dlv_diagnostics.get("outcome") != "completed"
-            or dlv_diagnostics.get("source") != "smooth_sanos_surface"
-            or dlv_diagnostics.get("inner_nodes") != config.surface.discrete_dlv.inner_nodes
-        ):
-            _fail(f"{trading_date}: discrete-DLV diagnostics contract changed")
         selected_expiry_ids = (
             frame.filter(pl.Series(selected))
             .get_column("expiry_id")
@@ -2676,12 +2458,6 @@ def validate_fitted_partition(
         or smooth.get("solver_timeout_seconds") != SOLVER_TIMEOUT_SECONDS
     ):
         _fail(f"{trading_date}: zero-selected day lacks explicit smooth outcome")
-    elif normalized_dlv_diagnostics != {
-        "schema": "sanos-discrete-dlv-projection-diagnostics-v5",
-        "outcome": "no_smooth_state",
-        "source": "smooth_sanos_surface",
-    }:
-        _fail(f"{trading_date}: empty discrete-DLV diagnostics changed")
 
     input_expiry_ids_tuple = tuple(int(value) for value in input_expiry_ids)
     initial_expiry_pricer, initial_state_indices, initial_expiry_residuals = (
@@ -2744,291 +2520,18 @@ def validate_fitted_partition(
     )
     initial_surface_state_residuals = _validate_pricer_state(
         initial_surface_pricer,
-        "initial SANOS state",
-        check_dlvs=False,
+        "initial full no-arbitrage DLV state",
         calendar_tolerance=initial_surface_calendar_tolerance,
     )
-    dlv_state_residuals: dict[str, float] = {}
     smooth_state_residuals = (
         {}
         if smooth_pricer is None
         else _validate_pricer_state(
             smooth_pricer,
             "smooth SANOS state",
-            check_dlvs=False,
             calendar_tolerance=smooth_calendar_tolerance,
         )
     )
-    dlv_density_error = 0.0
-    dlv_canonical_density_error = 0.0
-    dlv_call_error = 0.0
-    dlv_projection_call_error = 0.0
-    dlv_atm_iv_error = 0.0
-    dlv_conditioned_iv_error = 0.0
-    dlv_conditioned_iv_p99 = 0.0
-    dlv_minimum_bound_shortfall = 0.0
-    dlv_maximum_bound_excess = 0.0
-    if smooth_pricer is not None:
-        dlv_pricer = discrete_dlv_pricer(frame)
-        dlv_state_residuals = _validate_pricer_state(
-            dlv_pricer,
-            "discrete DLV projection",
-            check_dlvs=True,
-        )
-        stored_dlvs: list[np.ndarray[Any, Any]] = []
-        dlv_state = frame.filter(pl.col("discrete_dlv_anchor")).sort(
-            "discrete_dlv_input_expiry_index"
-        )
-        if dlv_state.height != len(dlv_pricer.expiries):
-            _fail(f"{trading_date}: DLV anchor count differs from model expiries")
-        for input_index in range(len(dlv_pricer.expiries)):
-            group = dlv_state.filter(
-                pl.col("discrete_dlv_input_expiry_index") == input_index
-            )
-            values = group.get_column("discrete_dlv_squares").to_list()
-            if len(values) != 1 or values[0] is None:
-                _fail(f"{trading_date}: DLV state must have one anchor per expiry")
-            stored_dlvs.append(np.asarray(values[0], dtype=np.float64))
-        recomputed_dlvs = _canonical_discrete_dlv_squares(dlv_pricer)
-        for stored, recomputed in zip(stored_dlvs, recomputed_dlvs, strict=True):
-            error = _max_abs(stored, recomputed)
-            if error > config.surface.discrete_dlv.tolerances.dlv_fixed_point_max_abs:
-                _fail(f"{trading_date}: stored DLV differs from encoded density by {error}")
-        canonical_decoded = _canonical_discrete_dlv_densities(
-            dlv_pricer, stored_dlvs
-        )
-        for observed, expected in zip(
-            canonical_decoded,
-            dlv_pricer.xdensities,
-            strict=True,
-        ):
-            dlv_canonical_density_error = max(
-                dlv_canonical_density_error,
-                _max_abs(observed, expected),
-            )
-        if (
-            dlv_canonical_density_error
-            > config.surface.discrete_dlv.tolerances.density_inverse_max_abs
-        ):
-            _fail(
-                f"{trading_date}: canonical DLV density round-trip error is "
-                f"{dlv_canonical_density_error}"
-            )
-        decoded = dlv_pricer.densities_from_dlvsqs(stored_dlvs)
-        for observed, expected in zip(decoded, dlv_pricer.xdensities, strict=True):
-            dlv_density_error = max(dlv_density_error, _max_abs(observed, expected))
-        if (
-            dlv_density_error
-            > config.surface.discrete_dlv.tolerances.density_inverse_max_abs
-        ):
-            _fail(f"{trading_date}: DLV density round-trip error is {dlv_density_error}")
-        decoded_pricer = type(dlv_pricer)(
-            smoothness=dlv_pricer.smoothness,
-            expiries=dlv_pricer.expiries,
-            variances=dlv_pricer.variances,
-            xstrikes=dlv_pricer.xstrikes,
-            xdensities=decoded,
-            min_half_spread=dlv_pricer.min_half_spread,
-            min_dlv=dlv_pricer.min_dlv,
-            max_dlv=dlv_pricer.max_dlv,
-        )
-        query = np.asarray([0.713, 0.947, 1.037, 1.289], dtype=np.float64)
-        for expiry in dlv_pricer.expiries:
-            dlv_call_error = max(
-                dlv_call_error,
-                _max_abs(decoded_pricer(expiry, query), dlv_pricer(expiry, query)),
-            )
-        if dlv_call_error > config.surface.discrete_dlv.tolerances.call_inverse_max_abs:
-            _fail(f"{trading_date}: DLV off-grid call round-trip error is {dlv_call_error}")
-
-        smooth_expiries = np.asarray(smooth_pricer.expiries, dtype=np.float64)
-        smooth_variances = np.asarray(smooth_pricer.variances, dtype=np.float64)
-        if not np.array_equal(
-            smooth_expiries, np.asarray(dlv_pricer.expiries, dtype=np.float64)
-        ):
-            _fail(f"{trading_date}: DLV expiries differ from source smooth SANOS")
-        if not np.array_equal(
-            smooth_variances, np.asarray(dlv_pricer.variances, dtype=np.float64)
-        ):
-            _fail(f"{trading_date}: DLV total variances differ from source smooth SANOS")
-        stored_time_increments = dlv_state.get_column(
-            "discrete_dlv_time_increment_years"
-        ).to_numpy()
-        expected_time_increments = np.diff(smooth_expiries, prepend=0.0)
-        if not np.array_equal(stored_time_increments, expected_time_increments):
-            _fail(f"{trading_date}: stored DLV time increments changed")
-        stored_atm_volatilities = dlv_state.get_column(
-            "discrete_dlv_atm_annual_volatility"
-        ).to_numpy()
-        expected_atm_volatilities = np.sqrt(smooth_variances / smooth_expiries)
-        if not np.array_equal(stored_atm_volatilities, expected_atm_volatilities):
-            _fail(f"{trading_date}: stored DLV ATM annual volatilities changed")
-        expected_nms, expected_inner, expected_supports = _discrete_dlv_grid(
-            smooth_expiries,
-            expected_atm_volatilities,
-            config.surface.discrete_dlv,
-        )
-        stored_nms = [
-            np.asarray(value, dtype=np.float64)
-            for value in dlv_state.get_column("discrete_dlv_nms").to_list()
-        ]
-        stored_targets = np.stack(
-            [
-                np.asarray(value, dtype=np.float64)
-                for value in dlv_state.get_column("discrete_dlv_target_calls").to_list()
-            ]
-        )
-        stored_fitted = np.stack(
-            [
-                np.asarray(value, dtype=np.float64)
-                for value in dlv_state.get_column("discrete_dlv_fitted_calls").to_list()
-            ]
-        )
-        recomputed_targets = np.asarray(
-            smooth_pricer(smooth_expiries[:, None], expected_inner), dtype=np.float64
-        )
-        recomputed_fitted = np.asarray(
-            dlv_pricer(smooth_expiries[:, None], expected_inner), dtype=np.float64
-        )
-        if _max_abs(stored_targets, recomputed_targets) > 1.0e-14:
-            _fail(f"{trading_date}: stored DLV target calls changed")
-        if _max_abs(stored_fitted, recomputed_fitted) > 1.0e-14:
-            _fail(f"{trading_date}: stored DLV fitted calls changed")
-        for index, (nms, support) in enumerate(
-            zip(stored_nms, dlv_pricer.xstrikes, strict=True)
-        ):
-            if not np.array_equal(nms, expected_nms):
-                _fail(f"{trading_date}: DLV NMS grid changed at expiry {index}")
-            if _max_abs(np.asarray(support), expected_supports[index]) > 1.0e-14:
-                _fail(f"{trading_date}: DLV support differs from source smooth geometry")
-        smooth_source_indices = sorted(
-            int(value)
-            for value in frame.get_column("smooth_input_expiry_index")
-            .drop_nulls()
-            .unique()
-            .to_list()
-        )
-        listed_strikes = [
-            frame.filter(pl.col("smooth_input_expiry_index") == source_index)
-            .get_column("normalized_strike")
-            .to_numpy()
-            .astype(np.float64, copy=False)
-            for source_index in smooth_source_indices
-        ]
-        target_fit_price_band = cast(
-            Mapping[str, Any],
-            dlv_diagnostics["target_fit_price_band"],
-        )
-        numerical_regularization = cast(
-            Mapping[str, Any],
-            dlv_diagnostics["numerical_regularization"],
-        )
-        revalidated_dlv_diagnostics = _validate_discrete_dlv_projection(
-            smooth=smooth_pricer,
-            discrete=dlv_pricer,
-            raw_nms=expected_nms,
-            inner=expected_inner,
-            supports=expected_supports,
-            target_calls=stored_targets,
-            fitted_calls=stored_fitted,
-            listed_strikes=listed_strikes,
-            dlv_squares=stored_dlvs,
-            solver_events=[
-                dict(value)
-                for value in normalized_dlv_diagnostics["solver_events"]
-            ],
-            solver_warnings=[str(value) for value in dlv_diagnostics["solver_warnings"]],
-            fit_mode=str(normalized_dlv_diagnostics["fit_mode"]),
-            fallback_reason=cast(
-                str | None,
-                normalized_dlv_diagnostics.get("fallback_reason"),
-            ),
-            strict_fit_rejections=tuple(
-                str(value)
-                for value in normalized_dlv_diagnostics.get(
-                    "strict_fit_rejections", []
-                )
-            ),
-            stabilization={
-                "density_max_abs": float(
-                    dlv_diagnostics["stabilization_density_max_abs"]
-                ),
-                "dlv_max_abs": float(dlv_diagnostics["stabilization_dlv_max_abs"]),
-                "pre_target_call_max_abs": float(
-                    dlv_diagnostics["pre_stabilization_target_call_max_abs"]
-                ),
-                "post_target_call_max_abs": float(
-                    dlv_diagnostics["post_stabilization_target_call_max_abs"]
-                ),
-                "pre_target_iv_max_abs": float(
-                    target_fit_price_band[
-                        "pre_stabilization_maximum_absolute_iv_error"
-                    ]
-                ),
-                "post_target_iv_max_abs": float(
-                    target_fit_price_band["maximum_absolute_iv_error"]
-                ),
-                "pre_target_band_max_violation": float(
-                    target_fit_price_band["pre_stabilization_maximum_violation"]
-                ),
-                "post_target_band_max_violation": float(
-                    target_fit_price_band["maximum_violation"]
-                ),
-            },
-            pre_state_metrics=cast(
-                Mapping[str, float | int],
-                numerical_regularization["pre_stabilization_state"],
-            ),
-            config=config.surface.discrete_dlv,
-        )
-        expected_dlv_diagnostics = dict(revalidated_dlv_diagnostics)
-        if legacy_dlv_schema == "sanos-discrete-dlv-projection-diagnostics-v3":
-            expected_dlv_diagnostics.pop("fit_mode")
-            expected_dlv_diagnostics.pop("fit_quality")
-            expected_dlv_diagnostics.pop("fallback_reason")
-            expected_dlv_diagnostics.pop("strict_fit_rejections")
-            expected_dlv_diagnostics["schema"] = (
-                "sanos-discrete-dlv-projection-diagnostics-v3"
-            )
-            expected_dlv_diagnostics["solver_events"] = [
-                {
-                    **cast(
-                        Mapping[str, Any],
-                        expected_dlv_diagnostics["solver_events"][0],
-                    ),
-                    "stage": "discrete_dlv_surface",
-                }
-            ]
-        elif legacy_dlv_schema == "sanos-discrete-dlv-projection-diagnostics-v4":
-            expected_dlv_diagnostics.pop("fallback_reason")
-            expected_dlv_diagnostics.pop("strict_fit_rejections")
-            expected_dlv_diagnostics["schema"] = (
-                "sanos-discrete-dlv-projection-diagnostics-v4"
-            )
-        if canonical_json(expected_dlv_diagnostics) != dlv_text:
-            _fail(f"{trading_date}: stored DLV diagnostics differ from strict recomputation")
-        dlv_projection_call_error = float(
-            cast(Mapping[str, Any], revalidated_dlv_diagnostics["projection_call"])[
-                "max"
-            ]
-        )
-        dlv_atm_iv_error = float(
-            cast(Mapping[str, Any], revalidated_dlv_diagnostics["atm_annual_iv"])[
-                "max"
-            ]
-        )
-        conditioned_iv = cast(
-            Mapping[str, Any], revalidated_dlv_diagnostics["conditioned_annual_iv"]
-        )
-        dlv_conditioned_iv_error = float(conditioned_iv["max"])
-        dlv_conditioned_iv_p99 = float(conditioned_iv["p99"])
-        dlv_minimum_bound_shortfall = float(
-            revalidated_dlv_diagnostics["minimum_bound_shortfall"]
-        )
-        dlv_maximum_bound_excess = float(
-            revalidated_dlv_diagnostics["maximum_bound_excess"]
-        )
-
     initial_surface_fit_reconstruction = 0.0
     initial_surface_fit_contract_excess = 0.0
     initial_surface_fit_black_roundtrip = 0.0
@@ -3348,15 +2851,6 @@ def validate_fitted_partition(
         "calendar": calendar_residual,
         "direct_call_unit": direct_call_residual,
         "direct_put_unit": direct_put_residual,
-        "dlv_call_roundtrip": dlv_call_error,
-        "dlv_canonical_density_roundtrip": dlv_canonical_density_error,
-        "dlv_projection_call": dlv_projection_call_error,
-        "dlv_atm_annual_iv": dlv_atm_iv_error,
-        "dlv_conditioned_annual_iv": dlv_conditioned_iv_error,
-        "dlv_conditioned_annual_iv_p99": dlv_conditioned_iv_p99,
-        "dlv_minimum_bound_shortfall": dlv_minimum_bound_shortfall,
-        "dlv_maximum_bound_excess": dlv_maximum_bound_excess,
-        "dlv_density_roundtrip": dlv_density_error,
         "expiry_fit_quote_containment": expiry_fit_quote_containment,
         "expiry_fit_reconstruction": expiry_fit_reconstruction,
         "expiry_fit_contract_excess": expiry_fit_contract_excess,
@@ -3397,7 +2891,6 @@ def validate_fitted_partition(
             for name, value in initial_surface_state_residuals.items()
         },
         **{f"smooth_expiry_{name}": value for name, value in smooth_expiry_residuals.items()},
-        **{f"dlv_{name}": value for name, value in dlv_state_residuals.items()},
         **{f"smooth_{name}": value for name, value in smooth_state_residuals.items()},
     }
     return PartitionStatistics(
@@ -3738,8 +3231,6 @@ _DAY_FIELDS = frozenset(
         "smooth_mean_total_error",
         "smooth_diagnostics_json",
         "smooth_sanos_configuration_id",
-        "discrete_dlv_diagnostics_json",
-        "discrete_dlv_configuration_id",
     }
 )
 _EXPIRY_FIELDS = frozenset(
@@ -3789,17 +3280,6 @@ _SMOOTH_STATE_FIELDS = frozenset(
     if name.startswith("smooth_expiry_")
     or name.startswith("smooth_surface_")
     or name in {"smooth_input_expiry_index", "smooth_model_variance"}
-)
-_DLV_STATE_FIELDS = frozenset(
-    name
-    for name in FITTED_SCHEMA
-    if name.startswith("discrete_dlv_")
-    and name
-    not in {
-        "discrete_dlv_anchor",
-        "discrete_dlv_diagnostics_json",
-        "discrete_dlv_configuration_id",
-    }
 )
 _SELECTED_ONLY_FIELDS = frozenset(
     {
@@ -3889,23 +3369,12 @@ def _field_units(name: str) -> tuple[str, str]:
     if name in {
         "initial_model_variance",
         "smooth_model_variance",
-        "discrete_dlv_input_total_variance",
     }:
         return "dimensionless total variance", "ATM variance coordinate used by SANOS"
-    if name == "discrete_dlv_time_increment_years":
-        return "business years", "increment from the preceding retained model expiry"
-    if name == "discrete_dlv_atm_annual_volatility":
-        return "annualized volatility", "source smooth-SANOS ATM volatility"
-    if name == "discrete_dlv_nms":
-        return "dimensionless NMS", "canonical source-smooth ATM/NMS target geometry"
     if name.endswith("_model_strikes"):
         return "dimensionless support", "K/F support nodes"
     if name.endswith("_model_density"):
         return "probability mass", "discrete martingale mass on corresponding support"
-    if name == "discrete_dlv_squares":
-        return "annualized variance rate (1/year)", "squared DLV with zero boundaries"
-    if name in {"discrete_dlv_target_calls", "discrete_dlv_fitted_calls"}:
-        return "discounted-forward-normalized price", "call prices on discrete_dlv_nms"
     if name.endswith("_indices") or name.endswith("_index"):
         return "integer index", "zero-based interpreting geometry"
     if name == "surface_min_half_spread":
@@ -3941,7 +3410,6 @@ def _field_units(name: str) -> tuple[str, str]:
             "put_symbol",
             "call_option_id",
             "put_option_id",
-            "discrete_dlv_anchor",
         }
     ):
         return "not applicable", "none"
@@ -3954,8 +3422,6 @@ def _field_presence(name: str) -> tuple[bool, str]:
         return True, "present exactly when initial_no_arb_input_expiry_index is present"
     if name in _SMOOTH_STATE_FIELDS:
         return True, "present exactly when smooth_input_expiry_index is present"
-    if name in _DLV_STATE_FIELDS:
-        return True, "present exactly on the one deterministic DLV anchor row per expiry"
     if name in _SELECTED_ONLY_FIELDS:
         return True, "present exactly when options_filter_eligible is true"
     if name in _SMOOTH_SUMMARY_FIELDS:
@@ -3985,11 +3451,7 @@ def _schema_document() -> dict[str, Any]:
             else (
                 "expiry value/state repeated on its applicable expiry rows"
                 if name in _EXPIRY_FIELDS
-                else (
-                    "one deterministic anchor row per retained DLV expiry"
-                    if name in _DLV_STATE_FIELDS or name == "discrete_dlv_anchor"
-                    else "paired call/put strike-book row"
-                )
+                else "paired call/put strike-book row"
             )
         )
         fields.append(
@@ -4010,26 +3472,18 @@ def _schema_document() -> dict[str, Any]:
         "session_half_day_field": "is_half_day",
         "expiry_settlement_field": "expiry_is_am",
         "list_contract": (
-            "Initial and smooth list fields repeat complete per-expiry model state on "
-            "applicable rows. Discrete-DLV list fields occur only on the first canonical "
-            "row of each retained expiry. Density values are probability masses, not "
-            "continuous density ordinates."
+            "Initial full no-arbitrage and smooth list fields repeat complete "
+            "per-expiry model state on applicable rows. Density values are probability "
+            "masses, not continuous density ordinates."
         ),
         "dlv_contract": {
-            "source": "completed smooth SANOS surface",
-            "direct_vendor_book_fit": False,
-            "initial_no_arb_audit_state": False,
-            "retained_expiries": "identical to smooth SANOS",
-            "configuration_path": "config.json:surface.discrete_dlv",
-            "projection_domain_nms": "configured by discrete_dlv.nms_range",
-            "inner_nodes": "configured by discrete_dlv.inner_nodes",
-            "support_boundaries": (
-                "configured by discrete_dlv.lower_support_multiplier and "
-                "discrete_dlv.upper_support_multiplier"
-            ),
-            "acceptance_tolerances": "configured by discrete_dlv.tolerances",
-            "equivalence_scope": "retained expiries within inclusive NMS domain",
-            "arbitrary_time_equivalence": False,
+            "source": "initial full no-arbitrage common surface",
+            "state": "initial_surface_model_strikes and initial_surface_model_density",
+            "retained_expiries": "initial_no_arb_expiry_retained",
+            "configuration_path": "config.json:surface.no_arbitrage",
+            "density_semantics": "probability masses on common interpreting support",
+            "squared_dlv_required": False,
+            "smooth_sanos_equality_required": False,
         },
         "fields": fields,
     }
@@ -4042,8 +3496,9 @@ def _readme(config: InternalDatasetConfig, plan: InternalDatasetPlan) -> str:
 Immutable internal WIDB-to-SANOS Dataset candidate for `{config.ticker}` from
 {config.start_date.isoformat()} through {config.end_date.isoformat()}. It contains one
 losslessly copied fitted-day Polars/Parquet frame per planned NYSE session, including
-all audit rows, no-arbitrage/filter masks, smooth SANOS state, its canonical
-daily-front discrete-DLV projection, fitted values, and diagnostics. Half days are
+all audit rows, no-arbitrage/filter masks, the initial full no-arbitrage DLV
+support/density state, independent smooth SANOS state, fitted values, and diagnostics.
+Half days are
 {'included' if config.include_half_days else 'excluded'}.
 
 The source stream is WRDS OptionMetrics/IvyDB security identity, option quotes,
@@ -4341,103 +3796,6 @@ def _partition_record_statistics(record: Mapping[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], canonical_value(value))
 
 
-@version(
-    "1.1",
-    dependencies=[
-        _pointer_from_value,
-        "_required_reviewed_fitted_sources",
-        "_reviewed_fitted_sources",
-        canonical_value,
-    ],
-)
-def _validated_reviewed_fitted_records(
-    value: Any,
-    *,
-    config: InternalDatasetConfig,
-    chain_fitted: tuple[ArtifactPointer, ...],
-    partitions: tuple[Mapping[str, Any], ...],
-) -> tuple[dict[str, Any], ...]:
-    """Validate permanent evidence for exact historical fits accepted without rerun."""
-
-    if not isinstance(value, list):
-        _fail("Dataset reviewed fitted evidence must be a list")
-    expected_fields = {
-        "policy",
-        "trading_date",
-        "artifact",
-        "configuration_id",
-        "data_sha256",
-        "manifest_sha256",
-        "producer_version",
-        "stage_version_sha256",
-        "diagnostics_schema",
-    }
-    approved = _reviewed_fitted_sources()
-    required = _required_reviewed_fitted_sources(config)
-    partition_by_date = {
-        str(record.get("trading_date")): (index, record)
-        for index, record in enumerate(partitions)
-    }
-    normalized: list[dict[str, Any]] = []
-    observed_dates: list[str] = []
-    for index, record in enumerate(value):
-        if not isinstance(record, Mapping) or set(record) != expected_fields:
-            _fail(f"Reviewed fitted record {index} has missing or unexpected fields")
-        if record.get("policy") != REVIEWED_FITTED_REUSE_POLICY:
-            _fail(f"Reviewed fitted record {index} has the wrong policy")
-        trading_date = record.get("trading_date")
-        if not isinstance(trading_date, str) or trading_date not in partition_by_date:
-            _fail(f"Reviewed fitted record {index} has an unknown trading date")
-        source_index, partition = partition_by_date[trading_date]
-        pointer = _pointer_from_value(
-            record.get("artifact"),
-            f"reviewed fitted record {index} artifact",
-        )
-        if pointer.storage_class is not StorageClass.INTERMEDIATE:
-            _fail(f"Reviewed fitted record {index} is not an Intermediate artifact")
-        if pointer != chain_fitted[source_index] or pointer != _pointer_from_value(
-            partition.get("fitted_artifact"),
-            f"reviewed fitted record {index} partition artifact",
-        ):
-            _fail(f"Reviewed fitted record {index} differs from Dataset lineage")
-        expected = approved.get(pointer.artifact_id)
-        producer_version = record.get("producer_version")
-        if expected is None or not isinstance(producer_version, str) or not producer_version:
-            _fail(f"Reviewed fitted record {index} is not in the exact approved set")
-        observed = (
-            pointer.namespace,
-            record.get("configuration_id"),
-            record.get("data_sha256"),
-            record.get("manifest_sha256"),
-            hashlib.sha256(producer_version.encode("utf-8")).hexdigest(),
-            record.get("stage_version_sha256"),
-            record.get("diagnostics_schema"),
-        )
-        if observed != expected:
-            _fail(f"Reviewed fitted record {index} fingerprint differs from policy")
-        if record.get("data_sha256") != partition.get(
-            "fitted_source_sha256"
-        ) or record.get("manifest_sha256") != partition.get("fitted_manifest_sha256"):
-            _fail(f"Reviewed fitted record {index} checksum differs from partition evidence")
-        observed_dates.append(trading_date)
-        normalized.append(cast(dict[str, Any], canonical_value(record)))
-    if observed_dates != sorted(set(observed_dates)):
-        _fail("Reviewed fitted records must have unique increasing trading dates")
-    recorded_ids = {
-        _pointer_from_value(record["artifact"], "reviewed fitted artifact").artifact_id
-        for record in normalized
-    }
-    chain_ids = {pointer.artifact_id for pointer in chain_fitted}
-    required_ids = {
-        artifact_id
-        for artifact_id, _ in required.values()
-        if artifact_id in chain_ids
-    }
-    if recorded_ids != required_ids:
-        _fail("Dataset reviewed fitted evidence is incomplete")
-    return tuple(normalized)
-
-
 @version("1.0", dependencies=[half_days])
 def _scheduled_exclusions(config: InternalDatasetConfig) -> tuple[dict[str, Any], ...]:
     if config.include_half_days:
@@ -4449,13 +3807,12 @@ def _scheduled_exclusions(config: InternalDatasetConfig) -> tuple[dict[str, Any]
 
 
 @version(
-    "3.2",
+    "4.0",
     dependencies=[
         _fail,
         _legacy_comparison_document,
         _open_validated_internal_dataset,
         _partition_record_statistics,
-        _validated_reviewed_fitted_records,
         _pointer_from_value,
         _read_json_file,
         validate_fitted_partition,
@@ -4515,7 +3872,6 @@ def validate_internal_dataset(
         "raw_catalog",
         "raw_mapping_digest",
         "daily_chains",
-        "reviewed_fitted_artifacts",
     } or lineage.get("schema") != LINEAGE_SCHEMA:
         _fail("Unsupported Dataset lineage schema")
     if lineage.get("raw_mapping_digest") != configuration.get("raw_mapping_digest"):
@@ -4588,15 +3944,6 @@ def validate_internal_dataset(
     expected_raw_pointers = tuple(
         sorted({pointer for roles in chain_raw_roles for pointer in roles.values()})
     )
-    reviewed_fitted_records = _validated_reviewed_fitted_records(
-        lineage.get("reviewed_fitted_artifacts"),
-        config=dataset.config,
-        chain_fitted=tuple(chain_fitted),
-        partitions=dataset.partitions,
-    )
-    reviewed_fitted_by_date = {
-        str(record["trading_date"]): record for record in reviewed_fitted_records
-    }
     metadata = validated.manifest.get("metadata")
     if not isinstance(metadata, Mapping):
         _fail("Dataset manifest metadata is malformed")
@@ -4610,7 +3957,6 @@ def validate_internal_dataset(
         "raw_mapping_digest",
         "raw_artifacts",
         "fitted_artifacts",
-        "reviewed_fitted_artifacts",
         "planned_date_count",
         "partition_count",
         "populated_date_count",
@@ -4654,10 +4000,6 @@ def validate_internal_dataset(
         _pointer_from_value(value, "metadata fitted artifact") for value in fitted_metadata
     ) != tuple(chain_fitted):
         _fail("Dataset manifest fitted identities differ from daily lineage")
-    if metadata.get("reviewed_fitted_artifacts") != canonical_value(
-        reviewed_fitted_records
-    ):
-        _fail("Dataset manifest reviewed fitted evidence differs from lineage")
     expected_exclusions = canonical_value(_scheduled_exclusions(dataset.config))
     if metadata.get("scheduled_exclusions") != expected_exclusions:
         _fail("Dataset manifest scheduled exclusions differ from configuration")
@@ -4874,12 +4216,6 @@ def validate_internal_dataset(
             trading_date=expected_date,
             typed_empty_reason=typed_reason,
             expected_raw_options_artifact_id=chain_raw_roles[index]["options"].artifact_id,
-            accepted_stage_version_sha256=cast(
-                str | None,
-                reviewed_fitted_by_date.get(expected_date.isoformat(), {}).get(
-                    "stage_version_sha256"
-                ),
-            ),
         )
         if record.get("typed_empty") is not frame.is_empty():
             _fail(f"{expected_date}: typed-empty flag differs from partition contents")
@@ -5027,195 +4363,9 @@ def _emit_progress(
         progress(cast(dict[str, Any], canonical_value({"event": event, **fields})))
 
 
-@version(REVIEWED_FITTED_REUSE_POLICY)
-def _reviewed_fitted_sources() -> Mapping[
-    str,
-    tuple[str, str, str, str, str, str, str],
-]:
-    """Return the exact four successful fitted artifacts approved for direct reuse."""
-
-    return {
-        "5fdea7a911b5b1d4a2b906af4cccc13c379a31af1908423686e6a005cf93c71a": (
-            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-03",
-            "c18844fd1554e67b4139e8342e4f4681347e439fb045cbe0cd4b28ce84576006",
-            "b61da4495dbafe6eeaa0ec30dc7d74a284b6856201de0a92284f18411d3b9c24",
-            "b74b6e60de08482ea15179232ee1bf61c7d67e0e2c5200530734b1111dbdb87a",
-            "4c60bda01bf08d420e177fcf8c442ffc2c9abb3c2cc17706da92f6f9b83617dc",
-            "4d5a60de1e7e3854cba3cb79bb9c1a577fc43b0e67625c41b82ccfad8de96e58",
-            "sanos-discrete-dlv-projection-diagnostics-v3",
-        ),
-        "6476ea2f0f6be0cfb6ab222836e8646e06055a6c6a29c9e3c1b69c5cef5210ed": (
-            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-04",
-            "a6712c10971d47582a3b10fefd697653618652e330f2f392e9d5cc8eb557e240",
-            "d08fd496df53396e27473b93790cd7ed00b5d08db9433014fab39718a33cb36c",
-            "40d1d192f32e8200485836703ae17bb965cebb5517829836507b4c9db1d37b9d",
-            "4c60bda01bf08d420e177fcf8c442ffc2c9abb3c2cc17706da92f6f9b83617dc",
-            "4d5a60de1e7e3854cba3cb79bb9c1a577fc43b0e67625c41b82ccfad8de96e58",
-            "sanos-discrete-dlv-projection-diagnostics-v3",
-        ),
-        "3d7c01c0e8469cb84ce3cbb44e8c8cea0156e5cdbb96721572769466639a9b9f": (
-            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-05",
-            "845c1d44d36c8983f4807d1a4d224144b56930d6cb915b5d13192b2f0adcf1c6",
-            "9ab701935445825e9b254792a09736a320ba8ede59fe39ad81f97e8a12cf1f98",
-            "96d515f5d025a7a54482d0e7e93fe2a5d5cc09ec9707e8ec19468add9672cefc",
-            "7ece560f8ead8b4dd787a3238836f525b40b24c1784d628f2512693e2f29b723",
-            "1a538df170f006a143771face285d78dd7fb1b049eb16e273e6f5c61cc0d11d2",
-            "sanos-discrete-dlv-projection-diagnostics-v4",
-        ),
-        "63f6e0ab4da2c4917b49cee658e60787d38f22cfb55825436b7e2ef6e956f940": (
-            "widb/fitted-day/ticker-SPX/year-2022/date-2022-01-06",
-            "f923117e790cdf7b934d41bd0569bd2fa69ee8f7d083dd8cadc0697fd0f2c147",
-            "ab57ab30d71e9d0e84fab478bd892eb6b3424bd11fdcd0c5b14f1933dbef2012",
-            "81dcdc264d96ac117f016dcb46a4f937761f6f9266a8c711725be8ae80fe3059",
-            "7ece560f8ead8b4dd787a3238836f525b40b24c1784d628f2512693e2f29b723",
-            "1a538df170f006a143771face285d78dd7fb1b049eb16e273e6f5c61cc0d11d2",
-            "sanos-discrete-dlv-projection-diagnostics-v4",
-        ),
-    }
-
-
 @version(
-    "1.0",
+    "2.0",
     dependencies=[
-        InternalDatasetConfig,
-        _daily_namespace,
-        _reviewed_fitted_sources,
-        _surface_artifact_configuration,
-        business_dates,
-        canonical_sha256,
-    ],
-)
-def _required_reviewed_fitted_sources(
-    config: InternalDatasetConfig,
-) -> dict[
-    date,
-    tuple[str, tuple[str, str, str, str, str, str, str]],
-]:
-    """Derive mandatory reviewed sources from config, dates, and the pinned policy."""
-
-    approved = _reviewed_fitted_sources()
-    required: dict[
-        date,
-        tuple[str, tuple[str, str, str, str, str, str, str]],
-    ] = {}
-    dates = business_dates(
-        config.start_date,
-        config.end_date,
-        exclude_half_days=not config.include_half_days,
-    )
-    for trading_date in dates:
-        namespace = _daily_namespace("fitted-day", config.ticker, trading_date)
-        configuration_id = canonical_sha256(
-            _surface_artifact_configuration(
-                "fitted-day",
-                config.ticker,
-                trading_date,
-                config.surface,
-            )
-        )
-        matches = [
-            (artifact_id, fingerprint)
-            for artifact_id, fingerprint in approved.items()
-            if fingerprint[:2] == (namespace, configuration_id)
-        ]
-        if len(matches) > 1:
-            _fail(f"{trading_date}: reviewed fitted source policy is ambiguous")
-        if matches:
-            required[trading_date] = matches[0]
-    return required
-
-
-@version(
-    "1.2",
-    dependencies=[
-        ArtifactPointer,
-        ArtifactStore,
-        InternalDatasetConfig,
-        InternalDatasetPlan,
-        _canonical_object,
-        _required_reviewed_fitted_sources,
-        _reviewed_fitted_sources,
-        _dataset_sha256_file,
-        read_daily_frame,
-    ],
-)
-def _validated_reviewed_fitted_sources(
-    store: ArtifactStore,
-    config: InternalDatasetConfig,
-    plan: InternalDatasetPlan,
-) -> dict[date, ValidatedArtifact]:
-    """Resolve available exact accepted fits without making them build inputs."""
-
-    reviewed: dict[date, ValidatedArtifact] = {}
-    required_sources = _required_reviewed_fitted_sources(config)
-    for item in plan.daily_artifacts:
-        required = required_sources.get(item.trading_date)
-        if required is None:
-            continue
-        artifact_id, expected_fingerprint = required
-        pointer = ArtifactPointer(
-            item.fitted.storage_class,
-            item.fitted.namespace,
-            artifact_id,
-        )
-        if not store.path_for(pointer).exists():
-            continue
-        source = store.validate(
-            pointer,
-            expected=item.fitted,
-            ignore_producer_version=True,
-            deep=True,
-        )
-        source_frame = read_daily_frame(
-            store,
-            source,
-            schema=FITTED_SCHEMA,
-            ticker=str(item.fitted.configuration["ticker"]),
-            trading_date=item.trading_date,
-        )
-        if source_frame.is_empty():
-            _fail(f"{item.trading_date}: reviewed fitted source is unexpectedly empty")
-        source_data_sha256 = next(
-            str(record["sha256"])
-            for record in source.manifest["files"]
-            if record["path"] == "data.parquet"
-        )
-        source_manifest_sha256 = _dataset_sha256_file(
-            source.path / "manifest.json"
-        )
-        stage_versions = source_frame.get_column("stage_version").unique().to_list()
-        diagnostics_texts = source_frame.get_column(
-            "discrete_dlv_diagnostics_json"
-        ).unique().to_list()
-        if len(stage_versions) != 1 or not isinstance(stage_versions[0], str):
-            _fail(f"{item.trading_date}: reviewed fitted source has invalid stage version")
-        if len(diagnostics_texts) != 1 or not isinstance(diagnostics_texts[0], str):
-            _fail(f"{item.trading_date}: reviewed fitted source has invalid diagnostics")
-        diagnostics = _canonical_object(
-            diagnostics_texts[0],
-            f"{item.trading_date} reviewed discrete-DLV diagnostics",
-        )
-        observed_fingerprint = (
-            source.pointer.namespace,
-            str(source.manifest["configuration_id"]),
-            source_data_sha256,
-            source_manifest_sha256,
-            hashlib.sha256(str(source.manifest["producer_version"]).encode("utf-8")).hexdigest(),
-            hashlib.sha256(stage_versions[0].encode("utf-8")).hexdigest(),
-            str(diagnostics.get("schema")),
-        )
-        if observed_fingerprint != expected_fingerprint:
-            _fail(f"{item.trading_date}: reviewed fitted source fingerprint changed")
-        reviewed[item.trading_date] = source
-    return reviewed
-
-
-@version(
-    "1.1",
-    dependencies=[
-        _reviewed_fitted_sources,
-        _dataset_sha256_file,
-        canonical_value,
         read_daily_frame,
         validate_fitted_partition,
         _emit_progress,
@@ -5226,24 +4376,16 @@ def _validate_fitted_sources(
     config: InternalDatasetConfig,
     plan: InternalDatasetPlan,
     *,
-    reviewed_sources: Mapping[date, ValidatedArtifact],
     progress: Callable[[Mapping[str, Any]], None] | None,
     progress_interval_seconds: float,
-) -> tuple[
-    tuple[ValidatedArtifact, ...],
-    tuple[PartitionStatistics, ...],
-    tuple[dict[str, Any], ...],
-]:
+) -> tuple[tuple[ValidatedArtifact, ...], tuple[PartitionStatistics, ...]]:
     artifacts: list[ValidatedArtifact] = []
     statistics: list[PartitionStatistics] = []
-    reviewed_records: list[dict[str, Any]] = []
     started = time.monotonic()
     last_progress = started
     total = len(plan.daily_artifacts)
     for completed, item in enumerate(plan.daily_artifacts, start=1):
-        artifact = reviewed_sources.get(item.trading_date)
-        if artifact is None:
-            artifact = store.validate(item.fitted.pointer, expected=item.fitted, deep=True)
+        artifact = store.validate(item.fitted.pointer, expected=item.fitted, deep=True)
         metadata = artifact.manifest.get("metadata")
         if not isinstance(metadata, Mapping):
             _fail(f"{item.trading_date}: fitted artifact metadata is malformed")
@@ -5263,55 +4405,9 @@ def _validate_fitted_sources(
             trading_date=item.trading_date,
             typed_empty_reason=typed_reason,
             expected_raw_options_artifact_id=item.raw.options.artifact_id,
-            accepted_stage_version_sha256=(
-                cast(
-                    str,
-                    _reviewed_fitted_sources()[artifact.pointer.artifact_id][5],
-                )
-                if item.trading_date in reviewed_sources
-                else None
-            ),
         )
         artifacts.append(artifact)
         statistics.append(item_statistics)
-        if item.trading_date in reviewed_sources:
-            data_sha256 = next(
-                str(record["sha256"])
-                for record in artifact.manifest["files"]
-                if record["path"] == "data.parquet"
-            )
-            stage_version = frame.get_column("stage_version").unique().to_list()
-            diagnostics_text = frame.get_column(
-                "discrete_dlv_diagnostics_json"
-            ).unique().to_list()
-            if len(stage_version) != 1 or len(diagnostics_text) != 1:
-                _fail(f"{item.trading_date}: reviewed fitted provenance is not unique")
-            diagnostics = _canonical_object(
-                str(diagnostics_text[0]),
-                f"{item.trading_date} reviewed discrete-DLV diagnostics",
-            )
-            reviewed_records.append(
-                cast(
-                    dict[str, Any],
-                    canonical_value(
-                        {
-                            "policy": REVIEWED_FITTED_REUSE_POLICY,
-                            "trading_date": item.trading_date,
-                            "artifact": artifact.pointer,
-                            "configuration_id": artifact.manifest["configuration_id"],
-                            "data_sha256": data_sha256,
-                            "manifest_sha256": _dataset_sha256_file(
-                                artifact.path / "manifest.json"
-                            ),
-                            "producer_version": artifact.manifest["producer_version"],
-                            "stage_version_sha256": hashlib.sha256(
-                                str(stage_version[0]).encode("utf-8")
-                            ).hexdigest(),
-                            "diagnostics_schema": diagnostics.get("schema"),
-                        }
-                    ),
-                )
-            )
         now = time.monotonic()
         if completed == total or now - last_progress >= progress_interval_seconds:
             elapsed = now - started
@@ -5333,11 +4429,11 @@ def _validate_fitted_sources(
     catalog_raw = set(plan.raw_catalog_spec.upstream)
     if planned_raw != catalog_raw:
         _fail("Validated fitted chains do not close to exactly the planned Raw catalog")
-    return tuple(artifacts), tuple(statistics), tuple(reviewed_records)
+    return tuple(artifacts), tuple(statistics)
 
 
 @version(
-    "1.2",
+    "2.0",
     dependencies=[
         _scheduled_exclusions,
         aggregate_statistics,
@@ -5358,7 +4454,6 @@ def _publish_internal_dataset(
     plan: InternalDatasetPlan,
     fitted_artifacts: tuple[ValidatedArtifact, ...],
     statistics: tuple[PartitionStatistics, ...],
-    reviewed_fitted_artifacts: tuple[dict[str, Any], ...],
     *,
     source_revision: str,
     progress: Callable[[Mapping[str, Any]], None] | None,
@@ -5416,7 +4511,6 @@ def _publish_internal_dataset(
                 strict=True,
             )
         ),
-        "reviewed_fitted_artifacts": reviewed_fitted_artifacts,
     }
     validation_document = {
         "schema": VALIDATION_SCHEMA,
@@ -5449,7 +4543,6 @@ def _publish_internal_dataset(
         "raw_mapping_digest": plan.raw_mapping_digest,
         "raw_artifacts": plan.raw_catalog_spec.upstream,
         "fitted_artifacts": tuple(artifact.pointer for artifact in fitted_artifacts),
-        "reviewed_fitted_artifacts": reviewed_fitted_artifacts,
         "planned_date_count": len(plan.expected_dates),
         "partition_count": len(partitions),
         "populated_date_count": summary.populated_dates,
@@ -5473,9 +4566,6 @@ def _publish_internal_dataset(
         "evidence_checksums": evidence_checksums,
     }
     builder = store.writer(plan.dataset_spec, metadata=metadata)
-    reviewed_by_date = {
-        str(record["trading_date"]): record for record in reviewed_fitted_artifacts
-    }
     try:
         with builder as staging:
             for relative, payload in documents.items():
@@ -5499,12 +4589,6 @@ def _publish_internal_dataset(
                     trading_date=item.trading_date,
                     typed_empty_reason=cast(str | None, record["typed_empty_reason"]),
                     expected_raw_options_artifact_id=item.raw.options.artifact_id,
-                    accepted_stage_version_sha256=cast(
-                        str | None,
-                        reviewed_by_date.get(item.trading_date.isoformat(), {}).get(
-                            "stage_version_sha256"
-                        ),
-                    ),
                 )
                 now = time.monotonic()
                 if completed == total or now - last_progress >= progress_interval_seconds:
@@ -5601,7 +4685,6 @@ def build_internal_dataset(
     )
     daily_summary: DailyRunSummary | None = None
     try:
-        reviewed_sources: dict[date, ValidatedArtifact] = {}
         if not options.require_existing_intermediates:
             daily_result = build_intermediates(
                 locations,
@@ -5621,11 +4704,10 @@ def build_internal_dataset(
                 progress=progress,
             )
             daily_summary = daily_result.summary
-        fitted_artifacts, statistics, reviewed_records = _validate_fitted_sources(
+        fitted_artifacts, statistics = _validate_fitted_sources(
             store,
             config,
             plan,
-            reviewed_sources=reviewed_sources,
             progress=progress,
             progress_interval_seconds=options.progress_interval_seconds,
         )
@@ -5639,7 +4721,6 @@ def build_internal_dataset(
             plan,
             fitted_artifacts,
             statistics,
-            reviewed_records,
             source_revision=source_revision,
             progress=progress,
             progress_interval_seconds=options.progress_interval_seconds,

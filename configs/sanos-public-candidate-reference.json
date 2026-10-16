@@ -4,7 +4,7 @@
     "source_dataset": {
       "storage_class": "dataset",
       "namespace": "widb/internal/name-widb-spx-2022-2025-reference",
-      "artifact_id": "2ea20498735adf1e625b84f99c812bae78c90e9aeb81b36c9e0a330a21bd4585"
+      "artifact_id": "c0340eba3c5731082b53cad2bac4b3c9f647034aee85e733d2813fab3f7d6070"
     },
     "coverage_start_date": "2022-01-03",
     "coverage_end_date": "2025-08-29",

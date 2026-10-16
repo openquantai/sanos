@@ -420,15 +420,17 @@ missing artifact.
 ## Restart rule
 
 Daily fitted outputs are immutable and output-first. Keep every completed,
-validated fitted-day artifact when resuming a range; do not numerically refit a
-successful earlier date because a later date failed or used the discrete-DLV
-L1 branch. The normal exact-version lookup reuses it automatically. If the
-reviewed diagnostics/event hardening changed producer identity, the internal
-Dataset build uses only the four exact, fingerprint-pinned Phase 11 artifacts
-documented in CD-023. It keeps their original identities, skips their work
-units, validates their complete fitted state, and records their full acceptance
-evidence in the permanent Dataset. It does not transform or republish them.
-`--version '*'` remains reuse-only and is not this reviewed-source mechanism.
+validated artifact when resuming an unchanged producer version; the normal
+exact-version lookup reuses it automatically. A fitted schema or producer
+version change deliberately creates new fitted identities. Resume by repeating
+the ordinary `intermediate build --through fitted-day` command from step 4 with
+the same production root, source generation, dates, and config. It reuses the
+existing fresh Raw and compatible pre-fit Intermediate artifacts and computes
+only missing new-version descendants. Do not re-download Raw merely because a
+fitted schema changed, and do not use `--version '*'` to cross a version
+boundary. Then repeat the ordinary `dataset build --require-existing-intermediates`
+and deep `dataset validate` commands. There is no historical-artifact exception
+or ad hoc migration tool.
 
 Raw partitions, daily stages, Datasets, public candidates, Experiments, and the
 canonical designation are output-first. After an interruption, retain the same

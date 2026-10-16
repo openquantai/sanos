@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -32,9 +33,7 @@ from sanos.widb.build import IntermediateBuildRequest, plan_daily_artifacts, rea
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.widb.surface import (
     FITTED_SCHEMA,
-    _canonical_discrete_dlv_densities,
-    _canonical_discrete_dlv_squares,
-    discrete_dlv_pricer,
+    initial_no_arb_pricer,
     selected_reference_view,
     smooth_sanos_pricer,
 )
@@ -115,7 +114,7 @@ class ReferenceComparisonError(RuntimeError):
     """Raised when comparison evidence is missing, malformed, or unsafe."""
 
 
-@version("phase10-legacy-daily-comparison-tolerances-v4")
+@version("phase10-legacy-daily-comparison-tolerances-v5")
 @dataclass(frozen=True, slots=True)
 class DailyLegacyComparisonTolerances:
     """Frozen parity and invariant tolerances for the migration oracle."""
@@ -123,8 +122,6 @@ class DailyLegacyComparisonTolerances:
     float32_atol: float = 0.0
     float64_atol: float = 1.0e-12
     reconstructed_call_atol: float = 5.0e-8
-    density_dlv_inverse_atol: float = 1.0e-12
-    dlv_fixed_point_atol: float = 1.0e-9
     density_calendar_validity: float = 1.0e-7
     clarabel_density_calendar_validity: float = 1.0e-6
     clarabel_reduced_density_calendar_validity: float = 5.0e-5
@@ -136,8 +133,6 @@ class DailyLegacyComparisonTolerances:
             "float32_atol": 0.0,
             "float64_atol": 1.0e-12,
             "reconstructed_call_atol": 5.0e-8,
-            "density_dlv_inverse_atol": 1.0e-12,
-            "dlv_fixed_point_atol": 1.0e-9,
             "density_calendar_validity": 1.0e-7,
             "clarabel_density_calendar_validity": 1.0e-6,
             "clarabel_reduced_density_calendar_validity": 5.0e-5,
@@ -153,7 +148,7 @@ class DailyLegacyComparisonTolerances:
                 or float(value) != required
             ):
                 raise ValueError(
-                    f"{field} is frozen at {required!r} by the Phase 10 v3 contract"
+                    f"{field} is frozen at {required!r} by the Phase 10 v5 contract"
                 )
 
     def to_dict(self) -> dict[str, float]:
@@ -635,8 +630,58 @@ def _fresh_groups(frame: pl.DataFrame) -> tuple[pl.DataFrame, list[pl.DataFrame]
     return view, groups, already_canonical, not duplicate
 
 
+@version("1.0", dependencies=[initial_no_arb_pricer])
+def _initial_surface_invariants(frame: pl.DataFrame) -> dict[str, float | int | bool]:
+    """Measure the persisted full no-arbitrage support/density state directly."""
+
+    pricer = initial_no_arb_pricer(frame)
+    minimum_density = math.inf
+    mass_residual = 0.0
+    martingale_residual = 0.0
+    calendar_residual = 0.0
+    node_count = 0
+    previous_expiry: float | None = None
+    previous_support: np.ndarray[Any, Any] | None = None
+    for expiry, strikes_value, density_value in zip(
+        pricer.expiries,
+        pricer.xstrikes,
+        pricer.xdensities,
+        strict=True,
+    ):
+        strikes = np.asarray(strikes_value, dtype=np.float64)
+        density = np.asarray(density_value, dtype=np.float64)
+        node_count += len(strikes)
+        minimum_density = min(minimum_density, float(np.min(density)))
+        mass_residual = max(mass_residual, abs(float(np.sum(density)) - 1.0))
+        martingale_residual = max(
+            martingale_residual,
+            abs(float(np.dot(strikes, density)) - 1.0),
+        )
+        if previous_expiry is not None:
+            assert previous_support is not None
+            support = np.union1d(previous_support, strikes)
+            previous_calls = np.asarray(pricer(previous_expiry, support), dtype=np.float64)
+            current_calls = np.asarray(pricer(expiry, support), dtype=np.float64)
+            calendar_residual = max(
+                calendar_residual,
+                float(np.max(np.maximum(previous_calls - current_calls, 0.0))),
+            )
+        previous_expiry = float(expiry)
+        previous_support = strikes
+    if not np.isfinite(minimum_density):
+        raise ReferenceComparisonError("Fresh initial no-arbitrage state is empty")
+    return {
+        "expiry_count": len(pricer.expiries),
+        "node_count": node_count,
+        "minimum_density": minimum_density,
+        "mass_maximum_absolute_error": mass_residual,
+        "martingale_maximum_absolute_error": martingale_residual,
+        "calendar_maximum_violation": calendar_residual,
+    }
+
+
 @version(
-    "1.4",
+    "2.0",
     dependencies=[
         DailyLegacyComparisonTolerances,
         ArbFreePricer,
@@ -646,10 +691,9 @@ def _fresh_groups(frame: pl.DataFrame) -> tuple[pl.DataFrame, list[pl.DataFrame]
         _compare_numeric,
         _constant_list,
         _fresh_groups,
+        _initial_surface_invariants,
         _legacy_list,
-        _canonical_discrete_dlv_densities,
-        _canonical_discrete_dlv_squares,
-        discrete_dlv_pricer,
+        initial_no_arb_pricer,
         selected_reference_view,
         smooth_sanos_pricer,
     ],
@@ -1331,96 +1375,20 @@ def compare_populated_day(
         mismatches=mismatches,
         numerical=numerical,
     )
-    dlv_pricer = discrete_dlv_pricer(frame)
-    recomputed_dlvs = _canonical_discrete_dlv_squares(dlv_pricer)
-    dlv_state = frame.filter(
-        pl.col("discrete_dlv_input_expiry_index").is_not_null()
-    ).sort("discrete_dlv_input_expiry_index")
-    stored_dlvs: list[np.ndarray[Any, Any]] = []
-    dlv_fixed_point_error = 0.0
-    for index, recomputed in enumerate(recomputed_dlvs):
-        group = dlv_state.filter(
-            pl.col("discrete_dlv_input_expiry_index") == index
-        )
-        stored = _constant_list(group, "discrete_dlv_squares")
-        stored_dlvs.append(stored)
-        dlv_fixed_point_error = max(
-            dlv_fixed_point_error,
-            float(np.max(np.abs(stored - np.asarray(recomputed, dtype=np.float64)))),
-        )
-        _compare_numeric(
-            f"fresh_only.canonical_discrete_dlv_fixed_point[{index}]",
-            stored,
-            np.asarray(recomputed, dtype=np.float64),
-            fresh_dtype=np.dtype("float64"),
-            legacy_dtype=np.dtype("float64"),
-            comparison_dtype=np.dtype("float64"),
-            atol=tolerances.dlv_fixed_point_atol,
-            keys=_array_keys(f"discrete_dlv[{index}]", len(stored)),
-            family="fresh_invariant",
-            mismatches=mismatches,
-            numerical=numerical,
-        )
-    canonical_decoded_dlv = _canonical_discrete_dlv_densities(
-        dlv_pricer, stored_dlvs
+    initial_invariants = _initial_surface_invariants(frame)
+    initial_invariants_passed = (
+        float(initial_invariants["minimum_density"]) >= -1.0e-7
+        and float(initial_invariants["mass_maximum_absolute_error"])
+        <= tolerances.density_mass_moment_validity
+        and float(initial_invariants["martingale_maximum_absolute_error"])
+        <= tolerances.density_mass_moment_validity
+        and float(initial_invariants["calendar_maximum_violation"])
+        <= tolerances.clarabel_reduced_density_calendar_validity
     )
-    canonical_dlv_inverse_error = 0.0
-    for index, (decoded, density) in enumerate(
-        zip(canonical_decoded_dlv, dlv_pricer.xdensities, strict=True)
-    ):
-        canonical_dlv_inverse_error = max(
-            canonical_dlv_inverse_error,
-            float(np.max(np.abs(np.asarray(decoded) - np.asarray(density)))),
-        )
-        _compare_numeric(
-            f"fresh_only.canonical_discrete_dlv_inverse[{index}]",
-            np.asarray(decoded, dtype=np.float64),
-            np.asarray(density, dtype=np.float64),
-            fresh_dtype=np.dtype("float64"),
-            legacy_dtype=np.dtype("float64"),
-            comparison_dtype=np.dtype("float64"),
-            atol=tolerances.density_dlv_inverse_atol,
-            keys=_array_keys(f"canonical_discrete_dlv_density[{index}]", len(decoded)),
-            family="fresh_invariant",
-            mismatches=mismatches,
-            numerical=numerical,
-        )
-    if canonical_dlv_inverse_error > tolerances.density_dlv_inverse_atol:
+    if not initial_invariants_passed:
         mismatches.append(
             {
-                "field": "fresh_only.canonical_discrete_dlv_inverse",
-                "family": "fresh_invariant",
-                "kind": "numerical",
-                "above_tolerance_count": 1,
-            }
-        )
-
-    decoded_dlv = dlv_pricer.densities_from_dlvsqs(stored_dlvs)
-    dlv_inverse_error = 0.0
-    for index, (decoded, density) in enumerate(
-        zip(decoded_dlv, dlv_pricer.xdensities, strict=True)
-    ):
-        dlv_inverse_error = max(
-            dlv_inverse_error,
-            float(np.max(np.abs(np.asarray(decoded) - np.asarray(density)))),
-        )
-        _compare_numeric(
-            f"fresh_only.generic_discrete_dlv_inverse[{index}]",
-            np.asarray(decoded, dtype=np.float64),
-            np.asarray(density, dtype=np.float64),
-            fresh_dtype=np.dtype("float64"),
-            legacy_dtype=np.dtype("float64"),
-            comparison_dtype=np.dtype("float64"),
-            atol=tolerances.density_dlv_inverse_atol,
-            keys=_array_keys(f"discrete_dlv_density[{index}]", len(decoded)),
-            family="fresh_invariant",
-            mismatches=mismatches,
-            numerical=numerical,
-        )
-    if dlv_inverse_error > tolerances.density_dlv_inverse_atol:
-        mismatches.append(
-            {
-                "field": "fresh_only.generic_discrete_dlv_inverse",
+                "field": "fresh_only.initial_full_no_arbitrage_surface",
                 "family": "fresh_invariant",
                 "kind": "numerical",
                 "above_tolerance_count": 1,
@@ -1428,19 +1396,16 @@ def compare_populated_day(
         )
     item_oracle_gaps = [
         {
-            "item": "canonical_discrete_dlv_projection",
-            "reason": "legacy daily HDF5 stores only the smooth SANOS state",
-            "fresh_invariants_passed": (
-                dlv_fixed_point_error <= tolerances.dlv_fixed_point_atol
-                and canonical_dlv_inverse_error
-                <= tolerances.density_dlv_inverse_atol
-                and dlv_inverse_error <= tolerances.density_dlv_inverse_atol
+            "item": "initial_full_no_arbitrage_common_surface",
+            "reason": (
+                "legacy daily HDF5 stores the smooth SANOS state, not the fresh "
+                "initial full no-arbitrage support/density state"
             ),
-            "dlv_fixed_point_maximum_absolute_error": dlv_fixed_point_error,
-            "canonical_density_dlv_inverse_maximum_absolute_error": (
-                canonical_dlv_inverse_error
+            "fresh_invariants_passed": initial_invariants_passed,
+            "calendar_acceptance_upper_bound": (
+                tolerances.clarabel_reduced_density_calendar_validity
             ),
-            "density_dlv_inverse_maximum_absolute_error": dlv_inverse_error,
+            **initial_invariants,
         }
     ]
     mismatch_fields = sorted({str(item["field"]) for item in mismatches})

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -38,7 +37,6 @@ from sanos.widb import (
     OptionsFilterConfig,
     SmoothSanosConfig,
     apply_options_filter,
-    discrete_dlv_pricer,
     enrich_daily_frame,
     fit_initial_no_arbitrage,
     fit_smooth_sanos,
@@ -344,63 +342,9 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
         for event in diagnostics["solver_events"]
         if event["stage"] != "expiry_decision"
     )
-    dlv_diagnostics = json.loads(
-        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
+    no_arb_diagnostics = json.loads(
+        no_arb.get_column("no_arb_diagnostics_json").item(0)
     )
-    assert dlv_diagnostics["schema"] == "sanos-discrete-dlv-projection-diagnostics-v5"
-    assert dlv_diagnostics["source"] == "smooth_sanos_surface"
-    assert dlv_diagnostics["fit_mode"] == "strict_feasible"
-    assert dlv_diagnostics["fit_quality"] == {"accepted": True, "failures": []}
-    assert dlv_diagnostics["objective_weighting"] == "uniform"
-    assert dlv_diagnostics["fit_call_max_abs"] == 9.0e-5
-    assert dlv_diagnostics["solver_kkt_tolerance"] == 1.0e-10
-    assert dlv_diagnostics["constraint_scaling"] == "geometric_box_and_bound"
-    assert dlv_diagnostics["constraint_dlv_bounds"] == [0.01001, 2.99999]
-    assert dlv_diagnostics["density_mass_floor"] == 1.0e-8
-    assert dlv_diagnostics["stabilization_cycles"] == 1
-    assert dlv_diagnostics["projection_domain_nms"] == [-3.0, 2.0]
-    assert dlv_diagnostics["inner_nodes"] == 200
-    assert dlv_diagnostics["singular_nodes"] == 0
-    assert dlv_diagnostics["canonical_density_inverse_max_abs"] <= 1.0e-12
-    assert dlv_diagnostics["generic_density_inverse_max_abs"] <= 1.0e-12
-    assert dlv_diagnostics["canonical_dlv_fixed_point_max_abs"] <= 1.0e-9
-    assert dlv_diagnostics["canonical_call_inverse"]["max"] <= 1.0e-12
-    assert dlv_diagnostics["generic_call_inverse"]["max"] <= 1.0e-12
-    target_band = dlv_diagnostics["target_fit_price_band"]
-    assert target_band["conditioned_nodes"] > 0
-    assert len(target_band["conditioned_nodes_by_expiry"]) == dlv_diagnostics["expiries"]
-    assert target_band["maximum_absolute_iv_error"] <= 5.0e-3
-    assert target_band["maximum_violation"] <= 1.0e-10
-    assert target_band["minimum_lower_slack"] >= -1.0e-10
-    assert target_band["minimum_upper_slack"] >= -1.0e-10
-    assert set(dlv_diagnostics["conditioned_annual_iv_by_source"]) == {
-        "atm",
-        "listed",
-        "midpoints",
-        "smooth_support",
-        "targets",
-    }
-    regularization = dlv_diagnostics["numerical_regularization"]
-    assert regularization["density_mass_floor"] == 1.0e-8
-    assert regularization["constraint_dlv_buffer"] == 1.0e-5
-    assert regularization["required_density_floor_mass_per_expiry"] == pytest.approx(
-        202.0e-8
-    )
-    assert regularization["required_density_floor_mass_all_expiries"] == pytest.approx(
-        202.0e-8 * dlv_diagnostics["expiries"]
-    )
-    assert regularization["dlv_epsilon_warning_count"] == 0
-    for stage in ("pre_stabilization_state", "post_stabilization_state"):
-        assert regularization[stage]["density_floor_shortfall"] <= 1.0e-10
-        assert regularization[stage]["published_minimum_dlv_square_distance"] >= (
-            -1.0e-9
-        )
-        assert regularization[stage]["published_maximum_dlv_square_distance"] >= (
-            -1.0e-9
-        )
-    assert dlv_diagnostics["projection_call"]["max"] <= 1.0e-4
-    assert dlv_diagnostics["conditioned_annual_iv"]["max"] <= 5.0e-3
-    no_arb_diagnostics = json.loads(no_arb.get_column("no_arb_diagnostics_json").item(0))
     assert no_arb_diagnostics["solver_events"]
     config = DailySurfaceConfig()
     assert no_arb.get_column("no_arb_configuration_id").unique().to_list() == [
@@ -417,50 +361,10 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
             }
         )
     ]
-    assert fitted.get_column("discrete_dlv_configuration_id").unique().to_list() == [
-        canonical_sha256({"discrete_dlv": config.discrete_dlv})
-    ]
-    anchors = fitted.filter(pl.col("discrete_dlv_anchor")).sort(
-        "discrete_dlv_input_expiry_index"
-    )
-    assert anchors.height == fitted.get_column("smooth_input_expiry_index").n_unique()
-    for row in anchors.iter_rows(named=True):
-        support = np.asarray(row["discrete_dlv_model_strikes"])
-        density = np.asarray(row["discrete_dlv_model_density"])
-        squared_dlv = np.asarray(row["discrete_dlv_squares"])
-        assert len(support) == config.discrete_dlv.inner_nodes + 2
-        assert support.shape == density.shape == squared_dlv.shape
-        assert squared_dlv[0] == squared_dlv[-1] == 0.0
-        assert np.min(density) >= 0.0
-        assert np.sum(density) == pytest.approx(1.0, abs=1.0e-10)
-        assert support @ density == pytest.approx(1.0, abs=1.0e-10)
+    assert not any(name.startswith("discrete_dlv_") for name in fitted.columns)
 
     initial_pricer = initial_no_arb_pricer(fitted)
-    dlv_pricer = discrete_dlv_pricer(fitted)
     smooth_pricer = smooth_sanos_pricer(fitted)
-    stored_dlvs = [
-        np.asarray(value, dtype=np.float64)
-        for value in anchors.get_column("discrete_dlv_squares").to_list()
-    ]
-    decoded_densities = dlv_pricer.densities_from_dlvsqs(stored_dlvs)
-    canonical_densities = surface_module._canonical_discrete_dlv_densities(
-        dlv_pricer,
-        stored_dlvs,
-    )
-    for generic, canonical, expected in zip(
-        decoded_densities, canonical_densities, dlv_pricer.xdensities, strict=True
-    ):
-        np.testing.assert_allclose(generic, expected, rtol=0.0, atol=1.0e-12)
-        np.testing.assert_allclose(canonical, expected, rtol=0.0, atol=1.0e-12)
-    decoded_pricer = replace(dlv_pricer, xdensities=decoded_densities)
-    irregular_query = np.asarray([0.713, 0.947, 1.037, 1.289], dtype=np.float64)
-    for expiry in dlv_pricer.expiries:
-        np.testing.assert_allclose(
-            decoded_pricer(expiry, irregular_query),
-            dlv_pricer(expiry, irregular_query),
-            rtol=0.0,
-            atol=2.0e-14,
-        )
     for expiry_index, expiry in enumerate(initial_pricer.expiries):
         expiry_rows = fitted.filter(
             pl.col("initial_no_arb_input_expiry_index") == expiry_index
@@ -495,415 +399,6 @@ def test_phase6_frames_preserve_auditable_population_and_complete_states(
             rtol=0.0,
             atol=5.0e-8,
         )
-
-
-@pytest.mark.parametrize("strict_status", ["infeasible", "infeasible_inaccurate"])
-def test_discrete_dlv_retries_solver_reported_strict_infeasibility_with_unbounded_l1_fit(
-    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
-    monkeypatch: pytest.MonkeyPatch,
-    strict_status: str,
-) -> None:
-    original_fitter = surface_module.SanosFitter
-    calls: list[dict[str, object]] = []
-
-    class ForceStrictInfeasible:
-        def __init__(self, **kwargs: object) -> None:
-            self.strict = kwargs["max_abs_fit_error"] is not None
-            self.delegate = original_fitter(**kwargs)
-            calls.append(
-                {
-                    "strict": self.strict,
-                    "max_abs_fit_error": kwargs["max_abs_fit_error"],
-                    "max_dlv": kwargs["max_dlv"],
-                }
-            )
-
-        def __call__(self, *args: object, **kwargs: object) -> Any:
-            diagnostic_sink = cast(Any, kwargs["diagnostic_sink"])
-            calls[-1]["fit_price_bounds"] = kwargs["fit_price_bounds"]
-            if self.strict:
-                diagnostic_sink(
-                    {
-                        "solver": "HIGHS",
-                        "algorithm": "simplex",
-                        "status": strict_status,
-                        "is_fallback": False,
-                        "for_expiry": False,
-                        "objective": None,
-                    }
-                )
-                raise RuntimeError("forced strict-fit infeasibility")
-            return self.delegate(*args, **kwargs)
-
-    monkeypatch.setattr(surface_module, "SanosFitter", ForceStrictInfeasible)
-    fitted = fit_smooth_sanos(phase6_frames[2], config=DailySurfaceConfig())
-    diagnostics = json.loads(
-        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
-    )
-
-    assert [call["strict"] for call in calls] == [True, False]
-    assert calls[0]["max_abs_fit_error"] == 9.0e-5
-    assert calls[0]["fit_price_bounds"] is not None
-    assert calls[1]["max_abs_fit_error"] is None
-    assert calls[1]["fit_price_bounds"] is None
-    assert [call["max_dlv"] for call in calls] == [2.99999, 2.99999]
-    assert diagnostics["fit_mode"] == "uniform_l1_fallback"
-    assert [event["stage"] for event in diagnostics["solver_events"]] == [
-        "discrete_dlv_strict",
-        "discrete_dlv_l1",
-    ]
-    assert [event["status"] for event in diagnostics["solver_events"]] == [
-        strict_status,
-        "optimal",
-    ]
-
-
-def test_discrete_dlv_retries_nominal_strict_solution_that_fails_its_bands(
-    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original_validate = surface_module._validate_discrete_dlv_projection
-    observed_modes: list[str] = []
-
-    def reject_nominal_strict(**kwargs: Any) -> dict[str, object]:
-        fit_mode = cast(str, kwargs["fit_mode"])
-        observed_modes.append(fit_mode)
-        if fit_mode == "strict_feasible":
-            raise surface_module._StrictDlvFitQualityError(
-                ["post_stabilization_target_iv"]
-            )
-        return original_validate(**kwargs)
-
-    monkeypatch.setattr(
-        surface_module,
-        "_validate_discrete_dlv_projection",
-        reject_nominal_strict,
-    )
-    fitted = fit_smooth_sanos(phase6_frames[2], config=DailySurfaceConfig())
-    diagnostics = json.loads(
-        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
-    )
-
-    assert observed_modes == ["strict_feasible", "uniform_l1_fallback"]
-    assert diagnostics["fit_mode"] == "uniform_l1_fallback"
-    assert diagnostics["fallback_reason"] == "strict_fit_quality"
-    assert diagnostics["strict_fit_rejections"] == [
-        "post_stabilization_target_iv"
-    ]
-    assert [event["stage"] for event in diagnostics["solver_events"]] == [
-        "discrete_dlv_strict",
-        "discrete_dlv_l1",
-    ]
-    assert [event["status"] for event in diagnostics["solver_events"]] == [
-        "optimal",
-        "optimal",
-    ]
-
-
-def test_discrete_dlv_does_not_relax_after_non_feasibility_solver_failure(
-    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-
-    class ForceSolverFailure:
-        def __init__(self, **kwargs: object) -> None:
-            del kwargs
-
-        def __call__(self, *args: object, **kwargs: object) -> Any:
-            nonlocal calls
-            del args
-            calls += 1
-            diagnostic_sink = cast(Any, kwargs["diagnostic_sink"])
-            diagnostic_sink(
-                {
-                    "solver": "HIGHS",
-                    "algorithm": "simplex",
-                    "status": "user_limit",
-                    "is_fallback": False,
-                    "for_expiry": False,
-                    "objective": None,
-                }
-            )
-            raise RuntimeError("forced solver limit")
-
-    monkeypatch.setattr(surface_module, "SanosFitter", ForceSolverFailure)
-    with pytest.raises(DailyDataError, match="forced solver limit"):
-        fit_smooth_sanos(phase6_frames[2], config=DailySurfaceConfig())
-    assert calls == 1
-
-
-@pytest.mark.parametrize(
-    ("replacement", "extra"),
-    [
-        ({"solver": "CLARABEL"}, None),
-        ({"algorithm": "ipm"}, None),
-        ({"for_expiry": True}, None),
-        ({"objective": 1.0}, None),
-        ({}, ("unexpected", True)),
-    ],
-)
-def test_discrete_dlv_does_not_relax_after_unauthenticated_infeasibility(
-    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
-    monkeypatch: pytest.MonkeyPatch,
-    replacement: dict[str, object],
-    extra: tuple[str, object] | None,
-) -> None:
-    calls = 0
-
-    class ForceMalformedInfeasibility:
-        def __init__(self, **kwargs: object) -> None:
-            del kwargs
-
-        def __call__(self, *args: object, **kwargs: object) -> Any:
-            nonlocal calls
-            del args
-            calls += 1
-            event: dict[str, object] = {
-                "solver": "HIGHS",
-                "algorithm": "simplex",
-                "status": "infeasible",
-                "is_fallback": False,
-                "for_expiry": False,
-                "objective": None,
-            }
-            event.update(replacement)
-            if extra is not None:
-                event[extra[0]] = extra[1]
-            cast(Any, kwargs["diagnostic_sink"])(event)
-            raise RuntimeError("forced malformed strict-fit infeasibility")
-
-    monkeypatch.setattr(surface_module, "SanosFitter", ForceMalformedInfeasibility)
-    with pytest.raises(DailyDataError, match="projection solver failed"):
-        fit_smooth_sanos(phase6_frames[2], config=DailySurfaceConfig())
-    assert calls == 1
-
-
-def test_canonical_dlv_serialization_is_stable_with_vanishing_tail_mass(
-    tmp_path: Path,
-) -> None:
-    expiries = np.arange(1, 21, dtype=np.float64) / 252.0
-    support = np.linspace(0.8, 1.2, 22, dtype=np.float64)
-    template_density = np.full(22, 1.0 / 22.0, dtype=np.float64)
-    template = surface_module.SanosPricer(
-        smoothness=None,
-        expiries=expiries,
-        variances=expiries * 0.2**2,
-        xstrikes=[support.copy() for _ in expiries],
-        xdensities=[template_density.copy() for _ in expiries],
-    )
-    input_dlvs = [
-        np.concatenate(([0.0], np.full(20, 0.2**2), [0.0]))
-        for _ in expiries
-    ]
-    densities = surface_module._canonical_discrete_dlv_densities(
-        template,
-        input_dlvs,
-    )
-    pricer = replace(template, xdensities=densities)
-    stored_dlvs = surface_module._canonical_discrete_dlv_squares(pricer)
-    assert min(float(np.min(value[1:-1])) for value in densities) < 1.0e-8
-
-    path = tmp_path / "canonical-dlv.parquet"
-    pl.DataFrame(
-        {
-            "expiry": expiries,
-            "variance": pricer.variances,
-            "support": pricer.xstrikes,
-            "density": pricer.xdensities,
-            "dlv_squares": stored_dlvs,
-        }
-    ).write_parquet(path)
-    reopened = pl.read_parquet(path)
-    restored = surface_module.SanosPricer(
-        smoothness=None,
-        expiries=reopened.get_column("expiry").to_numpy(),
-        variances=reopened.get_column("variance").to_numpy(),
-        xstrikes=[np.asarray(value) for value in reopened["support"].to_list()],
-        xdensities=[np.asarray(value) for value in reopened["density"].to_list()],
-    )
-    restored_dlvs = [
-        np.asarray(value) for value in reopened["dlv_squares"].to_list()
-    ]
-
-    canonical_encoded = surface_module._canonical_discrete_dlv_squares(restored)
-    canonical_decoded = surface_module._canonical_discrete_dlv_densities(
-        restored,
-        restored_dlvs,
-    )
-    generic_decoded = restored.densities_from_dlvsqs(restored_dlvs)
-    assert max(
-        float(np.max(np.abs(left - right)))
-        for left, right in zip(canonical_encoded, restored_dlvs, strict=True)
-    ) <= 1.0e-9
-    assert max(
-        float(np.max(np.abs(left - right)))
-        for left, right in zip(canonical_decoded, restored.xdensities, strict=True)
-    ) <= 1.0e-12
-    assert max(
-        float(np.max(np.abs(left - right)))
-        for left, right in zip(generic_decoded, restored.xdensities, strict=True)
-    ) <= 1.0e-12
-
-    generic_pricer = replace(restored, xdensities=generic_decoded)
-    queries = np.asarray([0.83, 0.947, 1.037, 1.17], dtype=np.float64)
-    assert max(
-        float(
-            np.max(
-                np.abs(
-                    generic_pricer(float(expiry), queries)
-                    - restored(float(expiry), queries)
-                )
-            )
-        )
-        for expiry in expiries
-    ) <= 1.0e-12
-
-    mixed_reencoded = surface_module._canonical_discrete_dlv_squares(
-        generic_pricer
-    )
-    assert max(
-        float(np.max(np.abs(left - right)))
-        for left, right in zip(mixed_reencoded, restored_dlvs, strict=True)
-    ) > 1.0e-9
-
-    perturbed_dlv = [value.copy() for value in restored_dlvs]
-    perturbed_dlv[-1][1] += 1.0e-8
-    assert max(
-        float(np.max(np.abs(left - right)))
-        for left, right in zip(canonical_encoded, perturbed_dlv, strict=True)
-    ) > 1.0e-9
-
-    perturbed_density = [value.copy() for value in restored.xdensities]
-    perturbed_density[-1][1] += 2.0e-10
-    corrupted = replace(restored, xdensities=perturbed_density)
-    assert max(
-        float(np.max(np.abs(left - right)))
-        for left, right in zip(canonical_decoded, corrupted.xdensities, strict=True)
-    ) > 1.0e-12
-
-
-def test_projection_target_iv_price_bands_are_exact_and_threshold_inclusive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    expiry = np.asarray([2.0 / 252.0], dtype=np.float64)
-    inner = np.asarray([[0.9999, 1.0, 1.0001]], dtype=np.float64)
-    target_iv = np.asarray([0.003, 0.003, 0.003], dtype=np.float64)
-    target_calls = np.asarray(
-        [surface_module._bs_call_price(inner[0], target_iv, float(expiry[0]))]
-    )
-
-    class SmoothTarget:
-        def __call__(
-            self,
-            query_expiry: float,
-            strikes: np.ndarray[Any, Any],
-            *,
-            and_vols: bool = False,
-        ) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]] | np.ndarray[Any, Any]:
-            del query_expiry
-            calls = surface_module._bs_call_price(
-                np.asarray(strikes),
-                np.full_like(strikes, target_iv[0]),
-                float(expiry[0]),
-            )
-            return (calls, np.full_like(strikes, target_iv[0])) if and_vols else calls
-
-    threshold = 5.0e-2
-    monkeypatch.setattr(
-        surface_module,
-        "_bs_vega_sqrt_time",
-        lambda *args, **kwargs: np.asarray(
-            [
-                np.nextafter(threshold, 0.0),
-                threshold,
-                np.nextafter(threshold, np.inf),
-            ],
-            dtype=np.float64,
-        ),
-    )
-    config = DailySurfaceConfig().discrete_dlv
-    bounds, diagnostics = surface_module._projection_fit_price_bounds(
-        smooth=cast(Any, SmoothTarget()),
-        expiries=expiry,
-        inner=inner,
-        target_calls=target_calls,
-        config=config,
-    )
-    lower, upper = bounds[0]
-    assert diagnostics["conditioned_nodes"] == 2
-    assert diagnostics["conditioned_nodes_by_expiry"] == [2]
-    assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
-    assert np.all(lower <= target_calls[0])
-    assert np.all(target_calls[0] <= upper)
-    # A sub-tolerance target IV uses zero volatility for the lower Black band.
-    expected_zero_vol = surface_module._bs_call_price(
-        inner[0][1:],
-        np.zeros(2, dtype=np.float64),
-        float(expiry[0]),
-    )
-    np.testing.assert_allclose(
-        lower[1:],
-        np.maximum(
-            target_calls[0][1:] - config.fit_call_max_abs,
-            expected_zero_vol + config.solver_kkt_tolerance,
-        ),
-        rtol=0.0,
-        atol=0.0,
-    )
-    at_bounds = target_calls.copy()
-    at_bounds[0, 1] = lower[1]
-    at_bounds[0, 2] = upper[2]
-    at_metrics = surface_module._projection_target_band_metrics(
-        smooth=cast(Any, SmoothTarget()),
-        expiries=expiry,
-        inner=inner,
-        fitted_calls=at_bounds,
-        bounds=bounds,
-        config=config,
-    )
-    assert at_metrics["maximum_violation"] == 0.0
-
-    below = at_bounds.copy()
-    below[0, 1] = np.nextafter(lower[1], -np.inf)
-    below_metrics = surface_module._projection_target_band_metrics(
-        smooth=cast(Any, SmoothTarget()),
-        expiries=expiry,
-        inner=inner,
-        fitted_calls=below,
-        bounds=bounds,
-        config=config,
-    )
-    assert below_metrics["maximum_violation"] > 0.0
-
-    above = at_bounds.copy()
-    above[0, 2] = np.nextafter(upper[2], np.inf)
-    above_metrics = surface_module._projection_target_band_metrics(
-        smooth=cast(Any, SmoothTarget()),
-        expiries=expiry,
-        inner=inner,
-        fitted_calls=above,
-        bounds=bounds,
-        config=config,
-    )
-    assert above_metrics["maximum_violation"] > 0.0
-
-    regression_strike = np.asarray([1.0156393019564227], dtype=np.float64)
-    regression_expiry = 0.007936508394777775
-    regression_iv = np.asarray([0.09748547049469465], dtype=np.float64)
-    lower_regression = surface_module._bs_call_price(
-        regression_strike,
-        regression_iv - 5.0e-3,
-        regression_expiry,
-    )[0]
-    upper_regression = surface_module._bs_call_price(
-        regression_strike,
-        regression_iv + 5.0e-3,
-        regression_expiry,
-    )[0]
-    assert lower_regression == pytest.approx(9.580920912291915e-5, abs=1.0e-16)
-    assert upper_regression == pytest.approx(1.684019810493792e-4, abs=1.0e-16)
-    assert 7.637951934297273e-5 < lower_regression
 
 
 def test_initial_and_smooth_states_match_pinned_reference(
@@ -1043,142 +538,9 @@ def test_two_expiry_fitted_frame_passes_dataset_quantitative_boundary(
         ]
         assert tolerance == 1.0e-7
         assert statistics.residual_maxima[f"{prefix}_calendar"] <= tolerance
-    assert statistics.residual_maxima["dlv_density_roundtrip"] <= 2.0e-14
     assert statistics.residual_maxima["smooth_expiry_reconstruction"] <= 1.0e-12
     assert statistics.residual_maxima["smooth_surface_fit_reconstruction"] <= 1.0e-12
     assert statistics.residual_maxima["smooth_reconstruction"] <= 1.0e-12
-
-
-def test_dataset_boundary_normalizes_only_the_exact_legacy_strict_dlv_envelope(
-    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
-) -> None:
-    fitted = phase6_frames[-1]
-    diagnostics = json.loads(
-        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
-    )
-    assert diagnostics.pop("fit_mode") == "strict_feasible"
-    assert diagnostics.pop("fit_quality") == {"accepted": True, "failures": []}
-    assert diagnostics.pop("fallback_reason") is None
-    assert diagnostics.pop("strict_fit_rejections") == []
-    diagnostics["schema"] = "sanos-discrete-dlv-projection-diagnostics-v3"
-    diagnostics["solver_events"][0]["stage"] = "discrete_dlv_surface"
-    source_stage_version = "2.2 { reviewed-historical-fit: 1.0 }"
-    legacy = fitted.with_columns(
-        pl.lit(canonical_json(diagnostics)).alias("discrete_dlv_diagnostics_json"),
-        pl.lit(source_stage_version).alias("stage_version"),
-    )
-    config = InternalDatasetConfig(
-        name="legacy-strict-dlv-envelope",
-        ticker="SPX",
-        start_date=date(2024, 1, 3),
-        end_date=date(2024, 1, 3),
-        include_half_days=True,
-        source="optionmetrics",
-        source_generation="default-v1",
-        daily=DailyWidbConfig(),
-        surface=DailySurfaceConfig(),
-    )
-    relabeled = legacy.with_columns(
-        pl.lit(str(fit_smooth_sanos.version)).alias("stage_version")
-    )
-    with pytest.raises(
-        internal_dataset_module.DatasetValidationError,
-        match="require exact reviewed-source authorization",
-    ):
-        validate_fitted_partition(
-            relabeled,
-            config=config,
-            trading_date=date(2024, 1, 3),
-            typed_empty_reason=None,
-            expected_raw_options_artifact_id=None,
-        )
-    statistics = validate_fitted_partition(
-        legacy,
-        config=config,
-        trading_date=date(2024, 1, 3),
-        typed_empty_reason=None,
-        expected_raw_options_artifact_id=None,
-        accepted_stage_version_sha256=hashlib.sha256(
-            source_stage_version.encode()
-        ).hexdigest(),
-    )
-    assert statistics.trading_date == date(2024, 1, 3)
-    assert statistics.row_count == legacy.height
-    assert legacy.get_column("stage_version").unique().to_list() == [source_stage_version]
-    assert json.loads(legacy.get_column("discrete_dlv_diagnostics_json").item(0)) == diagnostics
-
-    for field, value in (
-        ("solver", "CLARABEL"),
-        ("algorithm", "ipm"),
-        ("for_expiry", True),
-        ("objective", None),
-    ):
-        corrupted = json.loads(canonical_json(diagnostics))
-        corrupted["solver_events"][0][field] = value
-        with pytest.raises(DatasetValidationError, match="legacy diagnostics"):
-            validate_fitted_partition(
-                fitted.with_columns(
-                    pl.lit(canonical_json(corrupted)).alias(
-                        "discrete_dlv_diagnostics_json"
-                    )
-                ),
-                config=config,
-                trading_date=date(2024, 1, 3),
-                typed_empty_reason=None,
-            )
-    extra = json.loads(canonical_json(diagnostics))
-    extra["solver_events"][0]["unexpected"] = True
-    with pytest.raises(DatasetValidationError, match="legacy diagnostics"):
-        validate_fitted_partition(
-            fitted.with_columns(
-                pl.lit(canonical_json(extra)).alias("discrete_dlv_diagnostics_json")
-            ),
-            config=config,
-            trading_date=date(2024, 1, 3),
-            typed_empty_reason=None,
-        )
-
-
-def test_dataset_boundary_preserves_previous_v4_serialization(
-    phase6_frames: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame],
-) -> None:
-    fitted = phase6_frames[-1]
-    diagnostics = json.loads(
-        fitted.get_column("discrete_dlv_diagnostics_json").item(0)
-    )
-    diagnostics["schema"] = "sanos-discrete-dlv-projection-diagnostics-v4"
-    diagnostics.pop("fallback_reason")
-    diagnostics.pop("strict_fit_rejections")
-    source_stage_version = "2.2 { reviewed-v4-fit: 1.0 }"
-    legacy = fitted.with_columns(
-        pl.lit(canonical_json(diagnostics)).alias("discrete_dlv_diagnostics_json"),
-        pl.lit(source_stage_version).alias("stage_version"),
-    )
-    config = InternalDatasetConfig(
-        name="legacy-v4-dlv-envelope",
-        ticker="SPX",
-        start_date=date(2024, 1, 3),
-        end_date=date(2024, 1, 3),
-        include_half_days=True,
-        source="optionmetrics",
-        source_generation="default-v1",
-        daily=DailyWidbConfig(),
-        surface=DailySurfaceConfig(),
-    )
-
-    statistics = validate_fitted_partition(
-        legacy,
-        config=config,
-        trading_date=date(2024, 1, 3),
-        typed_empty_reason=None,
-        expected_raw_options_artifact_id=None,
-        accepted_stage_version_sha256=hashlib.sha256(
-            source_stage_version.encode()
-        ).hexdigest(),
-    )
-
-    assert statistics.trading_date == date(2024, 1, 3)
-    assert statistics.row_count == legacy.height
 
 
 def test_smooth_producer_observables_have_distinct_exact_replays(
@@ -1575,13 +937,11 @@ def test_pricer_state_rejects_valid_densities_with_decreasing_convex_order() -> 
                 xdensities=pricer.xdensities[index : index + 1],
             ),
             f"expiry {index}",
-            check_dlvs=False,
         )
     with pytest.raises(DatasetValidationError, match="calendar monotonicity"):
         internal_dataset_module._validate_pricer_state(
             pricer,
             "inverted surface",
-            check_dlvs=False,
         )
 
 
@@ -1932,133 +1292,6 @@ def _expiry_decision(
     }
 
 
-def test_discrete_dlv_solver_path_authentication_is_closed() -> None:
-    strict = _solver_event("discrete_dlv_strict", "optimal")
-    infeasible = _solver_event("discrete_dlv_strict", "infeasible")
-    l1 = _solver_event("discrete_dlv_l1", "optimal")
-    assert surface_module._discrete_dlv_solver_path_is_valid(
-        [strict], "strict_feasible", None, ()
-    )
-    assert surface_module._discrete_dlv_solver_path_is_valid(
-        [infeasible, l1], "uniform_l1_fallback", "solver_infeasible", ()
-    )
-    assert surface_module._discrete_dlv_solver_path_is_valid(
-        [strict, l1],
-        "uniform_l1_fallback",
-        "strict_fit_quality",
-        ("post_stabilization_target_iv",),
-    )
-
-    corruptions = [
-        {**infeasible, "solver": "CLARABEL"},
-        {**infeasible, "algorithm": "ipm"},
-        {**infeasible, "for_expiry": True},
-        {**infeasible, "objective": 1.0},
-        {**infeasible, "unexpected": True},
-    ]
-    for corrupted in corruptions:
-        assert not surface_module._discrete_dlv_solver_path_is_valid(
-            [corrupted, l1], "uniform_l1_fallback", "solver_infeasible", ()
-        )
-    assert not surface_module._discrete_dlv_solver_path_is_valid(
-        [infeasible, {**l1, "objective": None}],
-        "uniform_l1_fallback",
-        "solver_infeasible",
-        (),
-    )
-    for rejections in (
-        ("unknown",),
-        ("post_stabilization_target_iv", "post_stabilization_target_iv"),
-        ("pre_stabilization_target_iv", "post_stabilization_target_iv"),
-    ):
-        assert not surface_module._discrete_dlv_solver_path_is_valid(
-            [strict, l1],
-            "uniform_l1_fallback",
-            "strict_fit_quality",
-            rejections,
-        )
-
-
-@pytest.mark.parametrize(
-    ("fit_mode", "events", "fallback_reason"),
-    [
-        (
-            "strict_feasible",
-            [_solver_event("discrete_dlv_strict", "optimal")],
-            None,
-        ),
-        (
-            "uniform_l1_fallback",
-            [
-                _solver_event("discrete_dlv_strict", "infeasible"),
-                _solver_event("discrete_dlv_l1", "optimal"),
-            ],
-            "solver_infeasible",
-        ),
-    ],
-)
-def test_previous_v4_dlv_envelopes_normalize_to_authenticated_v5(
-    fit_mode: str,
-    events: list[dict[str, object]],
-    fallback_reason: str | None,
-) -> None:
-    normalized, legacy = internal_dataset_module._normalize_discrete_dlv_diagnostics(
-        {
-            "schema": "sanos-discrete-dlv-projection-diagnostics-v4",
-            "outcome": "completed",
-            "fit_mode": fit_mode,
-            "fit_quality": {"accepted": True, "failures": []},
-            "solver_events": events,
-        },
-        "test v4 DLV",
-    )
-
-    assert legacy is True
-    assert normalized["schema"] == "sanos-discrete-dlv-projection-diagnostics-v5"
-    assert normalized["fallback_reason"] == fallback_reason
-    assert normalized["strict_fit_rejections"] == []
-    evidence = internal_dataset_module._terminal_solver_events(
-        normalized,
-        "test v4 DLV",
-        solver_policy="no_fallback",
-        expected_expiry_indices=None,
-    )
-    assert evidence.terminal_solver_call.stage == events[-1]["stage"]
-
-
-@pytest.mark.parametrize(
-    "rejections",
-    [
-        ["unknown"],
-        ["post_stabilization_target_iv", "post_stabilization_target_iv"],
-        ["pre_stabilization_target_iv", "post_stabilization_target_iv"],
-    ],
-)
-def test_dataset_rejects_unauthenticated_strict_fit_rejections(
-    rejections: list[str],
-) -> None:
-    with pytest.raises(
-        internal_dataset_module.DatasetValidationError,
-        match="unauthenticated strict-fit rejections",
-    ):
-        internal_dataset_module._terminal_solver_events(
-            {
-                "schema": "sanos-discrete-dlv-projection-diagnostics-v5",
-                "outcome": "completed",
-                "fit_mode": "uniform_l1_fallback",
-                "fallback_reason": "strict_fit_quality",
-                "strict_fit_rejections": rejections,
-                "solver_events": [
-                    _solver_event("discrete_dlv_strict", "optimal"),
-                    _solver_event("discrete_dlv_l1", "optimal"),
-                ],
-            },
-            "test malformed DLV",
-            solver_policy="no_fallback",
-            expected_expiry_indices=None,
-        )
-
-
 def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
     events = [
         _solver_event(
@@ -2105,34 +1338,6 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
         retained_expiry_indices=(0,),
     )
     assert evidence.terminal_solver_call.stage == "surface"
-    dlv_evidence = internal_dataset_module._terminal_solver_events(
-        {
-            "outcome": "completed",
-            "fit_mode": "strict_feasible",
-            "solver_events": [_solver_event("discrete_dlv_strict", "optimal")],
-        },
-        "test DLV",
-        solver_policy="no_fallback",
-        expected_expiry_indices=None,
-    )
-    assert dlv_evidence.relaxed_support == frozenset()
-    assert dlv_evidence.terminal_solver_call.stage == "discrete_dlv_strict"
-
-    fallback_evidence = internal_dataset_module._terminal_solver_events(
-        {
-            "outcome": "completed",
-            "fit_mode": "uniform_l1_fallback",
-            "solver_events": [
-                _solver_event("discrete_dlv_strict", "infeasible"),
-                _solver_event("discrete_dlv_l1", "optimal"),
-            ],
-        },
-        "test fallback DLV",
-        solver_policy="no_fallback",
-        expected_expiry_indices=None,
-    )
-    assert fallback_evidence.relaxed_support == frozenset()
-    assert fallback_evidence.terminal_solver_call.stage == "discrete_dlv_l1"
     dropped = [
         _solver_event(
             "expiry_soft",
@@ -2566,21 +1771,6 @@ def test_solver_event_contract_rejects_malformed_decisions() -> None:
                 retained_expiry_indices=retained,
             )
 
-    fallback_dlv = [
-        _solver_event("discrete_dlv_strict", "solver_error"),
-        _solver_event("discrete_dlv_strict", "optimal", fallback=True),
-    ]
-    with pytest.raises(DatasetValidationError):
-        internal_dataset_module._terminal_solver_events(
-            {
-                "outcome": "completed",
-                "fit_mode": "strict_feasible",
-                "solver_events": fallback_dlv,
-            },
-            "test DLV",
-            solver_policy="no_fallback",
-            expected_expiry_indices=None,
-        )
 
 
 def test_partition_validator_couples_hard_fit_failure_to_retained_state(
@@ -2793,18 +1983,6 @@ def test_dataset_quantitative_boundary_rejects_state_config_and_clock_corruption
         ),
         "smooth_fit_summary": fitted.with_columns(
             (pl.col("smooth_pcnt_fit") + 0.01).alias("smooth_pcnt_fit")
-        ),
-        "discrete_dlv_time_increment_years": fitted.with_columns(
-            pl.when(pl.col("discrete_dlv_anchor"))
-            .then(pl.col("discrete_dlv_time_increment_years") + 0.001)
-            .otherwise(pl.col("discrete_dlv_time_increment_years"))
-            .alias("discrete_dlv_time_increment_years")
-        ),
-        "discrete_dlv_atm_annual_volatility": fitted.with_columns(
-            pl.when(pl.col("discrete_dlv_anchor"))
-            .then(pl.col("discrete_dlv_atm_annual_volatility") + 0.001)
-            .otherwise(pl.col("discrete_dlv_atm_annual_volatility"))
-            .alias("discrete_dlv_atm_annual_volatility")
         ),
         "no_arb_diagnostics": inconsistent_last("no_arb_diagnostics_json", "{}"),
         "filter_diagnostics": inconsistent_last("filter_diagnostics_json", "{}"),
@@ -3064,6 +2242,8 @@ def test_surface_config_is_strict_and_uses_reference_profile() -> None:
     assert config.smooth_sanos.smoothness == 0.25
     with pytest.raises(ValueError, match="Unknown daily surface"):
         DailySurfaceConfig.from_mapping({"unknown": {}})
+    with pytest.raises(ValueError, match="discrete_dlv"):
+        DailySurfaceConfig.from_mapping({"discrete_dlv": {}})
     with pytest.raises(ValueError, match="straddle zero"):
         OptionsFilterConfig(max_nms=(0.0, 1.0))
     with pytest.raises(ValueError, match="requires options_filter.normalize"):
@@ -3100,10 +2280,7 @@ def test_no_selected_options_still_records_smooth_configuration_identity(
             }
         )
     ]
-    assert fitted.get_column("discrete_dlv_configuration_id").unique().to_list() == [
-        canonical_sha256({"discrete_dlv": config.discrete_dlv})
-    ]
-    assert not fitted.get_column("discrete_dlv_anchor").any()
+    assert not any(name.startswith("discrete_dlv_") for name in fitted.columns)
 
 
 def test_natural_zero_selected_day_passes_dataset_boundary(
@@ -3535,45 +2712,4 @@ def test_overnight_fraction_reaches_filter_and_both_model_states(fraction: float
     assert first_expiry["initial_model_variance"] is not None
     assert first_expiry["smooth_model_variance"] is not None
     assert first_expiry["smooth_surface_model_density"] is not None
-    assert first_expiry["discrete_dlv_squares"] is not None
     assert fitted.get_column("options_filter_eligible").sum() == fitted.height
-
-
-def test_dlv_bound_solver_allowance_is_inclusive_and_does_not_clip() -> None:
-    minimum_square = 0.01**2
-    maximum_square = 3.0**2
-    tolerance = 1.0e-9
-    lower_limit = minimum_square - tolerance
-    upper_limit = maximum_square + tolerance
-    values = np.asarray([lower_limit, minimum_square, maximum_square, upper_limit])
-
-    diagnostics = surface_module._validate_dlv_bounds(
-        values,
-        minimum_square=minimum_square,
-        maximum_square=maximum_square,
-        absolute_tolerance=tolerance,
-        label="test",
-    )
-
-    assert diagnostics["minimum"] == lower_limit
-    assert diagnostics["maximum"] == upper_limit
-    np.testing.assert_array_equal(
-        values,
-        np.asarray([lower_limit, minimum_square, maximum_square, upper_limit]),
-    )
-    with pytest.raises(DailyDataError, match="violates configured DLV bounds"):
-        surface_module._validate_dlv_bounds(
-            np.asarray([np.nextafter(lower_limit, -np.inf), maximum_square]),
-            minimum_square=minimum_square,
-            maximum_square=maximum_square,
-            absolute_tolerance=tolerance,
-            label="test lower",
-        )
-    with pytest.raises(DailyDataError, match="violates configured DLV bounds"):
-        surface_module._validate_dlv_bounds(
-            np.asarray([minimum_square, np.nextafter(upper_limit, np.inf)]),
-            minimum_square=minimum_square,
-            maximum_square=maximum_square,
-            absolute_tolerance=tolerance,
-            label="test upper",
-        )

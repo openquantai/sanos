@@ -54,25 +54,24 @@ from sanos.datasets.public.project import (
     _log_curve_value,
     _model_iv_fields,
     _source_carry_curve,
-    _stored_dlv_squares,
 )
 from sanos.datasets.public.validate import (
-    _canonical_dlv_supports,
     _state_pricer,
-    _validate_smooth_dlv_projection,
+    _validate_calendar_calls,
     public_coverage_sha256,
     public_frame_logical_sha256,
     public_return_values_sha256,
     public_validation_document,
     validate_public_payload,
 )
+from sanos.model.tools import SanosPricer
 from sanos.widb.calendar import (
     NMS,
     ONE_MINUTE,
     business_clock_policy,
     count_business_days_between,
 )
-from sanos.widb.surface import discrete_dlv_pricer, smooth_sanos_pricer
+from sanos.widb.surface import initial_no_arb_pricer, smooth_sanos_pricer
 from tests.test_widb_build import _dataset_config, _locations, _publish_raw_inputs
 
 
@@ -230,6 +229,22 @@ def test_zero_time_public_book_has_six_null_model_ivs() -> None:
     assert all(value is None for value in fields.values())
 
 
+def test_public_full_support_calendar_violation_is_rejected() -> None:
+    support = np.asarray([0.5, 1.0, 1.5], dtype=np.float64)
+    pricer = SanosPricer(
+        smoothness=None,
+        expiries=np.asarray([1.0 / 252.0, 2.0 / 252.0]),
+        variances=np.asarray([0.04, 0.08]),
+        xstrikes=[support, support],
+        xdensities=[
+            np.asarray([0.25, 0.5, 0.25]),
+            np.asarray([0.0, 1.0, 0.0]),
+        ],
+    )
+    with pytest.raises(PublicDatasetValidationError, match="full-support calendar"):
+        _validate_calendar_calls(pricer, "test DLV")
+
+
 def test_candidate_build_validate_and_output_first_isolation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -312,7 +327,7 @@ def test_candidate_build_validate_and_output_first_isolation(
         first_public["smooth_sanos"], first_public["expiries"], smooth=True
     )
     public_dlv, *_ = _state_pricer(
-        first_public["discrete_dlv"], first_public["expiries"], smooth=False
+        first_public["dlv"], first_public["expiries"], smooth=False
     )
     source_excesses = {"sanos": [], "dlv": []}
     for book in first_public["books"]:
@@ -438,7 +453,7 @@ def test_recursive_allowlist_rejects_unexpected_or_nonfinite_fields(
         validate_public_frame(corrupted, config)
 
 
-def test_public_validation_requires_complete_expiries_and_canonical_dlv_grid(
+def test_public_validation_allows_independent_model_expiry_populations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -470,51 +485,28 @@ def test_public_validation_requires_complete_expiries_and_canonical_dlv_grid(
     )
     from sanos.datasets.public.project import _flatten_public_day
 
+    uncovered = _flatten_public_day(extra_expiry_row)
     with pytest.raises(
-        PublicProjectionError,
-        match="does not cover expiry",
+        PublicDatasetValidationError,
+        match="complete union",
     ):
-        _flatten_public_day(extra_expiry_row)
+        validate_public_frame(uncovered, config)
 
-    smooth, *_ = _state_pricer(row["smooth_sanos"], row["expiries"], smooth=True)
-    discrete, *_ = _state_pricer(
-        row["discrete_dlv"], row["expiries"], smooth=False
+    previous_dlv = extra_expiry_row["dlv"]["model_expiries"][-1]
+    extra_expiry_row["dlv"]["model_expiries"].append(
+        {
+            **copy.deepcopy(previous_dlv),
+            "expiry_index": len(extra_expiry_row["expiries"]) - 1,
+            "time_increment_years": (
+                extra_expiry_row["expiries"][-1]["time_to_expiry_years"]
+                - row["expiries"][-1]["time_to_expiry_years"]
+            ),
+            "input_total_variance": 2.0 * previous_dlv["input_total_variance"],
+        }
     )
-    changed_supports = [np.asarray(value).copy() for value in discrete.xstrikes]
-    changed_supports[0][50] += 1.0e-6
-    changed_grid = replace(discrete, xstrikes=changed_supports)
-    with pytest.raises(PublicDatasetValidationError, match="canonical 200-node grid"):
-        _validate_smooth_dlv_projection(
-            smooth,
-            changed_grid,
-            config,
-            row["books"],
-        )
-
-    inner, _ = _canonical_dlv_supports(
-        np.asarray(smooth.expiries, dtype=np.float64),
-        np.asarray(smooth.variances, dtype=np.float64),
-    )
-    rejected_midpoint = float(0.5 * (inner[0, 40] + inner[0, 41]))
-
-    class MidpointBiasedPricer:
-        def __init__(self, base):
-            self.expiries = base.expiries
-            self.variances = base.variances
-            self.xstrikes = base.xstrikes
-
-        def __call__(self, expiry, strikes):
-            result = np.asarray(discrete(expiry, strikes), dtype=np.float64)
-            values = np.asarray(strikes, dtype=np.float64)
-            return result + np.where(values == rejected_midpoint, 2.0e-4, 0.0)
-
-    observed = _validate_smooth_dlv_projection(
-        smooth,
-        MidpointBiasedPricer(discrete),
-        config,
-        row["books"],
-    )
-    assert observed >= 2.0e-4
+    independent = _flatten_public_day(extra_expiry_row)
+    summary = validate_public_frame(independent, config)
+    assert summary.smooth_state_count + 1 == summary.dlv_state_count
 
 
 def test_candidate_contains_no_forbidden_top_level_or_nested_names() -> None:
@@ -534,7 +526,9 @@ def test_candidate_contains_no_forbidden_top_level_or_nested_names() -> None:
         assert forbidden not in schema_text
     capabilities = public_capabilities()
     assert capabilities["normalized_smooth_sanos_pricing"] is True
-    assert capabilities["normalized_discrete_dlv_pricing"] is True
+    assert capabilities["normalized_dlv_pricing"] is True
+    assert capabilities["independent_model_expiry_populations"] is True
+    assert capabilities["complete_initial_dlv_expiry_chain"] is True
     assert capabilities["exact_vendor_books"] is False
     assert capabilities["contract_or_security_replay"] is False
 
@@ -1108,11 +1102,10 @@ def test_approved_release_is_distinct_reprojected_and_output_first(
 
 
 def test_public_validation_version_dependencies_are_exact() -> None:
-    assert str(_state_pricer.version).startswith("2.0 ")
-    assert str(_validate_smooth_dlv_projection.version).startswith("1.2 ")
-    assert str(public_schema_document.version).startswith("3.0 ")
-    assert str(public_capabilities.version) == "3.0"
-    assert str(validate_public_frame.version).startswith("2.1 ")
+    assert str(_state_pricer.version).startswith("4.0 ")
+    assert str(public_schema_document.version).startswith("4.0 ")
+    assert str(public_capabilities.version) == "4.0"
+    assert str(validate_public_frame.version).startswith("3.0 ")
     assert str(public_validation_document.version).startswith("2.0 ")
     assert str(candidate_readme.version).startswith("2.0 ")
     payload_dependencies = set(dict(validate_public_payload.version.dependencies[1]))
@@ -1144,18 +1137,9 @@ def test_public_validation_version_dependencies_are_exact() -> None:
         "PublicProjectionConfig",
         "canonical_sha256",
     }
-    assert set(dict(_validate_smooth_dlv_projection.version.dependencies[1])) == {
-        "PublicProjectionConfig",
-        "SanosPricer",
-        "_canonical_dlv_supports",
-    }
-    assert set(dict(_stored_dlv_squares.version.dependencies[1])) == {
-        "SanosPricer",
-        "_canonical_discrete_dlv_densities",
-    }
     assert set(dict(_state_pricer.version.dependencies[1])) == {
         "SanosPricer",
-        "_canonical_discrete_dlv_densities",
+        "_validate_calendar_calls",
         "_validate_density",
     }
 
@@ -1409,28 +1393,37 @@ def test_public_state_reconstructs_source_pricers_across_cd014_boundaries(
     internal_frame = open_internal_dataset(
         ArtifactStore(locations), source.artifact
     ).load_day(date(2024, 1, 3))
-    source_dlv = discrete_dlv_pricer(internal_frame)
+    source_dlv = initial_no_arb_pricer(internal_frame)
     source_smooth = smooth_sanos_pricer(internal_frame)
     public_dlv, *_ = _state_pricer(
-        public_row["discrete_dlv"], public_row["expiries"], smooth=False
+        public_row["dlv"], public_row["expiries"], smooth=False
     )
     public_smooth, *_ = _state_pricer(
         public_row["smooth_sanos"], public_row["expiries"], smooth=True
     )
-    source_dlv_vectors = (
-        internal_frame.filter(pl.col("discrete_dlv_anchor"))
-        .sort("discrete_dlv_input_expiry_index")
-        .get_column("discrete_dlv_squares")
+    source_dlv_expiry_dates = (
+        internal_frame.filter(pl.col("initial_no_arb_input_expiry_index").is_not_null())
+        .sort("initial_no_arb_input_expiry_index")
+        .group_by("initial_no_arb_input_expiry_index", maintain_order=True)
+        .agg(pl.col("expiry_date").first())
+        .get_column("expiry_date")
         .to_list()
     )
-    public_dlv_vectors = [
-        item["squared_dlv"] for item in public_row["discrete_dlv"]["model_expiries"]
+    public_dlv_expiry_dates = [
+        public_row["expiries"][item["expiry_index"]]["expiry_date"]
+        for item in public_row["dlv"]["model_expiries"]
     ]
-    assert len(public_dlv_vectors) == len(source_dlv_vectors)
-    for public_vector, source_vector in zip(
-        public_dlv_vectors, source_dlv_vectors, strict=True
+    assert public_dlv_expiry_dates == source_dlv_expiry_dates
+    assert len(public_dlv.xstrikes) == len(source_dlv.xstrikes)
+    for public_support, source_support, public_density, source_density in zip(
+        public_dlv.xstrikes,
+        source_dlv.xstrikes,
+        public_dlv.xdensities,
+        source_dlv.xdensities,
+        strict=True,
     ):
-        np.testing.assert_array_equal(public_vector, source_vector)
+        np.testing.assert_array_equal(public_support, source_support)
+        np.testing.assert_array_equal(public_density, source_density)
     first = float(source_dlv.expiries[0])
     query_times = (0.0, ONE_MINUTE / 2.0, ONE_MINUTE, first / 2.0, first, first * 2.0)
     strikes = np.asarray([0.83, 1.0, 1.17], dtype=np.float64)

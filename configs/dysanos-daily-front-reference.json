@@ -6,7 +6,7 @@
     "source_dataset": {
       "storage_class": "dataset",
       "namespace": "sanos/public-candidate/name-sanos-spx-2022-2025-public-candidate",
-      "artifact_id": "d09a55ee4806916f0fc355f56c76401e9e21de09cfb6de99d5630e59439f1fc1"
+      "artifact_id": "30e5076785be164cac5e677d43f2270cce5fd8ced7bbc7cf270d11e8c3c7a4e5"
     },
     "consumer_contract": "dysanos-1.1-daily-front-v1"
   },

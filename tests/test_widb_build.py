@@ -54,7 +54,6 @@ from sanos.widb import (
     business_dates,
     count_business_days_between,
     enrich_daily_frame,
-    fit_smooth_sanos,
     previous_business_day,
 )
 from sanos.widb.build import (
@@ -763,145 +762,6 @@ def test_wildcard_reports_actual_reused_artifact_and_stored_version(tmp_path: Pa
     assert wildcard.reuses[0].warning is not None
 
 
-def test_dataset_recomputes_current_fit_when_a_reviewed_legacy_fit_exists(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    trading_date = date(2024, 1, 3)
-    next_trading_date = date(2024, 1, 4)
-    target_locations = _locations(tmp_path / "migration-target")
-    target_store = ArtifactStore(target_locations)
-    _publish_raw_inputs(target_store, trading_date)
-    _publish_raw_inputs(target_store, next_trading_date)
-    built = build_intermediates(
-        target_locations,
-        IntermediateBuildRequest(
-            ticker="SPX",
-            start_date=trading_date,
-            end_date=trading_date,
-            through="filtered-day",
-            max_workers=1,
-        ),
-        DailyWidbConfig(),
-        DailySurfaceConfig(),
-    )
-    filtered = target_store.validate(built.terminal[0])
-    filtered_frame = read_daily_frame(
-        target_store,
-        filtered,
-        schema=FILTERED_SCHEMA,
-        ticker="SPX",
-        trading_date=trading_date,
-    )
-    source_frame = fit_smooth_sanos(filtered_frame, config=DailySurfaceConfig())
-    diagnostics = json.loads(
-        source_frame.get_column("discrete_dlv_diagnostics_json").item(0)
-    )
-    diagnostics.pop("fit_mode")
-    diagnostics.pop("fit_quality")
-    diagnostics["schema"] = "sanos-discrete-dlv-projection-diagnostics-v3"
-    diagnostics["solver_events"][0]["stage"] = "discrete_dlv_surface"
-    source_stage_version = "2.2 { reviewed-historical-fit: 1.0 }"
-    legacy_frame = source_frame.with_columns(
-        pl.lit(canonical_json(diagnostics)).alias("discrete_dlv_diagnostics_json"),
-        pl.lit(source_stage_version).alias("stage_version"),
-    )
-
-    config = replace(
-        _dataset_config(trading_date),
-        name="reviewed-source-mixed-resume",
-        end_date=next_trading_date,
-    )
-    plan = plan_internal_dataset(config)
-    expected = plan.daily_artifacts[0].fitted
-    legacy_spec = expected.with_producer_version("reviewed-historical-producer")
-    legacy = publish_daily_frame(
-        target_store,
-        legacy_spec,
-        legacy_frame,
-        schema=FITTED_SCHEMA,
-        ticker="SPX",
-        trading_date=trading_date,
-    )
-    source_data_sha256 = next(
-        str(record["sha256"])
-        for record in legacy.manifest["files"]
-        if record["path"] == "data.parquet"
-    )
-    source_manifest_sha256 = hashlib.sha256(
-        (legacy.path / "manifest.json").read_bytes()
-    ).hexdigest()
-    reviewed_policy = {
-        legacy.pointer.artifact_id: (
-            legacy.pointer.namespace,
-            legacy.manifest["configuration_id"],
-            source_data_sha256,
-            source_manifest_sha256,
-            hashlib.sha256(b"reviewed-historical-producer").hexdigest(),
-            hashlib.sha256(source_stage_version.encode()).hexdigest(),
-            "sanos-discrete-dlv-projection-diagnostics-v3",
-        )
-    }
-    monkeypatch.setattr(
-        internal_dataset_module,
-        "_reviewed_fitted_sources",
-        lambda: reviewed_policy,
-    )
-    monkeypatch.setattr(internal_dataset_module, "_source_revision", lambda: "d" * 40)
-    resolver_version = str(
-        internal_dataset_module._validated_reviewed_fitted_sources.version
-    )
-    assert "_required_reviewed_fitted_sources" in resolver_version
-    assert "read_daily_frame" in resolver_version
-
-    reviewed = internal_dataset_module._validated_reviewed_fitted_sources(
-        target_store,
-        config,
-        plan,
-    )
-    assert reviewed == {trading_date: legacy}
-    result = build_internal_dataset(
-        target_locations,
-        config,
-        DatasetBuildOptions(max_workers=1),
-    )
-    assert result.daily_summary is not None
-    assert result.daily_summary.total == 2
-    assert result.daily_summary.reused == 0
-    assert result.daily_summary.completed == 2
-    assert result.daily_summary.failed == 0
-    assert target_store.resolve(expected) is not None
-    dataset = open_internal_dataset(target_store, result.artifact)
-    assert not dataset.load_day(trading_date).equals(legacy_frame)
-    assert dataset.load_day(next_trading_date).height > 0
-    lineage = json.loads(
-        (dataset.artifact.path / "lineage.json").read_text(encoding="utf-8")
-    )
-    records = lineage["reviewed_fitted_artifacts"]
-    assert records == []
-    assert dataset.artifact.manifest["metadata"]["reviewed_fitted_artifacts"] == records
-    regenerated_chain = (
-        expected.pointer,
-        plan.daily_artifacts[1].fitted.pointer,
-    )
-    assert (
-        internal_dataset_module._validated_reviewed_fitted_records(
-            [],
-            config=config,
-            chain_fitted=regenerated_chain,
-            partitions=dataset.partitions,
-        )
-        == ()
-    )
-
-    shutil.rmtree(target_locations.intermediate)
-    assert validate_internal_dataset(target_store, result.artifact) == result.validation
-    restarted = build_internal_dataset(target_locations, config)
-    assert not restarted.built
-    assert restarted.reuse is not None
-    assert restarted.artifact == result.artifact
-
-
 def test_plan_excludes_half_days_without_changing_daily_content_config(tmp_path: Path) -> None:
     locations = _locations(tmp_path)
     included = plan_intermediate_build(
@@ -1044,8 +904,6 @@ print(json.dumps({
 
 def test_restart_policy_versions_resolve_in_a_fresh_process() -> None:
     functions = {
-        "required_reviewed": internal_dataset_module._required_reviewed_fitted_sources,
-        "reviewed_resolver": internal_dataset_module._validated_reviewed_fitted_sources,
         "probe": probe_daily_target,
         "worker": build_daily_target,
         "intermediates": build_intermediates,
@@ -1058,15 +916,9 @@ def test_restart_policy_versions_resolve_in_a_fresh_process() -> None:
     script = """
 import hashlib
 import json
-from sanos.datasets.internal import (
-    _required_reviewed_fitted_sources,
-    _validated_reviewed_fitted_sources,
-    build_internal_dataset,
-)
+from sanos.datasets.internal import build_internal_dataset
 from sanos.widb.build import build_daily_target, build_intermediates, probe_daily_target
 functions = {
-    "required_reviewed": _required_reviewed_fitted_sources,
-    "reviewed_resolver": _validated_reviewed_fitted_sources,
     "probe": probe_daily_target,
     "worker": build_daily_target,
     "intermediates": build_intermediates,
@@ -1098,11 +950,6 @@ print(json.dumps({
 
 
 def test_restart_orchestration_versions_own_direct_dependencies() -> None:
-    required_dependencies = dict(
-        internal_dataset_module._required_reviewed_fitted_sources.version.dependencies[1]
-    )
-    assert "InternalDatasetConfig" in required_dependencies
-
     probe_dependencies = dict(probe_daily_target.version.dependencies[1])
     assert {"_specs_from_item", "_target_spec"} <= set(probe_dependencies)
 
@@ -1330,17 +1177,13 @@ def test_internal_dataset_concurrent_identical_publishers_converge(
     )
     monkeypatch.setattr(internal_dataset_module, "_source_revision", lambda: "e" * 40)
     plan = plan_internal_dataset(config)
-    fitted_artifacts, statistics, reviewed_records = (
-        internal_dataset_module._validate_fitted_sources(
-            store,
-            config,
-            plan,
-            reviewed_sources={},
-            progress=None,
-            progress_interval_seconds=30.0,
-        )
+    fitted_artifacts, statistics = internal_dataset_module._validate_fitted_sources(
+        store,
+        config,
+        plan,
+        progress=None,
+        progress_interval_seconds=30.0,
     )
-    assert reviewed_records == ()
     internal_dataset_module.publish_raw_lineage_catalog(store, plan)
     publisher = internal_dataset_module._publish_internal_dataset
     rendezvous = Barrier(2, timeout=20.0)
@@ -1358,7 +1201,6 @@ def test_internal_dataset_concurrent_identical_publishers_converge(
                     plan,
                     fitted_artifacts,
                     statistics,
-                    reviewed_records,
                     source_revision="e" * 40,
                     progress=None,
                     progress_interval_seconds=30.0,

@@ -16,11 +16,11 @@ Phases 0 through 9A are complete with code and quantitative review. Phase 9B's
 fresh Direct-200 numerical and training core is complete; publication of the
 trained-model Experiment and its `train`/`evaluate` CLI remains pending. Phase 10's
 offline safety prerequisites and Phase 11's frozen offline production tooling
-are implemented. The daily no-arbitrage, filtering, smooth-SANOS, and canonical
-finite-DLV projection stages are available through the CLI, together with
-output-first internal Dataset build and validation commands. The initial
-no-arbitrage state remains audit state and is not presented as a finite DLV
-model. CD-020's all-valid-day failure is preserved for parity; repairing it
+are implemented. The daily initial full no-arbitrage DLV, filtering, and
+independent smooth-SANOS stages are available through the CLI, together with
+output-first internal Dataset build and validation commands. The unsmoothed DLV
+state is stored as exact support and probability masses; finite squared-DLV
+coefficients are not required. CD-020's all-valid-day failure is preserved for parity; repairing it
 remains an optional future change requiring approval. Ordinary tests do not
 contact WRDS. The exact 2022–2025 legacy comparison endpoint and numerical
 baseline are catalogued. A technically validated projection remains
@@ -126,13 +126,10 @@ shallow: a valid terminal artifact is reused without requiring Raw ancestors.
 `--version '*'` is reuse-only and fails if no matching complete output exists.
 The available terminal stages are `paired-day`, `enriched-day`, `no-arb-day`,
 `filtered-day`, and `fitted-day`. The final frame retains rejected rows with
-eligibility/reason fields and stores the pre-filter no-arbitrage audit state,
-the post-filter smooth 0.25 SANOS state, and a separately fitted 200-inner-node
-finite-DLV projection of that smooth state as typed list columns. The DLV fit
-tries the strict call/IV bands first and, when HiGHS reports infeasibility or a
-nominal solution fails the post-solve check of those same bands,
-returns the same max-DLV-3 model's uniform-L1 closest fit with explicit quality
-diagnostics.
+eligibility/reason fields and stores the initial full no-arbitrage common-surface
+support/density DLV state and the post-filter smooth 0.25 SANOS state as
+independent models in typed list columns. The DLV state is not projected from
+SANOS, and no SANOS/DLV price equality is required.
 
 See [AGENTS.md](AGENTS.md) for binding implementation rules and
 [PROGRAM_PLAN.md](PROGRAM_PLAN.md) for phased acceptance criteria.

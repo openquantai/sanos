@@ -52,10 +52,9 @@ sanos --root /path/to/quant-data dataset public validate \
 
 Normal validation is shallow with respect to lineage. It checks the candidate's
 own checksums, exact payload allowlist, deterministic documents, exact flat
-Parquet schema, finite values, identity-owned coverage, model geometry, density
-normalization, corrected generic Float64 DLV inverse, canonical stored-DLV
-reconstruction, off-grid SANOS/DLV pricing, measured retained-expiry in-domain
-smooth-to-DLV projection error,
+Parquet schema, finite values, identity-owned coverage, model geometry, exact
+initial full-surface support/density state, density normalization, full-support
+calendar order, and off-grid SANOS/DLV pricing,
 smooth-SANOS-derived ATM volatility, normalized books, exact NMS bounds,
 capability declarations, and
 the persisted ordered-return and complete logical-content digests. It runs with
@@ -87,10 +86,11 @@ The artifact contains:
 
 The `day`, `expiry`, `book`, `smooth_node`, and `dlv_node` rows collectively
 contain only the trading date and half-day flag, the approved driftless return,
-expiry geometry, normalized side-separated books, complete common-surface
-smooth SANOS state, and complete common-surface canonical finite-DLV projection
-state. The DLV vectors are copied from the
-strictly validated internal anchor state rather than regenerated during export.
+expiry geometry, normalized side-separated books, complete smooth SANOS state,
+and complete initial full no-arbitrage common-surface support/density DLV state.
+The DLV state is copied exactly from the strictly validated internal state
+rather than regenerated during export; zero-mass nodes are not compressed and
+finite squared-DLV coefficients are not invented.
 The public state, interpreting geometry, and normalized
 books remain in the same Polars frame; source fit diagnostics stay in the
 internal Dataset and are not public fields. There are no separate per-date
@@ -136,10 +136,9 @@ and median excess in market half-spreads. No per-book market excess or source
 quote is published.
 
 It supports normalized SANOS/DLV pricing and dynamics, model ATM volatility,
-daily-front normalized books, and driftless spread experiments. It does not
-claim that smooth SANOS and the finite-DLV projection agree away from retained
-expiries. At retained expiries, approximation error is measured and reported
-inside inclusive NMS `[-3,2]`, without a maximum-error guarantee. It does not
+daily-front normalized books, and driftless spread experiments. Smooth SANOS
+and unsmoothed DLV are independent market fits; no cross-model price equality
+or projection-error guarantee is claimed. It does not
 claim exact vendor-book reconstruction, quote-containment replay, liquidity
 models, absolute-dollar tick effects, expiry-fit-mode pricing, or contract
 replay.
