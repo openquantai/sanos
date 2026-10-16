@@ -13,8 +13,10 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error sanos.tex
 The source requires a reasonably complete TeX Live installation, including
 `bbm`, `bbm-macros`, `fontawesome`, `algorithm2e`, and the other packages named
 in `tex/mathcommands.tex`. On Debian and Ubuntu, the missing `bbm` dependency is
-provided by `texlive-fonts-extra`. This is a development/documentation
-dependency and is deliberately not part of the Python package.
+provided by `texlive-fonts-extra`, and `ulem` is provided by
+`texlive-plain-generic`. Install both explicitly when using
+`--no-install-recommends`, as CI does. These are development/documentation
+dependencies and are deliberately not part of the Python package.
 
 The repository retains the generated `tex/sanos.pdf` imported from the paper
 revision recorded in `PORTING.md`. A paper build must not overwrite that

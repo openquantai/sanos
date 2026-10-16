@@ -55,7 +55,7 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install -y --no-install-recommends
           latexmk lmodern texlive-latex-base texlive-latex-extra texlive-science
-          texlive-fonts-recommended texlive-fonts-extra
+          texlive-fonts-recommended texlive-fonts-extra texlive-plain-generic
       - name: Build paper outside checkout
         run: |
           mkdir -p "$RUNNER_TEMP/sanos/paper"
