@@ -46,9 +46,9 @@ sanos --root /path/to/quant-data dataset validate \
 
 It checks the artifact manifest and all checksums, then recomputes the daily
 schema, population, masks, units, density/moment, no-arbitrage, canonical and
-ordinary-Float64 SANOS/DLV round trips, smooth-to-DLV projection calls and
-conditioned implied volatilities, strict/L1 solver mode, fitted-price-band
-diagnostics, calendar,
+ordinary-Float64 state and pricing invariants for the exact initial full
+no-arbitrage DLV support/density and the independent smooth SANOS state,
+conditioned implied volatilities, fitted-price-band diagnostics, calendar,
 and quote-containment invariants from the copied Dataset partitions. It does not visit upstream
 storage and never rebuilds a missing Dataset.
 
@@ -84,9 +84,10 @@ data/ticker=SPX/year=YYYY/date=YYYY-MM-DD/part-00000.parquet
 
 The frame retains every audit row and the exact `FITTED_SCHEMA`: quote and
 liquidity inputs, expiry geometry, masks and reasons, no-arbitrage results,
-the canonical finite-DLV projection, smooth SANOS state, fitted values, and
-diagnostics all remain together. The pre-filter no-arbitrage state is retained
-for audit but is not represented as a finite DLV model. The fitted boundary requires each
+the canonical initial full no-arbitrage support/density DLV state, the
+independent smooth SANOS state, fitted values, and diagnostics all remain
+together. There is no post-SANOS finite-DLV projection and no requirement that
+DLV and SANOS fitted prices agree. The fitted boundary requires each
 `(expiry_id, normalized_strike)` model key to be unique and strictly ordered,
 as required by SANOS support geometry. Rows sharing coarser session/expiry
 geometry retain their original multiplicity and stable source order;
@@ -94,8 +95,8 @@ publication does not sort, group, or deduplicate the fitted-day frame.
 
 The headline price coordinates are explicit: `normalized_strike = K/F`, while
 `pure_bid_price` and `pure_ask_price` are driftless call-equivalent prices
-`C/(DF*F)`. No-arbitrage, smooth SANOS, and finite-DLV fitted prices use that
-same coordinate system. The public projection takes each retained side's
+`C/(DF*F)`. Initial no-arbitrage DLV and smooth SANOS fitted prices use that
+same coordinate system while remaining independent models. The public projection takes each retained side's
 half-spread from its side-specific `pure_market_call_*` or
 `pure_market_put_*` interval, again in `C/(DF*F)`, without carrying spot,
 forward, or discount-factor levels.

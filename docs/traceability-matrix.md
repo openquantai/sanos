@@ -16,9 +16,15 @@ historical unless they are also listed in the compatibility decision register.
 
 A fresh-WRDS 16-session pilot has run. Twelve dates match, 2024-12-24 is the
 declared oracle gap, 2025-01-08 is the typed-empty policy day, and 2025-01-02/03
-remain unexplained differences in the final cross-expiry `MkArbFree` solve.
-The full fresh 2022--2025 production build has not run and remains blocked on
-owner classification of those two dates plus the monitored safety gates. The
+are owner-approved, report-bound technical migration differences in the final
+cross-expiry `MkArbFree` solve. An isolated one-day comparison reproduced the
+same numerical solver failure in the old and current LP implementations; it
+did not establish mathematical infeasibility or a regression caused by the
+corrected DLV contract. As of 2026-10-17, the full 918-session regeneration has
+restarted from pinned source revision `0116b15`, but no newly regenerated
+complete public candidate or public Dataset exists yet. Publication remains
+gated on zero failed sessions, deep validation, and both reviews. The 476-test
+offline suite and Python CI pass; paper CI remains unresolved. The
 separately identified Direct-200 neural training producer is being copy/adapted
 into the self-contained `sanos.models.dysanos` package. It is not part of the
 SANOS Dataset producer and does not define that Dataset. Phase 11 evidence and

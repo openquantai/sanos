@@ -23,14 +23,32 @@ state is stored as exact support and probability masses; finite squared-DLV
 coefficients are not required. CD-020's all-valid-day failure is preserved for parity; repairing it
 remains an optional future change requiring approval. Ordinary tests do not
 contact WRDS. The exact 2022–2025 legacy comparison endpoint and numerical
-baseline are catalogued. A technically validated projection remains
-`public_candidate` until separate redistribution approval is recorded. See
+baseline are catalogued. The 476-test offline suite and Python CI pass; paper
+CI remains unresolved and is not part of the current pass claim.
+
+As of 2026-10-17, the full 918-session regeneration has restarted from pinned
+source revision `0116b15`. No newly regenerated complete public candidate or
+public Dataset exists yet. Publication remains gated on 918/918 successful
+sessions, deep validation, and code and quantitative review. An isolated
+one-day old/new LP comparison reproduced the same numerical solver failure in
+both implementations; it did not establish mathematical infeasibility or a
+regression caused by the corrected DLV contract. Run and recovery instructions
+are in the [fresh production runbook](docs/production-runbook.md); run evidence
+stays outside Git under the operator-selected evidence root.
+
+A technically validated projection remains `public_candidate` until separate
+redistribution approval is recorded. See
 [the legacy baseline](docs/reference-baseline.md) for the 891-date parity oracle
 and the distinction between its legacy artifact populations. Follow the
 [guarded Phase 10 WRDS pilot](docs/phase-10-pilot.md) before any full-range
 extraction, then use the [fresh production runbook](docs/production-runbook.md).
 The [human operator guide](docs/operator-guide.md) covers installation, exit
 codes, troubleshooting, restart, and retention without requiring an AI agent.
+The requested repository upload is a later release step: the exact public
+artifact must be complete, validated, and redistribution-approved before its
+size and host limits are reviewed and that public release is deliberately added
+to Git. Raw, Intermediate, internal/private Dataset, Experiment, log, cache,
+and `public_candidate` artifacts must never be checked in.
 
 ## Development installation
 

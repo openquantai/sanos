@@ -186,3 +186,21 @@ equality with the approved candidate, validates the entire staged release, and
 publishes under `sanos/public/`. It never aliases or mutates the candidate. The
 release then remains shallowly reusable without candidate or source artifacts.
 The repository intentionally contains no real approval document or license.
+
+## Deliberately retained repository release
+
+The intended upload target is the source repository, but only after the public
+release above exists. Before adding it, record the release's total and largest
+file sizes and confirm that ordinary Git and the repository host can carry it.
+Then retain the exact validated public payload together with its manifest,
+checksums, schema, configuration, approval metadata, and license in one
+purpose-named release directory. The committed bytes must match the approved
+artifact; do not rebuild or rewrite Parquet while copying it into the release.
+
+The repository's broad generated-data ignore rules remain in force during
+regeneration. Narrowly adding the reviewed release is an intentional
+publication change, not permission to check in Raw, Intermediate,
+internal/private Dataset, Experiment, log, cache, or `public_candidate`
+material. If the measured artifact exceeds the repository host's limits, stop
+and obtain an explicit alternate publication target rather than silently
+omitting files or changing formats.

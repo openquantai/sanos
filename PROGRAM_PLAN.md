@@ -594,8 +594,10 @@ Pilot status: the fresh-WRDS 16-session representative pilot completed. Twelve
 dates match, one declared oracle gap and one typed-empty policy day behave as
 expected, and 2025-01-02/03 differ in the final cross-expiry `MkArbFree` solve.
 Independent code and quantitative review approved the diagnosis, and the owner
-approved the exact report-bound technical migration classifications; Phase 11
-remains blocked.
+approved the exact report-bound technical migration classifications. An
+isolated one-day comparison reproduced the same numerical solver failure in
+the old and current LP implementations; it did not establish mathematical
+infeasibility or a regression caused by the corrected DLV contract.
 
 The reviewed `sanos reference approval-document` workflow can record that
 decision without hand-copying fields or hashes. It accepts only an offline,
@@ -621,8 +623,11 @@ docs are complete; discrepancies are explained or approved.
 Offline contract status: the exact full-range comparator, Experiment tensor
 comparator, deterministic downstream-config finalizer, indexed evidence
 contract, canonical designation, and human runbook are implemented, tested, and
-independently approved. Live execution remains subject to the monitored safety
-gates and completion of the fresh full-range build. The accepted evidence
+independently approved. As of 2026-10-17, the 918-session regeneration has
+restarted from pinned source revision `0116b15`; there is not yet a newly
+regenerated complete public candidate or public Dataset. Execution and
+publication remain subject to the monitored safety gates, zero failed
+sessions, deep validation, and both reviews. The accepted evidence
 index and canonical-reference designation additionally bind a closed,
 path-free fingerprint of the exact Python, package, solver, BLAS/LAPACK, CPU
 availability, and numerical-thread runtime.
@@ -647,8 +652,10 @@ the published SANOS dataset identity is recorded as the canonical reference.
 Offline implementation status: the non-AI operator path, troubleshooting,
 retention policy, aggregate operator extra, self-contained wheel/sdist contract,
 installed-artifact verifier, Markdown-link check, and out-of-tree paper CI are
-implemented and passed final dual review. Project licensing and the
-`.git-real` metadata handoff remain explicit owner/host release gates.
+implemented. The 476-test offline suite and Python CI pass; paper CI remains
+unresolved, so this is not yet a complete release-readiness pass. Project
+licensing and the `.git-real` metadata handoff remain explicit owner/host
+release gates.
 
 - Complete the README path from installation and configuration through WRDS
   authentication, raw download, intermediate build, dataset publication,

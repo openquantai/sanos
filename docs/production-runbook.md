@@ -14,6 +14,12 @@ owner gate. WRDS connection opens are governed by the host-local account-scoped
 monitor: they are serialized, and a fourth failed or interrupted attempt in a
 rolling 15-minute window is blocked before network access.
 
+> **Current execution status (2026-10-17):** the 918-session regeneration has
+> restarted from pinned source revision `0116b15`. This is not a completion or
+> publication claim: no newly regenerated complete public candidate or public
+> Dataset exists yet. Evidence belongs below the operator-selected
+> `PRODUCTION_EVIDENCE` root and is not checked into this repository.
+
 Prepare a dedicated CPython 3.12 environment from the reviewed source checkout:
 
 ```bash
