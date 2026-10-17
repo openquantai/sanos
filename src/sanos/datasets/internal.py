@@ -84,9 +84,9 @@ from sanos.widb.surface import (
 from sanos.wrds import raw_content_producer_version
 
 RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
-INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v7"
-PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
-LINEAGE_SCHEMA = "sanos-internal-lineage-v4"
+INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v8"
+PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v2"
+LINEAGE_SCHEMA = "sanos-internal-lineage-v5"
 VALIDATION_SCHEMA = "sanos-internal-validation-v7"
 DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v5"
 LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v4"
@@ -245,7 +245,7 @@ def _reason_counts(frame: pl.DataFrame) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-@version("2.0")
+@version("3.0")
 @dataclass(frozen=True, slots=True)
 class _SolverCall:
     """One logical solve, including its authenticated ordered attempts."""
@@ -313,6 +313,19 @@ def _solver_calls(
         "midpoint_max_sum",
         "contracted_objective_recomputed",
     }
+    raw_candidate_fields = {
+        "raw_candidate_digest",
+        "raw_explicit_constraint_max",
+        "raw_variable_bound_max",
+        "raw_density_min",
+        "raw_density_max",
+        "raw_mass_residual_max",
+        "raw_moment_residual_max",
+        "raw_calendar_violation_max",
+        "raw_contracted_slack_sum",
+        "raw_midpoint_max_sum",
+        "raw_contracted_objective_recomputed",
+    }
     native_fields = {
         "native_model_status",
         "native_solve_time",
@@ -362,7 +375,7 @@ def _solver_calls(
             "original_algorithm",
             "original_status",
         }
-        allowed = candidate_core_fields | native_fields
+        allowed = candidate_core_fields | raw_candidate_fields | native_fields
         if event.get("status") == "feasible_nonoptimal":
             allowed |= terminal_fields
             if not terminal_fields.issubset(extras):
@@ -378,6 +391,14 @@ def _solver_calls(
             or _HEX_64.fullmatch(cast(str, event.get("candidate_digest"))) is None
         ):
             _fail(f"{label} diagnostics has invalid candidate provenance")
+        present_raw = extras & raw_candidate_fields
+        if present_raw and present_raw != raw_candidate_fields:
+            _fail(f"{label} diagnostics has incomplete raw-candidate provenance")
+        if present_raw and (
+            not isinstance(event.get("raw_candidate_digest"), str)
+            or _HEX_64.fullmatch(cast(str, event.get("raw_candidate_digest"))) is None
+        ):
+            _fail(f"{label} diagnostics has invalid raw-candidate digest")
         for name in candidate_core_fields - {
             "candidate_inspected",
             "candidate_available",
@@ -385,6 +406,14 @@ def _solver_calls(
             "candidate_digest",
             "candidate_policy",
         }:
+            value = event.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                _fail(f"{label} diagnostics candidate {name} is invalid")
+        for name in present_raw - {"raw_candidate_digest"}:
             value = event.get(name)
             if (
                 isinstance(value, bool)
@@ -414,6 +443,18 @@ def _solver_calls(
             or float(event["mass_residual_max"]) > tolerance
             or float(event["moment_residual_max"]) > tolerance
             or float(event["calendar_violation_max"]) > tolerance
+            or (
+                bool(present_raw)
+                and (
+                    float(event["raw_explicit_constraint_max"]) > tolerance
+                    or float(event["raw_variable_bound_max"]) > tolerance
+                    or float(event["raw_density_min"]) < -tolerance
+                    or float(event["raw_density_max"]) > 1.0 + tolerance
+                    or float(event["raw_mass_residual_max"]) > tolerance
+                    or float(event["raw_moment_residual_max"]) > tolerance
+                    or float(event["raw_calendar_violation_max"]) > tolerance
+                )
+            )
         ):
             _fail(f"{label} diagnostics accepted candidate violates its tolerance")
         if event.get("status") == "feasible_nonoptimal" and (
@@ -3247,10 +3288,20 @@ def plan_internal_dataset(config: InternalDatasetConfig) -> InternalDatasetPlan:
                 "Fitted source selection must cover every planned date exactly; "
                 "arbitrary Dataset omissions are prohibited"
             )
+        for item, binding in zip(daily_artifacts, fitted_bindings, strict=True):
+            if binding.replacement_source is not None:
+                expected = _original_source_from_item(item)
+                if (
+                    binding.replacement_source != expected
+                    or binding.selected != item.fitted.pointer
+                ):
+                    raise ValueError(
+                        f"{item.trading_date}: replacement fitted source differs from current plan"
+                    )
     mapping = tuple(
         {
             "trading_date": binding.trading_date,
-            "roles": binding.original_source.raw_roles,
+            "roles": binding.effective_source.raw_roles,
         }
         for binding in fitted_bindings
     )
@@ -3260,7 +3311,7 @@ def plan_internal_dataset(config: InternalDatasetConfig) -> InternalDatasetPlan:
             {
                 pointer
                 for binding in fitted_bindings
-                for pointer in binding.original_source.raw_roles.values()
+                for pointer in binding.effective_source.raw_roles.values()
             }
         )
     )
@@ -3858,7 +3909,7 @@ def publish_raw_lineage_catalog(
     mapping = tuple(
         {
             "trading_date": binding.trading_date,
-            "roles": binding.original_source.raw_roles,
+            "roles": binding.effective_source.raw_roles,
         }
         for binding in plan.fitted_bindings
     )
@@ -4098,6 +4149,7 @@ def validate_internal_dataset(
     chain_raw_roles: list[dict[str, ArtifactPointer]] = []
     chain_fitted: list[ArtifactPointer] = []
     chain_original_fitted: list[ArtifactPointer] = []
+    chain_replacement_sources: list[OriginalFittedSource | None] = []
     chain_recovery_policy: list[str | None] = []
     chain_failure_evidence: list[str | None] = []
     chain_stages: list[dict[str, ArtifactPointer]] = []
@@ -4110,6 +4162,7 @@ def validate_internal_dataset(
         "filtered",
         "fitted_original_expected",
         "fitted",
+        "fitted_replacement_source",
         "fitted_recovery_policy_id",
         "fitted_failure_evidence_sha256",
     }
@@ -4152,6 +4205,18 @@ def validate_internal_dataset(
                 f"daily chain {index} original fitted",
             )
         )
+        replacement_value = chain.get("fitted_replacement_source")
+        replacement_source = None
+        if replacement_value is not None:
+            if configured_selection is None:
+                _fail(f"Dataset lineage chain {index} has an unconfigured replacement")
+            replacement_source = configured_selection.bindings[index].replacement_source
+            if (
+                replacement_source is None
+                or canonical_value(replacement_source.as_dict()) != replacement_value
+            ):
+                _fail(f"Dataset lineage chain {index} replacement source differs")
+        chain_replacement_sources.append(replacement_source)
         policy = chain.get("fitted_recovery_policy_id")
         evidence = chain.get("fitted_failure_evidence_sha256")
         if policy is not None and not isinstance(policy, str):
@@ -4160,15 +4225,32 @@ def validate_internal_dataset(
             _fail(f"Dataset lineage chain {index} has invalid failure evidence")
         chain_recovery_policy.append(policy)
         chain_failure_evidence.append(evidence)
+        if configured_selection is not None:
+            configured_binding = configured_selection.bindings[index]
+            effective = configured_binding.effective_source
+            if parsed_roles != effective.raw_roles or any(
+                parsed_stages[stage] != getattr(effective, stage)
+                for stage in ("paired", "enriched", "no_arb", "filtered")
+            ):
+                _fail(f"Dataset lineage chain {index} differs from its effective source")
+            if (
+                parsed_stages["fitted"] != configured_binding.selected
+                or chain_original_fitted[index] != configured_binding.original_expected
+            ):
+                _fail(f"Dataset lineage chain {index} fitted provenance differs")
     selection = dataset.config.fitted_selection
     if selection is None:
         if any(
-            selected != original or policy is not None or evidence is not None
-            for selected, original, policy, evidence in zip(
+            replacement is not None
+            or selected != original
+            or policy is not None
+            or evidence is not None
+            for selected, original, policy, evidence, replacement in zip(
                 chain_fitted,
                 chain_original_fitted,
                 chain_recovery_policy,
                 chain_failure_evidence,
+                chain_replacement_sources,
                 strict=True,
             )
         ):
@@ -4183,6 +4265,7 @@ def validate_internal_dataset(
             selected,
             policy,
             evidence,
+            replacement_source,
         ) in enumerate(
             zip(
                 expected_dates,
@@ -4192,27 +4275,16 @@ def validate_internal_dataset(
                 chain_fitted,
                 chain_recovery_policy,
                 chain_failure_evidence,
+                chain_replacement_sources,
                 strict=True,
             )
         ):
             observed_bindings_list.append(
                 FittedSourceBinding(
                     trading_date=trading_date,
-                    original_source=OriginalFittedSource(
-                        trading_date=trading_date,
-                        raw_security=roles["security"],
-                        raw_options=roles["options"],
-                        raw_spot=roles["spot"],
-                        raw_previous_spot=roles["previous_spot"],
-                        raw_forwards=roles["forwards"],
-                        raw_zero_curve=roles["zero_curve"],
-                        paired=stages["paired"],
-                        enriched=stages["enriched"],
-                        no_arb=stages["no_arb"],
-                        filtered=stages["filtered"],
-                        expected_fitted=original,
-                    ),
+                    original_source=selection.bindings[index].original_source,
                     selected=selected,
+                    replacement_source=replacement_source,
                     recovery_policy_id=policy,
                     failure_evidence_sha256=evidence,
                     failure_evidence=selection.bindings[index].failure_evidence,
@@ -4241,6 +4313,7 @@ def validate_internal_dataset(
         "fitted_artifacts",
         "fitted_original_expected",
         "fitted_recovery_count",
+        "fitted_replacement_count",
         "fitted_original_plan_sha256",
         "fitted_original_source_revision",
         "planned_date_count",
@@ -4299,6 +4372,10 @@ def validate_internal_dataset(
         policy is not None for policy in chain_recovery_policy
     ):
         _fail("Dataset manifest fitted recovery count differs from daily lineage")
+    if metadata.get("fitted_replacement_count") != sum(
+        source is not None for source in chain_replacement_sources
+    ):
+        _fail("Dataset manifest fitted replacement count differs from daily lineage")
     if metadata.get("fitted_original_plan_sha256") != (
         None if selection is None else selection.original_plan_sha256
     ) or metadata.get("fitted_original_source_revision") != (
@@ -4492,6 +4569,7 @@ def validate_internal_dataset(
         "byte_size",
         "fitted_artifact",
         "fitted_original_expected",
+        "fitted_replacement_source",
         "fitted_recovery_policy_id",
         "fitted_failure_evidence_sha256",
         "fitted_manifest_sha256",
@@ -4532,6 +4610,17 @@ def validate_internal_dataset(
         )
         if original_pointer != chain_original_fitted[index]:
             _fail(f"{expected_date}: partition and lineage original pointers differ")
+        expected_replacement = chain_replacement_sources[index]
+        replacement_value = record.get("fitted_replacement_source")
+        expected_replacement_value = (
+            None
+            if expected_replacement is None
+            else canonical_value(expected_replacement.as_dict())
+        )
+        if replacement_value != (
+            expected_replacement_value
+        ):
+            _fail(f"{expected_date}: partition and lineage replacement sources differ")
         if record.get("fitted_recovery_policy_id") != chain_recovery_policy[index]:
             _fail(f"{expected_date}: partition and lineage recovery policies differ")
         if record.get("fitted_failure_evidence_sha256") != chain_failure_evidence[index]:
@@ -4668,12 +4757,12 @@ def validate_internal_dataset(
     return summary
 
 
-@version("2.0")
+@version("3.0")
 def _daily_chain_record(
     item: DailyArtifactPlan,
     binding: FittedSourceBinding,
 ) -> dict[str, Any]:
-    original = binding.original_source
+    original = binding.effective_source
     return {
         "trading_date": item.trading_date,
         "raw_roles": original.raw_roles,
@@ -4683,6 +4772,9 @@ def _daily_chain_record(
         "filtered": original.filtered,
         "fitted_original_expected": binding.original_expected,
         "fitted": binding.selected,
+        "fitted_replacement_source": (
+            None if binding.replacement_source is None else binding.replacement_source.as_dict()
+        ),
         "fitted_recovery_policy_id": binding.recovery_policy_id,
         "fitted_failure_evidence_sha256": binding.failure_evidence_sha256,
     }
@@ -4732,7 +4824,12 @@ def _validate_fitted_sources(
     for completed, (item, binding) in enumerate(
         zip(plan.daily_artifacts, plan.fitted_bindings, strict=True), start=1
     ):
-        if binding.recovery_policy_id is None:
+        if binding.replacement_source is not None:
+            expected = _original_source_from_item(item)
+            if binding.replacement_source != expected or binding.selected != item.fitted.pointer:
+                _fail(f"{item.trading_date}: replacement fitted source is not authentic")
+            artifact = store.validate(binding.selected, expected=item.fitted, deep=True)
+        elif binding.recovery_policy_id is None:
             artifact = store.validate(binding.selected, deep=True)
         else:
             selection = config.fitted_selection
@@ -4771,7 +4868,7 @@ def _validate_fitted_sources(
             config=config,
             trading_date=item.trading_date,
             typed_empty_reason=typed_reason,
-            expected_raw_options_artifact_id=binding.original_source.raw_options.artifact_id,
+            expected_raw_options_artifact_id=binding.effective_source.raw_options.artifact_id,
         )
         artifacts.append(artifact)
         statistics.append(item_statistics)
@@ -4793,7 +4890,7 @@ def _validate_fitted_sources(
     planned_raw = {
         pointer
         for binding in plan.fitted_bindings
-        for pointer in binding.original_source.raw_roles.values()
+        for pointer in binding.effective_source.raw_roles.values()
     }
     catalog_raw = set(plan.raw_catalog_spec.upstream)
     if planned_raw != catalog_raw:
@@ -4856,6 +4953,11 @@ def _publish_internal_dataset(
                 "byte_size": source_path.stat().st_size,
                 "fitted_artifact": artifact.pointer,
                 "fitted_original_expected": binding.original_expected,
+                "fitted_replacement_source": (
+                    None
+                    if binding.replacement_source is None
+                    else binding.replacement_source.as_dict()
+                ),
                 "fitted_recovery_policy_id": binding.recovery_policy_id,
                 "fitted_failure_evidence_sha256": binding.failure_evidence_sha256,
                 "fitted_manifest_sha256": _dataset_sha256_file(artifact.path / "manifest.json"),
@@ -4931,6 +5033,9 @@ def _publish_internal_dataset(
         "fitted_recovery_count": sum(
             binding.recovery_policy_id is not None for binding in plan.fitted_bindings
         ),
+        "fitted_replacement_count": sum(
+            binding.replacement_source is not None for binding in plan.fitted_bindings
+        ),
         "fitted_original_plan_sha256": (
             None
             if config.fitted_selection is None
@@ -4991,7 +5096,7 @@ def _publish_internal_dataset(
                     trading_date=item.trading_date,
                     typed_empty_reason=cast(str | None, record["typed_empty_reason"]),
                     expected_raw_options_artifact_id=(
-                        binding.original_source.raw_options.artifact_id
+                        binding.effective_source.raw_options.artifact_id
                     ),
                 )
                 now = time.monotonic()

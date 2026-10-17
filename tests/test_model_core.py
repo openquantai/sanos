@@ -804,6 +804,173 @@ def test_lp_solver_accepts_only_independently_feasible_terminal_candidate(
     assert accepted["candidate_policy"] == "smooth-feasible-nonoptimal-v1"
     assert accepted["explicit_constraint_max"] <= 1.0e-7
     assert len(str(accepted["candidate_digest"])) == 64
+    assert accepted["raw_explicit_constraint_max"] <= 1.0e-7
+    assert len(str(accepted["raw_candidate_digest"])) == 64
+
+
+def test_invalid_normal_success_uses_prior_validated_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+    calls = 0
+
+    def limit_then_optimal(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_solve(problem, *args, **kwargs)
+        calls += 1
+        if calls == 1:
+            problem._status = "user_limit"
+        return result
+
+    def reject_normal() -> dict[str, object]:
+        raise ValueError("published state is invalid")
+
+    monkeypatch.setattr(cp.Problem, "solve", limit_then_optimal)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning):
+        result = SanosLPSolver(
+            timeout_seconds=10.0,
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": float(variable.value),
+            },
+            successful_solution_validator=reject_normal,
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert result == (True, "feasible_nonoptimal", True)
+    assert [event["status"] for event in events] == [
+        "user_limit",
+        "invalid_solution",
+        "feasible_nonoptimal",
+    ]
+    assert events[-1]["original_solver"] == "HIGHS"
+
+
+def test_candidate_pool_ranks_only_exact_published_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+    published_attempt = 0
+
+    def return_finite_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        result = original_solve(problem, *args, **kwargs)
+        problem._status = "user_limit"
+        return result
+
+    def validate_published() -> dict[str, object]:
+        nonlocal published_attempt
+        published_attempt += 1
+        if published_attempt != 2:
+            raise ValueError("published state is invalid")
+        return {"contracted_objective_recomputed": 2.0}
+
+    monkeypatch.setattr(cp.Problem, "solve", return_finite_limit)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning):
+        result = SanosLPSolver(
+            timeout_seconds=10.0,
+            fallback_algorithms=("ipm", "clarabel"),
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": 1.0,
+            },
+            feasible_nonoptimal_published_validator=validate_published,
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert result == (True, "feasible_nonoptimal", True)
+    assert events[-1]["original_algorithm"] == "ipm"
+    assert events[-1]["contracted_objective_recomputed"] == 2.0
+    inspected = [
+        event
+        for event in events
+        if event.get("candidate_inspected") and event["status"] == "user_limit"
+    ]
+    assert [event.get("candidate_accepted") for event in inspected] == [False, True, False]
+
+
+def test_valid_normal_success_takes_priority_over_candidate_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+    calls = 0
+
+    def limit_then_optimal(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_solve(problem, *args, **kwargs)
+        calls += 1
+        if calls == 1:
+            problem._status = "user_limit"
+        return result
+
+    monkeypatch.setattr(cp.Problem, "solve", limit_then_optimal)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="reached its limit"):
+        result = SanosLPSolver(
+            timeout_seconds=10.0,
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": float(variable.value),
+            },
+            successful_solution_validator=lambda: {},
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert result == (True, "optimal", True)
+    assert [event["status"] for event in events] == ["user_limit", "optimal"]
+
+
+def test_invalid_normal_success_without_valid_candidate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+    calls = 0
+
+    def limit_then_optimal(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_solve(problem, *args, **kwargs)
+        calls += 1
+        if calls == 1:
+            problem._status = "user_limit"
+        return result
+
+    def reject() -> dict[str, object]:
+        raise ValueError("not valid")
+
+    monkeypatch.setattr(cp.Problem, "solve", limit_then_optimal)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning):
+        result = SanosLPSolver(
+            timeout_seconds=10.0,
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=reject,
+            successful_solution_validator=reject,
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert result == (False, "invalid_solution", True)
+    assert [event["status"] for event in events] == ["user_limit", "invalid_solution"]
 
 
 def test_lp_solver_rejects_constraint_violating_terminal_candidate(
@@ -1051,11 +1218,22 @@ def test_smooth_recovery_records_postprocessing_that_removes_subfloor_mass(
     published = events[-1]
     assert accepted["status"] == "feasible_nonoptimal"
     assert published["status"] == "feasible_nonoptimal_published"
-    assert float(accepted["contracted_objective_recomputed"]) != pytest.approx(
+    assert float(accepted["candidate_auxiliary_objective"]) != pytest.approx(
+        float(accepted["contracted_objective_recomputed"]),
+        rel=0.0,
+        abs=1.0e-12,
+    )
+    assert float(accepted["contracted_objective_recomputed"]) == pytest.approx(
         float(published["published_state_contracted_objective_recomputed"]),
         rel=0.0,
         abs=1.0e-12,
     )
+    assert float(accepted["raw_contracted_objective_recomputed"]) != pytest.approx(
+        float(accepted["contracted_objective_recomputed"]),
+        rel=0.0,
+        abs=1.0e-12,
+    )
+    assert accepted["raw_candidate_digest"] != accepted["candidate_digest"]
     np.testing.assert_array_equal(
         result.xdensities[0],
         np.array([0.0, 0.0, 1.0 - 2.0 * tiny, 0.0, 0.0]),
@@ -1226,7 +1404,7 @@ def test_numerical_components_have_resolved_versions() -> None:
         "warn_and_fix_density",
     }
     assert "1.0-blocked-cd013" in str(getattr(SanosPricer, "version"))
-    assert str(getattr(SanosLPSolver, "version")).startswith("1.3")
+    assert str(getattr(SanosLPSolver, "version")).startswith("1.5")
 
 
 def test_defective_reference_jax_optimizer_is_explicitly_blocked() -> None:

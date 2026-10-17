@@ -445,11 +445,17 @@ self-describing Polars frame.
   it as `feasible_nonoptimal`, preserve the original failure provenance, and
   report its exact objective and residuals; never infer feasibility from
   status alone.
-- Preserve every already successful fitted pointer byte-for-byte. Resolve an
-  unresolved date only through a distinct exact recovery identity bound to its
-  absent original expected pointer, filtered upstream pointer, and recovery
-  policy. The Dataset's configured source set and evidence must authenticate
-  this mixed original/recovery lineage without wildcard lookup or relabelling.
+- Preserve every already successful fitted pointer byte-for-byte. Authenticate
+  a complete frozen original plan, validate its exact completed targets, and
+  run only absent targets through the ordinary current `build_intermediates`
+  path. The automatic resume process owns discovery of missing targets and the
+  normal solver policy; operators and agents do not enumerate dates or create
+  failure/candidate process data.
+- Represent each successful current-version result as a typed replacement
+  source paired with its original expected pointer and original full lineage.
+  Emit a complete replacement Dataset configuration only when every date is
+  resolved. The Dataset independently authenticates the mixed exact source set
+  without wildcard lookup, artifact relabelling, or partial publication.
 
 Acceptance: per-stage row/expiry counts and numerical values match reference
 fixtures within declared tolerances; all no-arbitrage invariants hold; restart
@@ -645,6 +651,16 @@ index and canonical-reference designation additionally bind a closed,
 path-free fingerprint of the exact Python, package, solver, BLAS/LAPACK, CPU
 availability, and numerical-thread runtime.
 
+The pinned `0116b15` full-range run was subsequently stopped cleanly with all
+completed immutable fitted artifacts preserved. Completion proceeds through the
+official automatic fitted-resume workflow described in Phase 6: exact old
+successes are validated and retained, and only absent original targets enter
+the ordinary current Intermediate build. This does not yet constitute a
+complete Dataset or publication claim. The authenticated full-range dry run
+closed over all 918 planned dates, selecting 362 exact original successes and
+planning 556 current replacements without WRDS access or an output-config
+write; material resume remains pending.
+
 - Through the connection-attempt monitor, download every required raw partition
   fresh. Do not read old raw/intermediate data as an input.
 - Resume safely across interruptions, never exceeding four WRDS connections;
@@ -665,17 +681,17 @@ the published SANOS dataset identity is recorded as the canonical reference.
 Offline implementation status: the non-AI operator path, troubleshooting,
 retention policy, aggregate operator extra, self-contained wheel/sdist contract,
 installed-artifact verifier, Markdown-link check, and out-of-tree paper CI are
-implemented. The recovery-policy offline suite and focused exporter regressions
-passed. Test maintenance is judged by preserved failure-mode coverage, not the
-number of collected cases. The earlier Python
-CI passed. The remote paper-CI dependency fix is merged; a successful CI run for
+implemented. The numerical-policy automatic-resume suite and focused
+frozen-plan regressions passed. Test maintenance is judged by preserved
+failure-mode coverage, not the number of collected cases. The earlier Python CI
+passed. The remote paper-CI dependency fix is merged; a successful CI run for
 this integrated revision has not yet been verified. Project
 licensing and the `.git-real` metadata handoff remain explicit owner/host
 release gates.
 
 - Complete the README path from installation and configuration through WRDS
   authentication, raw download, intermediate build, dataset publication,
-  validation, public approval, experiment build, cleanup, and recovery.
+  validation, public approval, experiment build, cleanup, and fitted resume.
 - Document every field and normalization convention, including spot/forward/
   discounted-forward units and calendar/business DTE.
 - Add troubleshooting, structured-log examples, storage cleanup policy, and a
@@ -685,7 +701,7 @@ release gates.
 
 Acceptance: a user following only repository documentation can reproduce all
 non-credentialed operations and understands the WRDS credential, attempt-monitor,
-and recovery behavior.
+and automatic fitted-resume behavior.
 
 ## Initial compatibility decision register
 

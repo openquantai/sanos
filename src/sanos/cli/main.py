@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import platform
+import stat
 import sys
 import warnings
 from collections.abc import Mapping, Sequence
@@ -109,7 +110,7 @@ from sanos.widb.recovery import (
     OriginalFittedPlan,
     OriginalFittedSource,
     read_original_fitted_plan,
-    recover_failed_fitted_sources,
+    resume_fitted_sources,
 )
 from sanos.wrds import (
     ALL_RAW_TABLES,
@@ -1650,7 +1651,7 @@ def intermediate_export_fitted_plan(
     )
 
 
-@intermediate.command("recover-fitted")
+@intermediate.command("resume-fitted")
 @click.option(
     "--config",
     "config_path",
@@ -1665,39 +1666,39 @@ def intermediate_export_fitted_plan(
     help="Frozen complete fitted plan exported by the original source revision.",
 )
 @click.option(
-    "--failure-evidence",
-    required=True,
-    type=click.Path(path_type=Path, dir_okay=False, exists=True),
-    help="Original append-only run journal recording each requested failed day.",
-)
-@click.option(
-    "--failed-date",
-    "failed_dates",
-    required=True,
-    multiple=True,
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Exact journal-confirmed failed date to retry; repeat for multiple failures.",
-)
-@click.option(
     "--output-config",
     required=True,
     type=click.Path(path_type=Path, dir_okay=False),
-    help="New portable Dataset configuration binding all original/recovered pointers.",
+    help="New Dataset configuration binding original successes and current replacements.",
 )
+@click.option("--max-workers", type=click.IntRange(1, 4), default=1, show_default=True)
 @click.pass_obj
-def intermediate_recover_fitted(
+def intermediate_resume_fitted(
     context: CliContext,
     config_path: Path,
     original_plan: Path,
-    failure_evidence: Path,
-    failed_dates: tuple[datetime, ...],
     output_config: Path,
+    max_workers: int,
 ) -> None:
-    """Retry only explicit failed fits and bind them without replacing successes."""
+    """Resume every missing fit with the current validated production pipeline."""
 
     try:
+        output_absolute = Path(os.path.abspath(os.fspath(output_config.expanduser())))
+        current = Path(output_absolute.parts[0])
+        for part in output_absolute.parts[1:]:
+            current /= part
+            try:
+                mode = current.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if current == output_absolute:
+                raise ValueError(f"Output Dataset config already exists: {output_config}")
+            if not stat.S_ISDIR(mode):
+                raise ValueError("Output Dataset config path contains a non-directory component")
         locations = context.locations.require_complete()
         config = _read_dataset_config(config_path)
+        if config.fitted_selection is not None:
+            raise ValueError("Resume requires an original Dataset config without fitted_selection")
         frozen = read_original_fitted_plan(original_plan)
         configured_digest = canonical_sha256(
             {
@@ -1716,38 +1717,71 @@ def intermediate_recover_fitted(
         )
         if frozen.configuration_sha256 != configured_digest:
             raise ValueError("Original fitted plan belongs to a different Dataset configuration")
-        selection = recover_failed_fitted_sources(
+
+        def progress(payload: Any) -> None:
+            _emit(context, "fitted_resume_progress", **dict(payload))
+
+        selection, result = resume_fitted_sources(
             locations,
             original_plan=frozen,
-            failure_evidence=failure_evidence,
-            failed_dates=tuple(item.date() for item in failed_dates),
+            daily_config=config.daily,
             surface_config=config.surface,
             include_half_days=config.include_half_days,
+            source=config.source,
+            source_generation=config.source_generation,
+            max_workers=max_workers,
             dry_run=context.dry_run,
+            progress=progress,
         )
-        document = json.loads(config_path.read_text(encoding="utf-8"))
-        if not isinstance(document, dict) or "fitted_selection" in document:
-            raise ValueError(
-                "Recovery requires an original Dataset config without fitted_selection"
-            )
+        document = {
+            "dataset": {
+                "name": config.name,
+                "ticker": config.ticker,
+                "start_date": config.start_date.isoformat(),
+                "end_date": config.end_date.isoformat(),
+                "include_half_days": config.include_half_days,
+                "source": config.source,
+                "source_generation": config.source_generation,
+            },
+            "daily": canonical_value(config.daily),
+            "surface": canonical_value(config.surface),
+        }
         document["fitted_selection"] = selection.as_dict()
         InternalDatasetConfig.from_document(document)
         if not context.dry_run:
             atomic_create_json(output_config, document)
     except LocationConfigurationError as exc:
         raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except DailyExecutionError as exc:
+        details = "; ".join(
+            f"{failure.key}: {failure.error_type}: {failure.message}"
+            for failure in exc.summary.failures
+        )
+        raise MaterialCliError(
+            f"{exc}{'; ' if details else ''}{details}", log_format=context.log_format
+        ) from exc
     except (ArtifactError, OSError, ValueError) as exc:
         raise MaterialCliError(str(exc), log_format=context.log_format) from exc
-    recovered = tuple(item for item in selection.bindings if item.recovery_policy_id is not None)
+    replacements = tuple(
+        binding for binding in selection.bindings if binding.replacement_source is not None
+    )
+    summary = result.summary
     _emit(
         context,
-        "fitted_recovery_result",
+        "fitted_resume_result",
         dry_run=context.dry_run,
         original_plan_sha256=selection.original_plan_sha256,
-        selected=len(selection.bindings),
-        recovered=len(recovered),
-        failed_dates=tuple(item.trading_date for item in recovered),
-        recovery_artifacts=tuple(item.selected for item in recovered),
+        total=len(selection.bindings),
+        original_reused=len(selection.bindings) - len(replacements),
+        replacements=len(replacements),
+        built=0 if summary is None else summary.completed,
+        failed=0 if summary is None else summary.failed,
+        plan_id=result.plan.plan_id,
+        journal=(
+            locations.intermediate / ".runs" / "widb" / f"{result.plan.plan_id}.jsonl"
+            if summary is None
+            else summary.journal_path
+        ),
         output_config=None if context.dry_run else output_config,
         network_accessed=False,
     )

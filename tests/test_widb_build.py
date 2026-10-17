@@ -76,6 +76,12 @@ from sanos.widb.build import (
     publish_daily_frame,
     read_daily_frame,
 )
+from sanos.widb.recovery import (
+    ORIGINAL_FITTED_PLAN_SCHEMA,
+    FittedSourceBinding,
+    FittedSourceSelection,
+    OriginalFittedPlan,
+)
 from sanos.wrds import RawPartition, RawTable, raw_artifact_request, raw_content_producer_version
 
 
@@ -1068,6 +1074,7 @@ def test_internal_dataset_publication_is_self_contained_and_output_first(
     deep = validate_internal_dataset(store, result.artifact, deep_lineage=True)
     assert deep is not None and deep.row_count == result.validation.row_count
 
+
     interrupted_config = replace(_dataset_config(trading_date), name="interrupted-test")
     expected_interrupted = plan_internal_dataset(interrupted_config).dataset_spec.pointer
     copy_file = artifact_store_module.ArtifactBuilder.copy_file
@@ -1124,6 +1131,96 @@ def test_internal_dataset_publication_is_self_contained_and_output_first(
     assert not reused.built
     assert reused.reuse is not None and reused.reuse.used_wildcard
     assert reused.artifact == result.artifact
+
+
+def test_internal_dataset_publishes_mixed_original_and_current_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locations = _locations(tmp_path / "mixed-resume")
+    store = ArtifactStore(locations)
+    start = date(2024, 1, 3)
+    end = date(2024, 1, 4)
+    for trading_date in (start, end):
+        _publish_raw_inputs(store, trading_date)
+    base = replace(_dataset_config(start), name="mixed-resume", end_date=end)
+    build_intermediates(
+        locations,
+        IntermediateBuildRequest(
+            ticker="SPX", start_date=start, end_date=end, through="fitted-day"
+        ),
+        base.daily,
+        base.surface,
+    )
+    current_plan = plan_internal_dataset(base)
+    current_sources = tuple(
+        internal_dataset_module._original_source_from_item(item)
+        for item in current_plan.daily_artifacts
+    )
+    old_second = replace(
+        current_sources[1],
+        paired=ArtifactPointer(current_sources[1].paired.storage_class, "old", "1" * 64),
+        enriched=ArtifactPointer(current_sources[1].enriched.storage_class, "old", "2" * 64),
+        no_arb=ArtifactPointer(current_sources[1].no_arb.storage_class, "old", "3" * 64),
+        filtered=ArtifactPointer(current_sources[1].filtered.storage_class, "old", "4" * 64),
+        expected_fitted=ArtifactPointer(
+            current_sources[1].expected_fitted.storage_class, "old", "5" * 64
+        ),
+    )
+    original_sources = (current_sources[0], old_second)
+    configuration_sha256 = canonical_sha256(
+        {
+            "dataset": {
+                "name": base.name,
+                "ticker": base.ticker,
+                "start_date": base.start_date,
+                "end_date": base.end_date,
+                "include_half_days": base.include_half_days,
+                "source": base.source,
+                "source_generation": base.source_generation,
+            },
+            "daily": base.daily,
+            "surface": base.surface,
+        }
+    )
+    unsigned = {
+        "schema": ORIGINAL_FITTED_PLAN_SCHEMA,
+        "ticker": "SPX",
+        "source_revision": "a" * 40,
+        "configuration_sha256": configuration_sha256,
+        "sources": [item.as_dict() for item in original_sources],
+    }
+    original_plan = OriginalFittedPlan(
+        ticker="SPX",
+        source_revision="a" * 40,
+        configuration_sha256=configuration_sha256,
+        sources=original_sources,
+        evidence_sha256=canonical_sha256(unsigned),
+    )
+    selection = FittedSourceSelection(
+        ticker="SPX",
+        original_plan_sha256=original_plan.evidence_sha256,
+        original_source_revision=original_plan.source_revision,
+        original_configuration_sha256=configuration_sha256,
+        bindings=(
+            FittedSourceBinding(start, current_sources[0], current_sources[0].expected_fitted),
+            FittedSourceBinding(
+                end,
+                old_second,
+                current_sources[1].expected_fitted,
+                replacement_source=current_sources[1],
+            ),
+        ),
+    )
+    monkeypatch.setattr(internal_dataset_module, "_source_revision", lambda: "b" * 40)
+    result = build_internal_dataset(
+        locations,
+        replace(base, fitted_selection=selection),
+        DatasetBuildOptions(max_workers=1),
+    )
+
+    assert result.validation is not None and result.validation.requested_dates == 2
+    assert validate_internal_dataset(store, result.artifact, deep_lineage=True) is not None
 
 
 def test_internal_dataset_round_trips_caret_optionmetrics_ticker(

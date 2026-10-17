@@ -20,6 +20,7 @@ from sanos.datasets import InternalDatasetConfig, plan_internal_dataset
 from sanos.datasets.internal import DatasetValidationError, _solver_calls
 from sanos.model.arbfree import MkArbFree
 from sanos.widb import DailySurfaceConfig, DailyWidbConfig
+from sanos.widb.build import IntermediateBuildRequest, plan_daily_artifacts
 from sanos.widb.recovery import (
     FITTED_SOURCE_SELECTION_SCHEMA,
     ORIGINAL_FITTED_PLAN_SCHEMA,
@@ -32,6 +33,7 @@ from sanos.widb.recovery import (
     fitted_recovery_spec,
     read_original_fitted_plan,
     recover_failed_fitted_sources,
+    resume_fitted_sources,
     write_selection,
 )
 
@@ -134,6 +136,53 @@ def test_selection_round_trip_preserves_complete_original_chain() -> None:
     assert binding.original_expected == source.expected_fitted
     assert binding.filtered == source.filtered
     assert binding.selected == recovered
+
+
+def test_resume_preserves_original_success_and_plans_every_missing_fit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daily = DailyWidbConfig()
+    surface = DailySurfaceConfig()
+    request = IntermediateBuildRequest(
+        ticker="SPX",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 4),
+        through="fitted-day",
+    )
+    current = plan_daily_artifacts(request, daily, surface)
+    current_sources = tuple(recovery_module._source_from_daily_plan(item) for item in current)
+    originals = tuple(
+        replace(source, expected_fitted=_pointer(f"old-{source.trading_date}-fitted"))
+        for source in current_sources
+    )
+    original_plan = _original_plan(*originals)
+    original_validate = ArtifactStore.validate
+
+    def validate_first_only(store: ArtifactStore, pointer, *args, **kwargs):
+        if pointer == originals[0].expected_fitted:
+            return object()
+        return original_validate(store, pointer, *args, **kwargs)
+
+    monkeypatch.setattr(ArtifactStore, "validate", validate_first_only)
+    selection, result = resume_fitted_sources(
+        _locations(tmp_path),
+        original_plan=original_plan,
+        daily_config=daily,
+        surface_config=surface,
+        include_half_days=True,
+        source="optionmetrics",
+        source_generation="default-v1",
+        max_workers=1,
+        dry_run=True,
+    )
+
+    assert result.dry_run
+    assert selection.bindings[0].selected == originals[0].expected_fitted
+    assert selection.bindings[0].replacement_source is None
+    assert selection.bindings[1].selected == current_sources[1].expected_fitted
+    assert selection.bindings[1].replacement_source == current_sources[1]
+    assert FittedSourceSelection.from_document(selection.as_dict()) == selection
 
 
 def test_selection_rejects_coherent_original_source_substitution() -> None:

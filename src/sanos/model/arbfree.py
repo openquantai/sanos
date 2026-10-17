@@ -567,7 +567,7 @@ class ArbFreePricer(PrettyObject):
 
 
 @version(
-    "0.55",
+    "0.57",
     dependencies=[
         ArbFreePricer,
         SanosLPSolver,
@@ -1442,8 +1442,45 @@ class MkArbFree:
                     }
                 )
 
-            def validate_feasible_nonoptimal() -> Mapping[str, object]:
-                """Complete auxiliaries from q and authenticate the untouched surface."""
+            def postprocess_density(index: int, density: np.ndarray) -> np.ndarray:
+                """Apply the established common density postprocessing exactly once."""
+
+                expiry = expiries[index]
+                xstrikes_t = xstrikes[index]
+                q_t = np.array(density, dtype=np.float64, copy=True)
+                if (
+                    np.min(q_t) < -self._eps_density
+                    or abs(np.sum(q_t) - 1.0) > self._eps_dens_1
+                    or abs(q_t @ xstrikes_t - 1.0) > self._eps_dens_1
+                ):
+                    warnings.warn(
+                        f"{message()}Warning: no-arbitrage density does not satisfy basic properties after optimization: min {q_t.min():.3e}, sum {q_t.sum():.6f}, integral {q_t @ xstrikes_t:.6f} -- attempting fix."
+                    )
+                    q_t = warn_and_fix_density(
+                        xstrikes_t,
+                        q_t,
+                        eps=self._eps_density,
+                        message=lambda: (
+                            f"{message()}expiry {expiry * DAYS_PER_YEAR:.2f}d: surface density after optimization"
+                        ),
+                    )
+                floor = (
+                    max(self.min_density / float(len(q_t)), self._eps_density)
+                    if IMPOSE_FLOOR_ON_DENSITY
+                    else 0.0
+                )
+                q_t[q_t < floor] = 0.0
+                return warn_and_fix_density(
+                    xstrikes_t,
+                    q_t,
+                    eps=self._eps_density,
+                    message=lambda: (
+                        f"{message()} expiry {expiry * DAYS_PER_YEAR:.2f}d: surface density"
+                    ),
+                )
+
+            def surface_state_metrics(*, enforce_candidate_gate: bool) -> Mapping[str, object]:
+                """Complete auxiliaries and measure the current surface state."""
 
                 slack_sum = 0.0
                 midpoint_sum = 0.0
@@ -1501,7 +1538,7 @@ class MkArbFree:
                         float(np.max(np.maximum(previous_calls - calls, 0.0))),
                     )
                     previous_x, previous_q = x, q
-                if (
+                if enforce_candidate_gate and (
                     density_min < -self._eps_density
                     or density_max > 1.0 + self._eps_density
                     or mass_max > self._eps_dens_1
@@ -1521,6 +1558,28 @@ class MkArbFree:
                     * slack_sum
                     + eff_mid_fit_weight * midpoint_sum,
                 }
+
+            def validate_feasible_nonoptimal() -> Mapping[str, object]:
+                """Complete auxiliaries from q and authenticate the untouched surface."""
+
+                return surface_state_metrics(enforce_candidate_gate=True)
+
+            def postprocess_and_validate(*, enforce_candidate_gate: bool) -> Mapping[str, object]:
+                for index, block in enumerate(candidate_blocks):
+                    q_var = block["q"]
+                    assert isinstance(q_var, cp.Variable) and q_var.value is not None
+                    q_var.save_value(postprocess_density(index, q_var.value))
+                return surface_state_metrics(enforce_candidate_gate=enforce_candidate_gate)
+
+            def validate_published_candidate() -> Mapping[str, object]:
+                """Postprocess and authenticate a candidate before pool admission."""
+
+                return postprocess_and_validate(enforce_candidate_gate=True)
+
+            def validate_successful_solution() -> Mapping[str, object]:
+                """Authenticate the exact postprocessed state before accepting solver status."""
+
+                return postprocess_and_validate(enforce_candidate_gate=False)
 
             accept_feasible_nonoptimal = (
                 self._accept_feasible_nonoptimal and diagnostic_stage == "surface"
@@ -1549,6 +1608,12 @@ class MkArbFree:
                 ),
                 feasible_nonoptimal_validator=(
                     validate_feasible_nonoptimal if accept_feasible_nonoptimal else None
+                ),
+                feasible_nonoptimal_published_validator=(
+                    validate_published_candidate if accept_feasible_nonoptimal else None
+                ),
+                successful_solution_validator=(
+                    validate_successful_solution if accept_feasible_nonoptimal else None
                 ),
                 verbose=verbose,
             )
@@ -1585,45 +1650,14 @@ class MkArbFree:
             fits = []
             xdensities = [q.value for q in xdensities]
             for t in range(T):
-                expiry = expiries[t]
                 strikes_t = strikes[t]
-                xstrikes_t = xstrikes[t]
                 CX = CXs[t]
                 q_t = xdensities[t]
-                if (
-                    np.min(q_t) < -self._eps_density
-                    or abs(np.sum(q_t) - 1.0) > self._eps_dens_1
-                    or abs(q_t @ xstrikes_t - 1.0) > self._eps_dens_1
+                if not (
+                    accept_feasible_nonoptimal
+                    and status in {"optimal", "optimal_inaccurate", "feasible_nonoptimal"}
                 ):
-                    warnings.warn(
-                        f"{message()}Warning: no-arbitrage density does not satisfy basic properties after optimization: min {q_t.min():.3e}, sum {q_t.sum():.6f}, integral {q_t @ xstrikes_t:.6f} -- attempting fix."
-                    )
-                    q_t = warn_and_fix_density(
-                        xstrikes_t,
-                        q_t,
-                        eps=self._eps_density,
-                        message=lambda: (
-                            f"{message()}expiry {expiry * DAYS_PER_YEAR:.2f}d: surface density after optimization"
-                        ),
-                    )
-
-                # zero out some density
-                floor = (
-                    max(self.min_density / float(len(q_t)), self._eps_density)
-                    if IMPOSE_FLOOR_ON_DENSITY
-                    else 0.0
-                )
-                is_zero = q_t < floor
-                if np.any(is_zero):
-                    q_t[is_zero] = 0.0
-                q_t = warn_and_fix_density(
-                    xstrikes_t,
-                    q_t,
-                    eps=self._eps_density,
-                    message=lambda: (
-                        f"{message()} expiry {expiry * DAYS_PER_YEAR:.2f}d: surface density"
-                    ),
-                )
+                    q_t = postprocess_density(t, q_t)
                 xdensities[t] = q_t
                 fit_t = CX @ q_t
                 assert fit_t.shape == strikes_t.shape, (

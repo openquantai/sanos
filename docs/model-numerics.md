@@ -146,10 +146,23 @@ Quote auxiliaries are reconstructed at their exact minima from the candidate
 prices using the same one-percent inward bid/ask contraction as the LP. This
 proves a complete feasible LP point and supplies the exact comparable
 objective; fit quality is reported but is not an additional acceptance band.
-A normal success always wins. Otherwise the feasible candidate with the lowest
-exact objective is retained and explicitly marked `feasible_nonoptimal` with
-its original failure status and residual evidence. Both the raw candidate and
-published-state digests, residuals, and exact objectives are retained.
+A normal success always wins. A failed-attempt candidate enters the comparison
+pool only after both its raw state and unchanged postprocessed published state
+pass their complete gates. Otherwise the qualifying candidate with the lowest
+exact published-state objective is retained and explicitly marked
+`feasible_nonoptimal` with its original failure status and residual evidence.
+Both the raw candidate and published-state digests, residuals, and exact
+objectives are retained.
+
+This numerical policy is part of the ordinary current smooth-surface producer;
+it is not a manual recovery algorithm. After a policy change, `intermediate
+resume-fitted` validates exact artifacts completed by the frozen original plan
+and invokes the normal current Intermediate build only for original targets
+that are absent. Candidate discovery, validation, ranking, and publication
+therefore remain inside the versioned numerical pipeline. Neither an operator
+nor an agent supplies failed dates or candidate evidence. A current result is
+recorded as a typed replacement for its absent original target, while every
+old successful pointer remains unchanged.
 
 The generic numerical constructor can L2-project small density mass,
 positivity, or first-moment violations onto their joint feasible set. The

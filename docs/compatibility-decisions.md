@@ -730,21 +730,27 @@ both accepted it. Only `approved` may alter reference behavior.
   density, mass, martingale, strike, bound, and calendar state gates both before
   and after the unchanged common postprocessing used for normal successes. Do
   not add candidate-specific clipping, projection, repair, or refitting, and do
-  not add a downstream DLV step. A later normal
-  success always wins; otherwise choose the feasible candidate with the lowest
-  exact reconstructed objective. Persist `feasible_nonoptimal`, the original
+  not add a downstream DLV step. Only candidates whose raw and unchanged
+  published states both pass their complete gates enter the selection pool. A
+  later normal success always wins; otherwise choose the qualifying candidate
+  with the lowest exact reconstructed published-state objective. Persist
+  `feasible_nonoptimal`, the original
   solver failure, attempt and candidate identities, all residuals, objective
   decomposition, postprocessed published-state identity and metrics, and policy
   version.
 - **Expected impact:** only dates that otherwise have no successful smooth fit
   can gain a fitted-day output, and their fitting error may be higher than an
   optimum while structural no-arbitrage remains certified. Existing successful
-  artifacts retain their original byte identity and are selected directly.
-  Each unresolved date produces a distinct immutable recovery identity bound
-  to its absent original expected pointer, exact filtered upstream pointer, and
-  recovery-policy identity; it is never published under or aliased to the old
-  ID. Dataset configuration independently derives the exact mixed source set,
-  and deep validation authenticates every selected original or recovery
+  artifacts retain their original byte identity and are selected directly. An
+  authenticated frozen plan defines those exact original targets. The official
+  automatic resume process validates every completed original and sends only
+  absent targets through the ordinary current Intermediate build, with no
+  manual date list or agent-created failure/candidate data. Each current result
+  is retained under its normal current identity and represented as a typed
+  replacement paired with the absent original expected pointer and its full
+  original lineage; it is never published under or aliased to the old ID. A
+  replacement Dataset configuration is written only after all dates succeed.
+  Deep validation authenticates every selected original or replacement
   artifact. Dataset review must report the exact count and dates of
   `feasible_nonoptimal` outcomes separately from optimal outcomes.
 

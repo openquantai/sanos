@@ -26,15 +26,23 @@ contact WRDS. The exact 2022–2025 legacy comparison endpoint and numerical
 baseline are catalogued. The 476-test offline suite and Python CI pass; paper
 CI remains unresolved and is not part of the current pass claim.
 
-As of 2026-10-17, the full 918-session regeneration has restarted from pinned
-source revision `0116b15`. No newly regenerated complete public candidate or
-public Dataset exists yet. Publication remains gated on 918/918 successful
-sessions, deep validation, and code and quantitative review. An isolated
-one-day old/new LP comparison reproduced the same numerical solver failure in
-both implementations; it did not establish mathematical infeasibility or a
-regression caused by the corrected DLV contract. Run and recovery instructions
-are in the [fresh production runbook](docs/production-runbook.md); run evidence
-stays outside Git under the operator-selected evidence root.
+As of 2026-10-17, the pinned `0116b15` full-range run has been stopped cleanly;
+all completed immutable fitted-day artifacts remain available for exact reuse.
+No newly regenerated complete public candidate or public Dataset exists yet.
+Publication remains gated on 918/918 successful sessions, deep validation, and
+code and quantitative review. An isolated one-day old/new LP comparison
+reproduced the same numerical solver failure in both implementations; it did
+not establish mathematical infeasibility or a regression caused by the
+corrected DLV contract. The official automatic fitted-resume workflow validates
+and preserves every exact old success, then sends only absent original targets
+through the ordinary current Intermediate pipeline. Operators do not enumerate
+failed dates or create candidate process data. Its authenticated full-range dry
+run resolved the complete 918-date plan as 362 exact original successes and 556
+current replacements; dry-run mode accessed no WRDS data and wrote no output
+configuration. Material resume has not yet been claimed complete. Run and
+resume instructions are in the [fresh production
+runbook](docs/production-runbook.md); run evidence stays outside Git under the
+operator-selected evidence root.
 
 A technically validated projection remains `public_candidate` until separate
 redistribution approval is recorded. See

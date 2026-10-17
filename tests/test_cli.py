@@ -40,7 +40,7 @@ def test_help_exposes_the_supported_operator_workflows() -> None:
             "validate",
         ),
         ("production",): ("runtime-fingerprint", "finalize-configs", "evidence-index"),
-        ("intermediate",): ("build", "export-fitted-plan", "recover-fitted"),
+        ("intermediate",): ("build", "export-fitted-plan", "resume-fitted"),
     }
     runner = CliRunner()
     for command, expected in workflows.items():
@@ -48,6 +48,8 @@ def test_help_exposes_the_supported_operator_workflows() -> None:
         assert result.exit_code == 0, result.output
         for name in expected:
             assert name in result.output
+        if command == ("intermediate",):
+            assert "recover-fitted" not in result.output
 
 
 def test_doctor_json_is_offline_structured_and_non_mutating(tmp_path: Path) -> None:

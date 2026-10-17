@@ -876,7 +876,7 @@ class SanosPricer:
 
 
 @version(
-    "1.3",
+    "1.5",
     dependencies=[
         _candidate_constraint_residuals,
         _candidate_digest,
@@ -928,6 +928,8 @@ class SanosLPSolver:
         _remaining_fallbacks: tuple[Literal["ipm", "clarabel"], ...] | None = None,
         diagnostic_sink: Callable[[Mapping[str, object]], None] | None = None,
         feasible_nonoptimal_validator: Callable[[], Mapping[str, object]] | None = None,
+        feasible_nonoptimal_published_validator: Callable[[], Mapping[str, object]] | None = None,
+        successful_solution_validator: Callable[[], Mapping[str, object]] | None = None,
         _candidate_pool: list[dict[str, object]] | None = None,
         verbose: Context = Context.quiet,
     ) -> tuple[bool, str, bool]:
@@ -1007,28 +1009,46 @@ class SanosLPSolver:
             try:
                 for (variable, _), value in zip(variables, values, strict=True):
                     variable.save_value(value)
-                domain = dict(feasible_nonoptimal_validator())
-                residuals = _candidate_constraint_residuals(constraints, variables)
-                if residuals is None:
+                raw_domain = dict(feasible_nonoptimal_validator())
+                raw_residuals = _candidate_constraint_residuals(constraints, variables)
+                if raw_residuals is None:
                     raise ValueError("original constraint residuals are unavailable")
+                raw_values = tuple(
+                    np.array(variable.value, dtype=np.float64, copy=True)
+                    for variable, _ in variables
+                )
                 accepted = (
-                    max(residuals.values(), default=0.0)
+                    max(raw_residuals.values(), default=0.0)
                     <= _FEASIBLE_NONOPTIMAL_TOLERANCE
                 )
+                objective_value = None if objective.value is None else float(objective.value)
+                domain = raw_domain
+                residuals = raw_residuals
+                if feasible_nonoptimal_published_validator is not None:
+                    domain = dict(feasible_nonoptimal_published_validator())
+                    residuals = _candidate_constraint_residuals(constraints, variables)
+                    if residuals is None:
+                        raise ValueError("published constraint residuals are unavailable")
+                    accepted = accepted and (
+                        max(residuals.values(), default=0.0)
+                        <= _FEASIBLE_NONOPTIMAL_TOLERANCE
+                    )
                 final_values = tuple(
                     np.array(variable.value, dtype=np.float64, copy=True)
                     for variable, _ in variables
                 )
-                objective_value = None if objective.value is None else float(objective.value)
                 accepted = accepted and objective_value is not None and math.isfinite(objective_value)
                 evidence: dict[str, object] = {
                     "candidate_inspected": True,
                     "candidate_available": True,
                     "candidate_accepted": accepted,
                     "candidate_digest": _candidate_digest(final_values),
+                    "raw_candidate_digest": _candidate_digest(raw_values),
                     "candidate_policy": "smooth-feasible-nonoptimal-v1",
                     "candidate_feasibility_tolerance": _FEASIBLE_NONOPTIMAL_TOLERANCE,
                     "candidate_auxiliary_objective": objective_value,
+                    **{f"raw_{name}": value for name, value in raw_residuals.items()},
+                    **{f"raw_{name}": value for name, value in raw_domain.items()},
                     **residuals,
                     **domain,
                     **_native_attempt_metadata(prob, attempt_algorithm),
@@ -1129,6 +1149,10 @@ class SanosLPSolver:
                         _remaining_fallbacks=tuple(rest),
                         diagnostic_sink=diagnostic_sink,
                         feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                        feasible_nonoptimal_published_validator=(
+                            feasible_nonoptimal_published_validator
+                        ),
+                        successful_solution_validator=successful_solution_validator,
                         _candidate_pool=candidate_pool,
                         verbose=verbose,
                     )
@@ -1167,6 +1191,10 @@ class SanosLPSolver:
                         _remaining_fallbacks=tuple(rest),
                         diagnostic_sink=diagnostic_sink,
                         feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                        feasible_nonoptimal_published_validator=(
+                            feasible_nonoptimal_published_validator
+                        ),
+                        successful_solution_validator=successful_solution_validator,
                         _candidate_pool=candidate_pool,
                         verbose=verbose,
                     )
@@ -1196,10 +1224,73 @@ class SanosLPSolver:
                     _remaining_fallbacks=tuple(rest),
                     diagnostic_sink=diagnostic_sink,
                     feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                    feasible_nonoptimal_published_validator=(
+                        feasible_nonoptimal_published_validator
+                    ),
+                    successful_solution_validator=successful_solution_validator,
                     _candidate_pool=candidate_pool,
                     verbose=verbose,
                 )
             success = prob_status in ["optimal", "optimal_inaccurate"]
+            if success and successful_solution_validator is not None:
+                prior = tuple(
+                    None if variable.value is None else np.array(variable.value, copy=True)
+                    for variable, _ in variables
+                )
+                try:
+                    successful_solution_validator()
+                    residuals = _candidate_constraint_residuals(constraints, variables)
+                    if residuals is None:
+                        raise ValueError("successful solution residuals are unavailable")
+                    if attempt_algorithm == "clarabel":
+                        tolerance = float(
+                            opt[
+                                "tol_feas"
+                                if prob_status == "optimal"
+                                else "reduced_tol_feas"
+                            ]
+                        )
+                    else:
+                        tolerance = float(opt["highs_options"]["kkt_tolerance"])
+                    if max(residuals.values(), default=0.0) > tolerance:
+                        raise ValueError("successful solution violates its solver tolerance")
+                    if objective.value is None or not math.isfinite(float(objective.value)):
+                        raise ValueError("successful solution objective is unavailable")
+                except (AssertionError, TypeError, ValueError):
+                    for (variable, _), value in zip(variables, prior, strict=True):
+                        variable.save_value(value)
+                    emit(
+                        "invalid_solution",
+                        None if prob.value is None else float(prob.value),
+                    )
+                    if remaining_fallbacks:
+                        next_algorithm, *rest = remaining_fallbacks
+                        warnings.warn(
+                            f"{message()}{attempt_algorithm} returned a numerically invalid "
+                            f"successful solution. Attempting {next_algorithm} fallback solver."
+                        )
+                        return self(
+                            objective=objective,
+                            constraints=constraints,
+                            variables=variables,
+                            message_context=message_context,
+                            for_expiry=for_expiry,
+                            is_fallback=True,
+                            _attempt_algorithm=next_algorithm,
+                            _remaining_fallbacks=tuple(rest),
+                            diagnostic_sink=diagnostic_sink,
+                            feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                            feasible_nonoptimal_published_validator=(
+                                feasible_nonoptimal_published_validator
+                            ),
+                            successful_solution_validator=successful_solution_validator,
+                            _candidate_pool=candidate_pool,
+                            verbose=verbose,
+                        )
+                    accepted = accept_best_candidate()
+                    if accepted is not None:
+                        return accepted
+                    return False, "invalid_solution", is_fallback
             if not success:
                 evidence = inspect_candidate(prob_status)
                 emit(prob_status, None if prob.value is None else float(prob.value), **evidence)

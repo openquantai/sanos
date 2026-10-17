@@ -6,7 +6,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -24,9 +24,17 @@ from sanos.artifacts import (
     atomic_create_json,
 )
 from sanos.config import StorageLocations, canonical_sha256, canonical_value
-from sanos.widb.build import publish_daily_frame, read_daily_frame
+from sanos.widb.build import (
+    DailyArtifactPlan,
+    IntermediateBuildRequest,
+    IntermediateBuildResult,
+    build_intermediates,
+    plan_daily_artifacts,
+    publish_daily_frame,
+    read_daily_frame,
+)
 from sanos.widb.calendar import business_dates
-from sanos.widb.config import DailySurfaceConfig
+from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
 from sanos.widb.surface import (
     FILTERED_SCHEMA,
     FILTERED_SCHEMA_VERSION,
@@ -36,7 +44,8 @@ from sanos.widb.surface import (
 )
 
 ORIGINAL_FITTED_PLAN_SCHEMA = "sanos-original-fitted-plan-v1"
-FITTED_SOURCE_SELECTION_SCHEMA = "sanos-fitted-source-selection-v1"
+FITTED_SOURCE_SELECTION_SCHEMA = "sanos-fitted-source-selection-v2"
+_LEGACY_FITTED_SOURCE_SELECTION_SCHEMA = "sanos-fitted-source-selection-v1"
 FITTED_RECOVERY_SCHEMA_VERSION = "sanos-fitted-recovery-v1"
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -247,7 +256,7 @@ class OriginalFittedPlan:
 
 
 @version(
-    "2.0",
+    "3.0",
     dependencies=[ArtifactPointer, OriginalFittedSource, canonical_sha256, canonical_value],
 )
 @dataclass(frozen=True, slots=True)
@@ -257,6 +266,7 @@ class FittedSourceBinding:
     trading_date: date
     original_source: OriginalFittedSource
     selected: ArtifactPointer
+    replacement_source: OriginalFittedSource | None = None
     recovery_policy_id: str | None = None
     failure_evidence_sha256: str | None = None
     failure_evidence: tuple[Mapping[str, Any], ...] | None = None
@@ -269,10 +279,23 @@ class FittedSourceBinding:
     def filtered(self) -> ArtifactPointer:
         return self.original_source.filtered
 
+    @property
+    def effective_source(self) -> OriginalFittedSource:
+        return self.original_source if self.replacement_source is None else self.replacement_source
+
     def __post_init__(self) -> None:
         if self.trading_date != self.original_source.trading_date:
             raise ValueError("Fitted binding date differs from its original source")
-        recovered = self.selected != self.original_expected
+        replaced = self.replacement_source is not None
+        recovered = self.selected != self.original_expected and not replaced
+        if replaced:
+            replacement = cast(OriginalFittedSource, self.replacement_source)
+            if replacement.trading_date != self.trading_date:
+                raise ValueError("Replacement fitted source date differs")
+            if self.selected != replacement.expected_fitted:
+                raise ValueError("Replacement fitted pointer differs from its source chain")
+            if replacement.raw_roles != self.original_source.raw_roles:
+                raise ValueError("Replacement fitted source Raw roles differ from the frozen plan")
         if recovered != (self.recovery_policy_id is not None):
             raise ValueError("Recovered fitted bindings require exactly one recovery policy ID")
         if recovered != (self.failure_evidence_sha256 is not None):
@@ -290,6 +313,11 @@ class FittedSourceBinding:
                     "trading_date": self.trading_date,
                     "original_source": self.original_source.as_dict(),
                     "selected": self.selected,
+                    "replacement_source": (
+                        None
+                        if self.replacement_source is None
+                        else self.replacement_source.as_dict()
+                    ),
                     "recovery_policy_id": self.recovery_policy_id,
                     "failure_evidence_sha256": self.failure_evidence_sha256,
                     "failure_evidence": self.failure_evidence,
@@ -367,7 +395,11 @@ class FittedSourceSelection:
             "original_configuration_sha256",
             "bindings",
         }
-        if set(document) != required or document.get("schema") != FITTED_SOURCE_SELECTION_SCHEMA:
+        schema = document.get("schema")
+        if set(document) != required or schema not in {
+            FITTED_SOURCE_SELECTION_SCHEMA,
+            _LEGACY_FITTED_SOURCE_SELECTION_SCHEMA,
+        }:
             raise ValueError("Fitted source selection schema or fields changed")
         raw_bindings = document["bindings"]
         if not isinstance(raw_bindings, Sequence) or isinstance(raw_bindings, (str, bytes)):
@@ -377,12 +409,18 @@ class FittedSourceSelection:
             "trading_date",
             "original_source",
             "selected",
+            "replacement_source",
             "recovery_policy_id",
             "failure_evidence_sha256",
             "failure_evidence",
         }
         for index, value in enumerate(raw_bindings):
-            if not isinstance(value, Mapping) or set(value) != expected_fields:
+            if not isinstance(value, Mapping):
+                raise ValueError(f"Fitted source binding {index} fields changed")
+            value = dict(value)
+            if schema == _LEGACY_FITTED_SOURCE_SELECTION_SCHEMA:
+                value["replacement_source"] = None
+            if set(value) != expected_fields:
                 raise ValueError(f"Fitted source binding {index} fields changed")
             policy = value["recovery_policy_id"]
             evidence = value["failure_evidence_sha256"]
@@ -393,30 +431,47 @@ class FittedSourceSelection:
                 or any(not isinstance(record, Mapping) for record in evidence_records)
             ):
                 raise ValueError(f"Fitted source binding {index} failure evidence changed")
-            bindings.append(
-                FittedSourceBinding(
-                    trading_date=date.fromisoformat(str(value["trading_date"])),
-                    original_source=OriginalFittedPlan.from_document(
+            original_source = OriginalFittedPlan.from_document(
+                {
+                    "schema": ORIGINAL_FITTED_PLAN_SCHEMA,
+                    "ticker": document["ticker"],
+                    "source_revision": document["original_source_revision"],
+                    "configuration_sha256": document["original_configuration_sha256"],
+                    "sources": [value["original_source"]],
+                    "evidence_sha256": canonical_sha256(
                         {
                             "schema": ORIGINAL_FITTED_PLAN_SCHEMA,
                             "ticker": document["ticker"],
                             "source_revision": document["original_source_revision"],
-                            "configuration_sha256": document["original_configuration_sha256"],
+                            "configuration_sha256": document[
+                                "original_configuration_sha256"
+                            ],
                             "sources": [value["original_source"]],
-                            "evidence_sha256": canonical_sha256(
-                                {
-                                    "schema": ORIGINAL_FITTED_PLAN_SCHEMA,
-                                    "ticker": document["ticker"],
-                                    "source_revision": document["original_source_revision"],
-                                    "configuration_sha256": document[
-                                        "original_configuration_sha256"
-                                    ],
-                                    "sources": [value["original_source"]],
-                                }
-                            ),
                         }
-                    ).sources[0],
+                    ),
+                }
+            ).sources[0]
+            replacement_source = None
+            if value["replacement_source"] is not None:
+                replacement_document = {
+                    "schema": ORIGINAL_FITTED_PLAN_SCHEMA,
+                    "ticker": document["ticker"],
+                    "source_revision": document["original_source_revision"],
+                    "configuration_sha256": document["original_configuration_sha256"],
+                    "sources": [value["replacement_source"]],
+                }
+                replacement_document["evidence_sha256"] = canonical_sha256(
+                    replacement_document
+                )
+                replacement_source = OriginalFittedPlan.from_document(
+                    replacement_document
+                ).sources[0]
+            bindings.append(
+                FittedSourceBinding(
+                    trading_date=date.fromisoformat(str(value["trading_date"])),
+                    original_source=original_source,
                     selected=_recovery_pointer(value["selected"], f"binding {index} selected"),
+                    replacement_source=replacement_source,
                     recovery_policy_id=None if policy is None else str(policy),
                     failure_evidence_sha256=None if evidence is None else str(evidence),
                     failure_evidence=(
@@ -783,6 +838,114 @@ def recover_failed_fitted_sources(
     )
 
 
+@version("1.0", dependencies=[DailyArtifactPlan, OriginalFittedSource])
+def _source_from_daily_plan(item: DailyArtifactPlan) -> OriginalFittedSource:
+    return OriginalFittedSource(
+        trading_date=item.trading_date,
+        raw_security=item.raw.security,
+        raw_options=item.raw.options,
+        raw_spot=item.raw.spot,
+        raw_previous_spot=item.raw.previous_spot,
+        raw_forwards=item.raw.forwards,
+        raw_zero_curve=item.raw.zero_curve,
+        paired=item.paired.pointer,
+        enriched=item.enriched.pointer,
+        no_arb=item.no_arb.pointer,
+        filtered=item.filtered.pointer,
+        expected_fitted=item.fitted.pointer,
+    )
+
+
+@version(
+    "1.0",
+    dependencies=[
+        ArtifactStore,
+        FittedSourceBinding,
+        FittedSourceSelection,
+        IntermediateBuildRequest,
+        _source_from_daily_plan,
+        build_intermediates,
+        plan_daily_artifacts,
+    ],
+)
+def resume_fitted_sources(
+    locations: StorageLocations,
+    *,
+    original_plan: OriginalFittedPlan,
+    daily_config: DailyWidbConfig,
+    surface_config: DailySurfaceConfig,
+    include_half_days: bool,
+    source: str,
+    source_generation: str,
+    max_workers: int,
+    dry_run: bool = False,
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
+) -> tuple[FittedSourceSelection, IntermediateBuildResult]:
+    """Preserve every valid original fit and normally build every absent target."""
+
+    request = IntermediateBuildRequest(
+        ticker=original_plan.ticker,
+        start_date=original_plan.sources[0].trading_date,
+        end_date=original_plan.sources[-1].trading_date,
+        through="fitted-day",
+        include_half_days=include_half_days,
+        source=source,
+        source_generation=source_generation,
+        max_workers=max_workers,
+    )
+    current = plan_daily_artifacts(request, daily_config, surface_config)
+    if tuple(item.trading_date for item in current) != tuple(
+        item.trading_date for item in original_plan.sources
+    ):
+        raise ValueError("Current fitted plan schedule differs from the frozen original plan")
+    current_sources = tuple(_source_from_daily_plan(item) for item in current)
+    for original, replacement in zip(original_plan.sources, current_sources, strict=True):
+        if original.raw_roles != replacement.raw_roles:
+            raise ValueError(
+                f"{original.trading_date}: current Raw roles differ from the frozen plan"
+            )
+    store = ArtifactStore(locations)
+    completion_overrides: dict[date, ArtifactPointer] = {}
+    for original in original_plan.sources:
+        try:
+            store.validate(original.expected_fitted)
+        except ArtifactNotFoundError:
+            continue
+        completion_overrides[original.trading_date] = original.expected_fitted
+    result = build_intermediates(
+        locations,
+        request,
+        daily_config,
+        surface_config,
+        dry_run=dry_run,
+        progress=progress,
+        _completion_overrides=completion_overrides,
+    )
+    bindings = tuple(
+        FittedSourceBinding(
+            trading_date=original.trading_date,
+            original_source=original,
+            selected=selected,
+            replacement_source=(
+                None if original.trading_date in completion_overrides else replacement
+            ),
+        )
+        for original, replacement, selected in zip(
+            original_plan.sources, current_sources, result.terminal, strict=True
+        )
+    )
+    return (
+        FittedSourceSelection(
+            ticker=original_plan.ticker,
+            original_plan_sha256=original_plan.evidence_sha256,
+            original_source_revision=original_plan.source_revision,
+            original_configuration_sha256=original_plan.configuration_sha256,
+            bindings=bindings,
+        ),
+        result,
+    )
+
+
 @version("1.0", dependencies=[_read_regular_text, OriginalFittedPlan])
 def read_original_fitted_plan(path: Path) -> OriginalFittedPlan:
     value = json.loads(_read_regular_text(path, label="Original fitted plan"))
@@ -808,5 +971,6 @@ __all__ = [
     "fitted_recovery_spec",
     "read_original_fitted_plan",
     "recover_failed_fitted_sources",
+    "resume_fitted_sources",
     "write_selection",
 ]

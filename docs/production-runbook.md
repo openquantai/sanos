@@ -14,11 +14,17 @@ owner gate. WRDS connection opens are governed by the host-local account-scoped
 monitor: they are serialized, and a fourth failed or interrupted attempt in a
 rolling 15-minute window is blocked before network access.
 
-> **Current execution status (2026-10-17):** the 918-session regeneration has
-> restarted from pinned source revision `0116b15`. This is not a completion or
-> publication claim: no newly regenerated complete public candidate or public
-> Dataset exists yet. Evidence belongs below the operator-selected
-> `PRODUCTION_EVIDENCE` root and is not checked into this repository.
+> **Current execution status (2026-10-17):** the pinned `0116b15` regeneration
+> was stopped cleanly before completing all 918 sessions. Every completed
+> immutable fitted artifact is preserved for exact reuse; unresolved original
+> targets will be processed by the official automatic resume workflow below.
+> This is not a completion or publication claim: no newly regenerated complete
+> public candidate or public Dataset exists yet. The authenticated full-range
+> resume dry run covered all 918 dates, preserving 362 exact original successes
+> and planning 556 current replacements; it accessed no WRDS data and wrote no
+> output configuration. Material resume remains pending. Evidence belongs below
+> the operator-selected `PRODUCTION_EVIDENCE` root and is not checked into this
+> repository.
 
 Prepare a dedicated CPython 3.12 environment from the reviewed source checkout:
 
@@ -222,10 +228,10 @@ Require 918 completed daily partitions, including the exact-schema typed-empty
 edit either downstream template by hand: step 6 binds both templates to this
 exact immutable identity and records their canonical digests.
 
-### Recover only failed smooth fits after a numerical-policy change
+### Resume only unresolved fitted dates after a numerical-policy change
 
-Before changing the producer code, freeze the complete original fitted plan
-with the original checkout and its exact clean revision. The command is
+Before changing producer code, freeze the complete original fitted plan with
+the original checkout and its exact clean revision. The exporter is
 output-first and refuses to replace an existing evidence file:
 
 ```bash
@@ -250,58 +256,60 @@ and file SHA-256
 `07d1aa107c38355461c3e0c80b1b58b126cd8aa422d8c079d6bb58daf4bec7ec`.
 The same evidence directory retains `source-revision.txt`; the pinned restart
 script checks its checkout HEAD against that exact revision before doing work.
-Recovery parsing recomputes the plan digest over every embedded source chain.
+Resume parsing recomputes the plan digest over every embedded source chain.
 This bootstrap is historical evidence, not a repeatable bypass. The exporter
 accepts only an original Dataset config without `fitted_selection`; it refuses
-to flatten or reinterpret an earlier recovery. A later policy change starting
-from a mixed selection requires a separately reviewed lineage design. Future
-changes from an unselected baseline must run the authenticated CLI above while
-the prior checkout is still clean.
+to flatten or reinterpret an earlier mixed selection. A later policy change
+starting from a mixed selection requires a separately reviewed lineage design.
+Future changes from an unselected baseline must run the authenticated CLI above
+while the prior checkout is still clean.
 
-After installing the approved recovery policy, use the original append-only
-intermediate run journal as failure evidence. List each failed date explicitly;
-never infer failures by scanning namespaces. First plan without writing, then
-run the identical recovery without `--dry-run`. Set `ORIGINAL_RUN_JOURNAL` to
-the exact `journal` path reported by the original `intermediate build` command,
-not to the tee'd console log:
+After installing the approved numerical policy, run the official automatic
+resume command against the original Dataset config and its authenticated frozen
+plan. It scans the entire plan, validates each exact completed original fitted
+artifact, and preserves that pointer byte-for-byte. For every absent original
+target it invokes the ordinary current `build_intermediates` pipeline, which
+recursively resolves the exact upstream stages and applies the current normal
+solver policy. It does not scan artifact namespaces, accept a manual date list,
+or consume operator- or agent-authored failure/candidate evidence.
+
+Use no more than three workers for smooth fitting. The command records ordinary
+per-date progress and failures and continues through the complete unresolved
+set. It writes `--output-config` atomically and without replacement only after
+all 918 dates resolve; any remaining failure gives a nonzero exit and leaves no
+partial Dataset configuration:
 
 ```bash
-env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
-  intermediate recover-fitted \
-  --config "$ACTIVE_DATASET_CONFIG" \
-  --original-plan "$PRODUCTION_EVIDENCE/original-fitted-plan.json" \
-  --failure-evidence "$ORIGINAL_RUN_JOURNAL" \
-  --failed-date 2023-02-08 \
-  --output-config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json"
-
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
-  intermediate recover-fitted \
+  intermediate resume-fitted \
   --config "$ACTIVE_DATASET_CONFIG" \
   --original-plan "$PRODUCTION_EVIDENCE/original-fitted-plan.json" \
-  --failure-evidence "$ORIGINAL_RUN_JOURNAL" \
-  --failed-date 2023-02-08 \
-  --output-config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json"
+  --output-config "$PRODUCTION_EVIDENCE/widb-spx-resumed.json" \
+  --max-workers 3 \
+  | tee "$PRODUCTION_EVIDENCE/resume-fitted.jsonl"
 ```
 
-Repeat `--failed-date YYYY-MM-DD` for every journal-confirmed failure. The
-generated config preserves every successful original fitted artifact exactly
-and binds each recovery to its original expected target, exact filtered input,
-policy, and embedded failure evidence. It may reference successful dates still
-being built, but Dataset publication remains fail-closed until every selected
-original or recovered artifact exists:
+On failure, preserve the command's append-only journal and rerun the identical
+command after correcting the reported cause. Completed immutable current
+outputs are reused normally, and old successes are never refitted. The final
+configuration contains the complete authenticated frozen plan: each date
+selects either its exact original fitted pointer or a typed current-version
+replacement paired with the absent original expected pointer and original full
+lineage. Dataset publication remains fail-closed until every selected source
+exists and validates:
 
 ```bash
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
-  dataset build --config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json" \
+  dataset build --config "$PRODUCTION_EVIDENCE/widb-spx-resumed.json" \
   --require-existing-intermediates --max-workers 2
 
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
-  dataset validate --config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json" --deep-lineage
+  dataset validate --config "$PRODUCTION_EVIDENCE/widb-spx-resumed.json" --deep-lineage
 
-export ACTIVE_DATASET_CONFIG="$PRODUCTION_EVIDENCE/widb-spx-recovered.json"
+export ACTIVE_DATASET_CONFIG="$PRODUCTION_EVIDENCE/widb-spx-resumed.json"
 ```
 
-Keep `ACTIVE_DATASET_CONFIG` set to the generated recovery config for every
+Keep `ACTIVE_DATASET_CONFIG` set to the generated resumed config for every
 remaining comparison, finalization, public projection, and promotion command.
 The reference comparator parses the same strict `InternalDatasetConfig` and
 therefore plans and authenticates its explicit fitted selection; it does not
@@ -521,14 +529,16 @@ reuses fresh Raw and compatible pre-fit Intermediate artifacts and computes
 only missing descendants. Do not re-download Raw merely because a fitted
 schema changed, and do not use `--version '*'` to cross a version boundary.
 
-CD-035 is the sole explicit exception: when the reviewed feasible-nonoptimal
-policy is introduced after an original run has recorded failed dates, use the
-exact `export-fitted-plan` / `recover-fitted` workflow above. It retains exact
-old successful fitted pointers and creates separately identified recovery
-artifacts only for journal-confirmed failures; it is not wildcard reuse or an
-artifact relabel. Repeat Dataset build and deep validation using the generated
-recovery config. No other historical-artifact exception or ad hoc migration is
-permitted.
+CD-035 is the sole explicit cross-version exception: when the reviewed
+feasible-nonoptimal policy is introduced after an original run has unresolved
+fitted targets, use the exact `export-fitted-plan` / `resume-fitted` workflow
+above. It validates and retains exact old successful fitted pointers, then runs
+only absent targets through the ordinary current Intermediate pipeline. The
+complete config records each current output as a typed replacement paired with
+its absent original expected pointer; this is neither wildcard reuse nor
+artifact relabelling. Repeat Dataset build and deep validation using the
+generated resumed config. No manual date selection, hand-authored process data,
+or other historical-artifact exception is permitted.
 
 Raw partitions, daily stages, Datasets, public candidates, Experiments, and the
 canonical designation are output-first. After an interruption, retain the same

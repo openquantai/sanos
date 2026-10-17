@@ -44,6 +44,7 @@ from sanos.widb.recovery import (
     OriginalFittedSource,
     build_fitted_recovery,
     recover_failed_fitted_sources,
+    resume_fitted_sources,
 )
 from sanos.widb.surface import (
     FILTERED_SCHEMA,
@@ -107,6 +108,7 @@ __all__ = [
     "pair_daily_frame",
     "previous_business_day",
     "recover_failed_fitted_sources",
+    "resume_fitted_sources",
     "selected_reference_view",
     "session_open_close",
     "smooth_sanos_pricer",

@@ -339,21 +339,31 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   and all density, mass, martingale, strike-shape, bound, and calendar
   invariants. Apply only the established common surface postprocessing used by
   normal successes, then recheck and record the exact published state.
-  If several failed attempts return feasible states, select the one with the
-  lowest exact reconstructed LP objective. Any normally successful attempt
-  takes precedence over every nonoptimal candidate.
+  A candidate enters the selection pool only after both its raw attempt state
+  and unchanged postprocessed published state pass their respective complete
+  gates. If several candidates qualify, select the one with the lowest exact
+  reconstructed objective of the published state. Any normally successful
+  attempt takes precedence over every nonoptimal candidate.
 - Persist the original failure status, solver and algorithm, candidate digest,
   exact residual maxima, objective decomposition, selection reason, and
   acceptance-policy version. `feasible_nonoptimal` is an explicit outcome, not
   a relabelled `optimal` status. Preserve already completed fitted-day
   artifacts; this policy applies only when retrying unresolved failed dates.
-- Recovery must not change or alias an existing successful fitted pointer. For
-  an absent failed pointer, key the distinct recovery artifact by the exact
-  original expected pointer, recovery-policy identity, and filtered upstream
-  pointer. Dataset resolution checks the exact original pointer first and only
-  then its exact configured recovery pointer; it must not use wildcard lookup
-  or namespace discovery. Record both identities and recovery evidence in the
-  self-contained Dataset, with deep validation authenticating exact membership.
+- A numerical-policy change must not change or alias an existing successful
+  fitted pointer. Freeze and authenticate the complete original fitted plan,
+  then use the official automatic resume command. It validates every exact old
+  success and sends only absent original targets through the ordinary current
+  `build_intermediates` path, including its normal solver policy and recursive
+  upstream planning. Do not ask an operator or agent to enumerate failed dates,
+  fabricate process data, or hand-select candidates.
+- A current-version result for an absent original target is an explicit typed
+  replacement source, not the old artifact under a new label. The complete
+  selection retains the original expected pointer and full frozen lineage for
+  every date. Write the replacement Dataset configuration only after all dates
+  succeed; otherwise retain the ordinary failure journal and no partial
+  selection. Dataset resolution uses only the exact configured source, without
+  wildcard lookup or namespace discovery, and deep validation authenticates
+  the complete mixed lineage.
 
 ## CLI requirements
 
@@ -363,6 +373,8 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   - `sanos doctor`
   - `sanos raw download`
   - `sanos intermediate build`
+  - `sanos intermediate export-fitted-plan`
+  - `sanos intermediate resume-fitted`
   - `sanos dataset build`
   - `sanos dataset validate`
   - `sanos dysanos build` (with `sanos experiment build` as a temporary alias)
