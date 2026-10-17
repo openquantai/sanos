@@ -169,6 +169,24 @@ def _release_config(
     )
 
 
+@pytest.fixture(scope="module")
+def public_frame_fixture(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[PublicProjectionConfig, pl.DataFrame]:
+    """One immutable two-day candidate frame cloned by semantic tests."""
+
+    root = tmp_path_factory.mktemp("public-frame")
+    patch = pytest.MonkeyPatch()
+    try:
+        locations, source = _publish_source(root, patch)
+    finally:
+        patch.undo()
+    config = _config(source)
+    built = build_public_candidate(locations, config)
+    frame = open_public_dataset(ArtifactStore(locations), built.artifact).load()
+    return config, frame
+
+
 def test_public_configuration_is_strict_and_identity_sensitive() -> None:
     document = json.loads(
         (Path(__file__).parents[1] / "configs" / "sanos-public-candidate-reference.json").read_text(
@@ -369,6 +387,7 @@ def test_candidate_build_validate_and_output_first_isolation(
 
     hidden = tmp_path / "hidden-source"
     source.path.rename(hidden)
+    monkeypatch.delenv("WRDS_OFF", raising=False)
     reused = build_public_candidate(
         locations,
         config,
@@ -377,13 +396,19 @@ def test_candidate_build_validate_and_output_first_isolation(
     assert reused.built is False
     assert reused.source_accessed is False
     assert reused.reuse is not None and reused.reuse.used_wildcard
-    assert validate_public_dataset(ArtifactStore(locations), reused.artifact) is not None
+    store = ArtifactStore(locations)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        summaries = tuple(
+            pool.map(lambda _: validate_public_dataset(store, reused.artifact), range(2))
+        )
+    assert all(summary is not None for summary in summaries)
     with pytest.raises(ArtifactNotFoundError):
         validate_public_dataset(
             ArtifactStore(locations),
             reused.artifact,
             deep_lineage=True,
         )
+    assert "WRDS_OFF" not in os.environ
     hidden.rename(source.path)
 
 
@@ -429,18 +454,10 @@ def test_approved_log_curve_interpolation_and_no_extrapolation() -> None:
 
 
 def test_recursive_allowlist_rejects_unexpected_or_nonfinite_fields(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_frame_fixture: tuple[PublicProjectionConfig, pl.DataFrame],
 ) -> None:
-    locations, source = _publish_source(
-        tmp_path,
-        monkeypatch,
-        start=date(2024, 1, 3),
-        end=date(2024, 1, 3),
-    )
-    config = _config(source)
-    built = build_public_candidate(locations, config)
-    frame = open_public_dataset(ArtifactStore(locations), built.artifact).load()
+    config, shared_frame = public_frame_fixture
+    frame = shared_frame.clone()
     with pytest.raises(PublicDatasetValidationError, match="flat scalar schema changed"):
         validate_public_frame(frame.with_columns(pl.lit(None).alias("spot")), config)
     corrupted = frame.with_columns(
@@ -454,18 +471,10 @@ def test_recursive_allowlist_rejects_unexpected_or_nonfinite_fields(
 
 
 def test_public_validation_allows_independent_model_expiry_populations(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_frame_fixture: tuple[PublicProjectionConfig, pl.DataFrame],
 ) -> None:
-    locations, source = _publish_source(
-        tmp_path,
-        monkeypatch,
-        start=date(2024, 1, 3),
-        end=date(2024, 1, 3),
-    )
-    config = _config(source)
-    built = build_public_candidate(locations, config)
-    frame = open_public_dataset(ArtifactStore(locations), built.artifact).load()
+    config, shared_frame = public_frame_fixture
+    frame = shared_frame.clone()
     row = _public_days(frame)[0]
 
     extra_expiry_row = copy.deepcopy(row)
@@ -706,15 +715,14 @@ def test_resigned_finite_return_mutation_is_bound_to_projection_evidence(
 
 @pytest.mark.parametrize("invalid_return", [-1.0, -1.000001])
 def test_public_semantics_reject_nonpositive_driftless_path_increment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_frame_fixture: tuple[PublicProjectionConfig, pl.DataFrame],
     invalid_return: float,
 ) -> None:
-    locations, source = _publish_source(tmp_path, monkeypatch)
-    config = _config(source)
-    result = build_public_candidate(locations, config)
-    frame = open_public_dataset(ArtifactStore(locations), result.artifact).load()
-    day_indices = frame.with_row_index().filter(pl.col("record_kind") == "day")["index"]
+    config, shared_frame = public_frame_fixture
+    day_indices = shared_frame.with_row_index().filter(pl.col("record_kind") == "day")[
+        "index"
+    ]
+    frame = shared_frame.clone()
     frame[int(day_indices[1]), "driftless_spot_return"] = invalid_return
     with pytest.raises(PublicDatasetValidationError, match="greater than -1"):
         validate_public_frame(frame, config)
@@ -1190,7 +1198,6 @@ def test_release_staging_failure_cleans_up_and_concurrent_publishers_converge(
     assert results[0].artifact == results[1].artifact
     assert all(result.validation is not None for result in results)
 
-
 def test_public_release_cli_template_approve_and_validate_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1509,23 +1516,19 @@ def test_zero_overnight_fraction_builds_when_source_clock_matches(
 
 
 def test_duplicate_public_book_key_is_rejected(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_frame_fixture: tuple[PublicProjectionConfig, pl.DataFrame],
 ) -> None:
-    locations, source = _publish_source(
-        tmp_path,
-        monkeypatch,
-        start=date(2024, 1, 3),
-        end=date(2024, 1, 3),
-    )
-    config = _config(source)
-    candidate = build_public_candidate(locations, config)
-    frame = open_public_dataset(ArtifactStore(locations), candidate.artifact).load()
+    config, shared_frame = public_frame_fixture
+    frame = shared_frame.clone()
     rows = frame.to_dicts()
     first_book = next(index for index, row in enumerate(rows) if row["record_kind"] == "book")
     duplicate = dict(rows[first_book])
     for row in rows[first_book:]:
-        if row["record_kind"] == "book" and row["expiry_index"] == duplicate["expiry_index"]:
+        if (
+            row["record_kind"] == "book"
+            and row["trading_date"] == duplicate["trading_date"]
+            and row["expiry_index"] == duplicate["expiry_index"]
+        ):
             row["book_index"] += 1
     duplicate["book_index"] = 0
     rows.insert(first_book, duplicate)
@@ -1552,27 +1555,3 @@ def test_concurrent_identical_candidate_publishers_converge(
     assert sum(result.built for result in results) == 1
     assert results[0].artifact == results[1].artifact
     assert all(result.validation is not None for result in results)
-
-
-def test_concurrent_public_validation_preserves_absent_wrds_environment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    locations, source = _publish_source(
-        tmp_path,
-        monkeypatch,
-        start=date(2024, 1, 3),
-        end=date(2024, 1, 3),
-    )
-    candidate = build_public_candidate(locations, _config(source))
-    monkeypatch.delenv("WRDS_OFF", raising=False)
-    store = ArtifactStore(locations)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        summaries = tuple(
-            pool.map(
-                lambda _: validate_public_dataset(store, candidate.artifact),
-                range(2),
-            )
-        )
-    assert all(summary is not None for summary in summaries)
-    assert "WRDS_OFF" not in os.environ

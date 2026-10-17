@@ -182,7 +182,7 @@ def test_checkpoint_identity_and_symlink_fail_closed(tmp_path) -> None:
         )
 
 
-def test_native_initialization_uses_public_day_fields_only() -> None:
+def test_native_initialization_uses_public_fields_and_fails_closed_without_convergence() -> None:
     geometry = replace(
         DailyFrontGeometryConfig(),
         model_business_dtes=(1.0, 5.0, 10.0),
@@ -211,6 +211,16 @@ def test_native_initialization_uses_public_day_fields_only() -> None:
     assert result.raw_states.shape == (1, native_state_width(geometry))
     assert len(result.history) == 1
     assert result.evaluation.book_count == 1
+    with pytest.raises(RuntimeError, match="Native DySANOS convergence failed"):
+        fit_native_daily_states(
+            (PublicDay(),),  # type: ignore[arg-type]
+            geometry,
+            ObjectiveConfig(),
+            num_epochs=1,
+            learning_rate=1.0e-4,
+            dtype=torch.float64,
+            require_convergence=True,
+        )
 
 
 def test_native_initialization_reconstructs_public_atm_curve() -> None:

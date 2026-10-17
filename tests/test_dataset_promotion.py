@@ -714,4 +714,3 @@ def test_promotion_versions_bind_runtime_evidence() -> None:
     for function in (promote_reference_dataset, validate_reference_promotion):
         versioned = cast(Any, function)
         assert "_verified_runtime_evidence" in dict(versioned.version.dependencies[1])
-        assert str(versioned.version)

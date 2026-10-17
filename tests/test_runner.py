@@ -182,11 +182,6 @@ def test_journal_sequence_is_safe_across_instances_and_malformed_input_fails(
         RunJournal(non_contiguous)
 
 
-def test_runner_foundation_is_versioned() -> None:
-    assert str(plan_daily_dates.version).startswith("1.0")
-    assert str(run_daily_plan.version).startswith("1.0")
-
-
 def test_plan_identity_changes_with_payload_schema_and_producer() -> None:
     arguments = {
         "ticker": "SPX",

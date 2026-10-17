@@ -665,8 +665,9 @@ the published SANOS dataset identity is recorded as the canonical reference.
 Offline implementation status: the non-AI operator path, troubleshooting,
 retention policy, aggregate operator extra, self-contained wheel/sdist contract,
 installed-artifact verifier, Markdown-link check, and out-of-tree paper CI are
-implemented. The recovery-policy offline suite passes all 504 tests, with the
-final exporter guard covered by an additional focused rerun. The earlier Python
+implemented. The recovery-policy offline suite and focused exporter regressions
+passed. Test maintenance is judged by preserved failure-mode coverage, not the
+number of collected cases. The earlier Python
 CI passed. The remote paper-CI dependency fix is merged; a successful CI run for
 this integrated revision has not yet been verified. Project
 licensing and the `.git-real` metadata handoff remain explicit owner/host

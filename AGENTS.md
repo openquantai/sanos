@@ -423,6 +423,14 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
   merely to increase test counts or nominal coverage. Prefer compact
   parameterization and shared focused fixtures over repetitive scenarios, and
   remove redundant tests once a stronger test fully subsumes them.
+- Test count is not a quality target. Review changes by the failure modes they
+  detect and the cost of maintaining and running them. Do not merge unrelated
+  checks merely to reduce the displayed count, or snapshot implementation
+  details when an observable-behavior test already protects the contract.
+- Keep end-to-end tests for pipeline boundaries. Test isolated numerical or
+  validation rules directly where possible; do not rebuild a complete Dataset
+  for each pure-function assertion. Shared expensive fixtures must be read-only,
+  with independent copies for tests that mutate artifacts.
 - Maintain small stored or synthetic fixtures for unit and integration tests.
   Put live WRDS checks behind an explicit marker and command.
 - Test configuration identity, schema validation, cache reuse, interrupted-run

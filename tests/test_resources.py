@@ -15,7 +15,9 @@ from sanos.resources import (
 
 def test_checkout_runtime_resources_are_complete() -> None:
     catalog = reference_catalog_path()
+    root = Path(__file__).resolve().parents[1]
     assert catalog.name == "reference-market-catalog.json"
+    assert catalog.is_relative_to(root)
     assert json.loads(catalog.read_text(encoding="utf-8"))["source_revision"]
     for name in (
         "dysanos-daily-front-reference.json",
@@ -31,8 +33,3 @@ def test_checkout_runtime_resources_are_complete() -> None:
 def test_unknown_reference_config_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown packaged"):
         reference_config_path("machine-local.json")
-
-
-def test_checkout_resources_resolve_inside_repository() -> None:
-    root = Path(__file__).resolve().parents[1]
-    assert reference_catalog_path().is_relative_to(root)

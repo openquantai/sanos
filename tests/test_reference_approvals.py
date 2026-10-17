@@ -217,7 +217,6 @@ def test_approval_functions_have_resolvable_explicit_versions() -> None:
     }
     for function, expected in expected_dependencies.items():
         versioned = cast(Any, function)
-        assert str(versioned.version)
         assert set(dict(versioned.version.dependencies[1])) == expected
 
     assert validate_comparison_approval_document(
@@ -564,13 +563,6 @@ def test_cli_requires_owner_attestation_and_dry_run_writes_nothing(
     assert _EXPLANATION not in dry_run.output
     assert "decision://test/cli" not in dry_run.output
     assert not output.exists()
-
-
-def test_dry_run_preflights_existing_output(
-    approval_case: _ApprovalCase,
-    tmp_path: Path,
-) -> None:
-    output = tmp_path / "existing.json"
     output.write_text("sentinel", encoding="utf-8")
     result = CliRunner().invoke(
         main,

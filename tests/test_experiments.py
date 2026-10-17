@@ -651,16 +651,29 @@ print(json.dumps({{
     assert json.loads(completed.stdout) == expected
 
 
-def test_exact_weekly_pairs_require_five_nyse_sessions() -> None:
-    dates = (
-        date(2024, 1, 3),
-        date(2024, 1, 8),
-        date(2024, 1, 10),
-        date(2024, 1, 17),
-    )
+@pytest.mark.parametrize(
+    ("dates", "expected_origin", "expected_endpoint"),
+    [
+        (
+            (date(2024, 1, 3), date(2024, 1, 8), date(2024, 1, 10), date(2024, 1, 17)),
+            [0],
+            [2],
+        ),
+        (
+            (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 9), date(2024, 1, 10)),
+            [0, 1],
+            [2, 3],
+        ),
+    ],
+)
+def test_exact_weekly_pairs_require_five_nyse_sessions(
+    dates: tuple[date, ...],
+    expected_origin: list[int],
+    expected_endpoint: list[int],
+) -> None:
     origin, endpoint = exact_weekly_pairs(dates)
-    np.testing.assert_array_equal(origin, np.asarray([0], dtype=np.int64))
-    np.testing.assert_array_equal(endpoint, np.asarray([2], dtype=np.int64))
+    np.testing.assert_array_equal(origin, np.asarray(expected_origin, dtype=np.int64))
+    np.testing.assert_array_equal(endpoint, np.asarray(expected_endpoint, dtype=np.int64))
 
 
 def test_experiment_dry_run_and_wildcard_miss_never_open_source(tmp_path: Path) -> None:

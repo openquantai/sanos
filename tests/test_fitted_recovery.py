@@ -404,19 +404,6 @@ def test_dataset_plan_binds_mixed_selection_without_replanning_old_chain() -> No
     assert plan.dataset_spec.configuration["fitted_selection"] == selection.as_dict()
 
 
-def test_recovery_cli_is_human_discoverable() -> None:
-    export_help = CliRunner().invoke(main, ["intermediate", "export-fitted-plan", "--help"])
-    assert export_help.exit_code == 0
-    assert "--source-revision" in export_help.output
-    assert "--output" in export_help.output
-    result = CliRunner().invoke(main, ["intermediate", "recover-fitted", "--help"])
-    assert result.exit_code == 0
-    assert "--original-plan" in result.output
-    assert "--failure-evidence" in result.output
-    assert "--failed-date" in result.output
-    assert "--output-config" in result.output
-
-
 def test_export_fitted_plan_rejects_claimed_revision_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

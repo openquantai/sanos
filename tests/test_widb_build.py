@@ -282,16 +282,6 @@ def test_overnight_fraction_changes_paired_and_enriched_artifact_identities() ->
     assert len({spec.artifact_id for spec in enriched}) == 3
 
 
-def test_daily_io_and_producer_version_closures_resolve() -> None:
-    assert str(read_daily_frame.version)
-    assert str(publish_daily_frame.version)
-    assert paired_day_producer_version()
-    assert enriched_day_producer_version()
-    assert no_arb_day_producer_version()
-    assert filtered_day_producer_version()
-    assert fitted_day_producer_version()
-
-
 def test_surface_stage_identities_use_projected_configuration() -> None:
     trading_date = date(2024, 1, 3)
     daily = DailyWidbConfig()

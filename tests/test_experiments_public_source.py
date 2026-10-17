@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +20,6 @@ from sanos.models.dysanos import (
     ExperimentConfig,
     SourceDatasetConfig,
     build_experiment,
-    exact_weekly_pairs,
     open_experiment,
     plan_experiment,
     project_daily_front,
@@ -56,6 +54,21 @@ def _publish_public(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         PublicBuildOptions(),
     )
     return locations, internal, public
+
+
+@pytest.fixture(scope="module")
+def public_day_fixture(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[ExperimentConfig, pl.DataFrame]:
+    """One real public day cloned by projection-only adapter tests."""
+
+    root = tmp_path_factory.mktemp("dysanos-public-day")
+    patch = pytest.MonkeyPatch()
+    try:
+        locations, _, public = _publish_public(root, patch)
+    finally:
+        patch.undo()
+    return _config(public.artifact), _first_day_frame(locations, public)
 
 
 def _first_day_frame(locations, public) -> pl.DataFrame:
@@ -108,15 +121,13 @@ def _with_dlv_only_second_expiry(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def test_public_fit_and_half_spread_are_authoritative(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_day_fixture: tuple[ExperimentConfig, pl.DataFrame],
 ) -> None:
-    locations, _, public = _publish_public(tmp_path, monkeypatch)
-    config = _config(public.artifact)
+    config, shared_frame = public_day_fixture
     day = project_daily_front(
-        _with_second_expiry(_first_day_frame(locations, public)),
+        _with_second_expiry(shared_frame.clone()),
         ticker=config.ticker,
-        source_dataset=public.artifact,
+        source_dataset=config.source_dataset.pointer,
         market=config.market,
         geometry=config.geometry,
     )
@@ -142,23 +153,21 @@ def test_public_fit_and_half_spread_are_authoritative(
 
 
 def test_dlv_only_expiry_does_not_change_daily_front_selection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_day_fixture: tuple[ExperimentConfig, pl.DataFrame],
 ) -> None:
-    locations, _, public = _publish_public(tmp_path, monkeypatch)
-    config = _config(public.artifact)
-    frame = _first_day_frame(locations, public)
+    config, shared_frame = public_day_fixture
+    frame = shared_frame.clone()
     baseline = project_daily_front(
         frame,
         ticker=config.ticker,
-        source_dataset=public.artifact,
+        source_dataset=config.source_dataset.pointer,
         market=config.market,
         geometry=config.geometry,
     )
     expanded = project_daily_front(
         _with_dlv_only_second_expiry(frame),
         ticker=config.ticker,
-        source_dataset=public.artifact,
+        source_dataset=config.source_dataset.pointer,
         market=config.market,
         geometry=config.geometry,
     )
@@ -171,12 +180,10 @@ def test_dlv_only_expiry_does_not_change_daily_front_selection(
 
 
 def test_negative_synthetic_bid_is_not_clipped(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    public_day_fixture: tuple[ExperimentConfig, pl.DataFrame],
 ) -> None:
-    locations, _, public = _publish_public(tmp_path, monkeypatch)
-    config = _config(public.artifact)
-    frame = _first_day_frame(locations, public).with_row_index("_row")
+    config, shared_frame = public_day_fixture
+    frame = shared_frame.clone().with_row_index("_row")
     book_row = int(frame.filter(pl.col("record_kind") == "book")["_row"][0])
     frame = frame.with_columns(
         pl.when(pl.col("_row") == book_row)
@@ -187,7 +194,7 @@ def test_negative_synthetic_bid_is_not_clipped(
     day = project_daily_front(
         frame,
         ticker=config.ticker,
-        source_dataset=public.artifact,
+        source_dataset=config.source_dataset.pointer,
         market=config.market,
         geometry=config.geometry,
     )
@@ -331,11 +338,3 @@ def test_completed_experiment_is_output_first_without_public_source(
     second = build_experiment(locations, config, ExperimentBuildOptions(max_workers=1))
     assert second.artifact == first.artifact
     assert not second.source_accessed
-
-
-def test_exact_weekly_pairs_remain_five_nyse_sessions() -> None:
-    origin, endpoint = exact_weekly_pairs(
-        (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 9), date(2024, 1, 10))
-    )
-    np.testing.assert_array_equal(origin, np.asarray([0, 1], dtype=np.int64))
-    np.testing.assert_array_equal(endpoint, np.asarray([2, 3], dtype=np.int64))

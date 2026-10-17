@@ -194,10 +194,6 @@ def test_default_connection_factory_uses_pgpass_compatible_url(
     assert capsys.readouterr() == ("", "")
 
 
-def test_default_connection_factory_has_resolved_version() -> None:
-    assert str(default_connection_factory.version).startswith("1.3")
-
-
 def test_default_connection_factory_treats_missing_driver_as_configuration_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -19,36 +19,35 @@ from sanos.datasets.public import (
 from sanos.widb import DailyWidbConfig
 
 
-def test_help_lists_stable_command_groups() -> None:
-    result = CliRunner().invoke(main, ["--help"])
-
-    assert result.exit_code == 0, result.output
-    for command in (
-        "config",
-        "doctor",
-        "status",
-        "raw",
-        "intermediate",
-        "dataset",
-        "dysanos",
-        "experiment",
-        "production",
-    ):
-        assert command in result.output
-
-
-def test_public_dataset_help_lists_human_release_workflow() -> None:
-    result = CliRunner().invoke(main, ["dataset", "public", "--help"])
-    assert result.exit_code == 0, result.output
-    for command in ("build", "validate", "approval-template", "approve"):
-        assert command in result.output
-
-
-def test_canonical_reference_help_lists_review_and_promotion_workflow() -> None:
-    result = CliRunner().invoke(main, ["dataset", "reference", "--help"])
-    assert result.exit_code == 0, result.output
-    for command in ("review-template", "promotion-template", "promote", "validate"):
-        assert command in result.output
+def test_help_exposes_the_supported_operator_workflows() -> None:
+    workflows = {
+        (): (
+            "config",
+            "doctor",
+            "status",
+            "raw",
+            "intermediate",
+            "dataset",
+            "dysanos",
+            "experiment",
+            "production",
+        ),
+        ("dataset", "public"): ("build", "validate", "approval-template", "approve"),
+        ("dataset", "reference"): (
+            "review-template",
+            "promotion-template",
+            "promote",
+            "validate",
+        ),
+        ("production",): ("runtime-fingerprint", "finalize-configs", "evidence-index"),
+        ("intermediate",): ("build", "export-fitted-plan", "recover-fitted"),
+    }
+    runner = CliRunner()
+    for command, expected in workflows.items():
+        result = runner.invoke(main, [*command, "--help"])
+        assert result.exit_code == 0, result.output
+        for name in expected:
+            assert name in result.output
 
 
 def test_doctor_json_is_offline_structured_and_non_mutating(tmp_path: Path) -> None:
@@ -61,6 +60,8 @@ def test_doctor_json_is_offline_structured_and_non_mutating(tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["event"] == "doctor"
+    assert isinstance(payload["sanos_version"], str)
+    assert payload["sanos_version"]
     assert payload["status"] == "ok"
     assert payload["network_accessed"] is False
     assert payload["filesystem_modified"] is False
@@ -141,15 +142,6 @@ def test_config_resources_reports_packaged_operator_assets() -> None:
     assert payload["filesystem_modified"] is False
     assert Path(payload["resources"]["reference_catalog"]).is_file()
     assert payload["resources"]["source_revision"] == "checkout"
-
-
-def test_production_help_lists_frozen_operator_contract() -> None:
-    result = CliRunner().invoke(main, ["production", "--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "runtime-fingerprint" in result.output
-    assert "finalize-configs" in result.output
-    assert "evidence-index" in result.output
 
 
 def _finalize_arguments(tmp_path: Path) -> list[str]:
@@ -283,22 +275,6 @@ def test_runtime_fingerprint_cli_is_offline_rootless_reusable_and_dry_run_safe(
     assert dry_payload["filesystem_modified"] is False
     assert not dry_output.exists()
 
-
-def test_runtime_fingerprint_cli_rejects_conflicting_existing_output(
-    tmp_path: Path,
-) -> None:
-    output = tmp_path / "runtime-fingerprint.json"
-    runner = CliRunner()
-    arguments = [
-        "--log-format",
-        "json",
-        "production",
-        "runtime-fingerprint",
-        "--output",
-        str(output),
-    ]
-    first = runner.invoke(main, arguments, env={"WRDS_OFF": "1"})
-    assert first.exit_code == 0, first.output
     conflicting = json.loads(output.read_text(encoding="utf-8"))
     conflicting["python"]["compiler"] = "conflicting-compiler"
     body = {key: value for key, value in conflicting.items() if key != "fingerprint_id"}
@@ -605,33 +581,36 @@ def test_public_release_approve_dry_run_is_offline_and_needs_no_license_file(
     assert not root.exists()
 
 
-@pytest.mark.parametrize("command_group", ["dysanos", "experiment"])
 def test_dysanos_build_dry_run_and_legacy_alias_are_identical(
     tmp_path: Path,
-    command_group: str,
 ) -> None:
     root = tmp_path / "data"
     config = Path(__file__).parents[1] / "configs" / "dysanos-daily-front-reference.json"
-    result = CliRunner().invoke(
-        main,
-        [
-            "--root",
-            str(root),
-            "--dry-run",
-            "--log-format",
-            "json",
-            command_group,
-            "build",
-            "--config",
-            str(config),
-            "--max-workers",
-            "2",
-        ],
-        env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
-    )
+    outputs: list[list[dict[str, object]]] = []
+    runner = CliRunner()
+    for command_group in ("dysanos", "experiment"):
+        result = runner.invoke(
+            main,
+            [
+                "--root",
+                str(root),
+                "--dry-run",
+                "--log-format",
+                "json",
+                command_group,
+                "build",
+                "--config",
+                str(config),
+                "--max-workers",
+                "2",
+            ],
+            env={"WRDS_OFF": "1", "WRDS_USERNAME": "must-not-be-read"},
+        )
+        assert result.exit_code == 0, result.output
+        outputs.append([json.loads(line) for line in result.output.splitlines()])
 
-    assert result.exit_code == 0, result.output
-    payloads = [json.loads(line) for line in result.output.splitlines()]
+    assert outputs[0] == outputs[1]
+    payloads = outputs[0]
     assert [payload["event"] for payload in payloads] == [
         "experiment_plan",
         "experiment_result",
@@ -762,7 +741,19 @@ def test_raw_download_has_no_manual_2fa_gate_and_caps_query_attempts() -> None:
     assert "1<=x<=3" in result.output
 
 
-def test_raw_connection_limit_above_four_is_rejected_by_click(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("option", "value", "expected"),
+    (
+        ("--max-wrds-connections", "5", "range 1<=x<=4"),
+        ("--retry-attempts", "4", "range 1<=x<=3"),
+    ),
+)
+def test_raw_safety_limits_are_rejected_by_click(
+    tmp_path: Path,
+    option: str,
+    value: str,
+    expected: str,
+) -> None:
     result = CliRunner().invoke(
         main,
         [
@@ -776,34 +767,12 @@ def test_raw_connection_limit_above_four_is_rejected_by_click(tmp_path: Path) ->
             "2024-01-03",
             "--end-date",
             "2024-01-03",
-            "--max-wrds-connections",
-            "5",
+            option,
+            value,
         ],
     )
     assert result.exit_code == 2
-    assert "range 1<=x<=4" in result.output
-
-
-def test_raw_query_attempt_limit_above_three_is_rejected_by_click(tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        main,
-        [
-            "--root",
-            str(tmp_path / "data"),
-            "raw",
-            "download",
-            "--ticker",
-            "SPX",
-            "--start-date",
-            "2024-01-03",
-            "--end-date",
-            "2024-01-03",
-            "--retry-attempts",
-            "4",
-        ],
-    )
-    assert result.exit_code == 2
-    assert "range 1<=x<=3" in result.output
+    assert expected in result.output
 
 
 def test_click_usage_errors_are_structured_when_json_is_requested() -> None:

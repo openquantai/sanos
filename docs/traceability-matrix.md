@@ -24,8 +24,9 @@ corrected DLV contract. As of 2026-10-17, the full 918-session regeneration has
 restarted from pinned source revision `0116b15`, but no newly regenerated
 complete public candidate or public Dataset exists yet. Publication remains
 gated on zero failed sessions, deep validation, and both reviews. The recovery
-offline suite passes 504 tests, and the final exporter guard passes its focused
-rerun. Earlier Python CI passed; the remote paper-CI dependency fix is now merged,
+offline suite and focused exporter regressions passed. Test maintenance retains
+numerical, lineage, safety, and restart contracts rather than targeting a case
+count. Earlier Python CI passed; the remote paper-CI dependency fix is now merged,
 but CI for the integrated revision has not yet been verified. The
 separately identified Direct-200 neural training producer is being copy/adapted
 into the self-contained `sanos.models.dysanos` package. It is not part of the

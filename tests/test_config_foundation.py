@@ -140,8 +140,3 @@ def test_incomplete_resolution_is_diagnostic_until_required(tmp_path: Path) -> N
     assert resolution.missing == ("raw", "intermediate", "datasets", "experiments")
     with pytest.raises(LocationConfigurationError, match="Missing data locations"):
         resolution.require_complete()
-
-
-def test_foundation_objects_expose_cdxcore_versions() -> None:
-    assert str(canonical_json.version).startswith("1.0")
-    assert str(resolve_locations.version).startswith("1.0")

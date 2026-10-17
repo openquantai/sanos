@@ -222,7 +222,7 @@ def test_integrity_checks_detect_corruption_unexpected_files_and_symlinks(
         store.validate(linked.pointer)
 
 
-def test_manifest_and_completion_are_strict(tmp_path: Path) -> None:
+def test_manifest_schema_is_strict(tmp_path: Path) -> None:
     store = _store(tmp_path)
     spec = _spec()
     path = _publish(store, spec)
