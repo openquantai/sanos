@@ -54,6 +54,7 @@ test -d "$SANOS_RUNS_ROOT" && test -w "$SANOS_RUNS_ROOT"
 export PRODUCTION_ROOT="$SANOS_RUNS_ROOT/phase-11/data"
 export PRODUCTION_RUN_ID=<UTC-date-and-operator-label>
 export PRODUCTION_EVIDENCE="$SANOS_RUNS_ROOT/phase-11/evidence/$PRODUCTION_RUN_ID"
+export ACTIVE_DATASET_CONFIG=configs/widb-spx-reference.json
 export LEGACY_MARKET_ROOT='<legacy_QUANTDATA_TRAINING_DATA>/dysanos/market/bid=0.011, nat,eth=10,bth=4,mps=1e-06,m ca250824/sm_0.25 6b930b59/SPX'
 export LEGACY_CODE_ROOT=/home/hans/python/quant_data
 mkdir -p "$PRODUCTION_EVIDENCE"
@@ -193,26 +194,26 @@ Every remaining build and comparison command runs with `WRDS_OFF=1`.
 
 ```bash
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
-  intermediate build --config configs/widb-spx-reference.json \
+  intermediate build --config "$ACTIVE_DATASET_CONFIG" \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
   --through fitted-day --include-half-days --source optionmetrics \
   --source-generation default-v1 --max-workers 2 \
   | tee "$PRODUCTION_EVIDENCE/intermediate-plan.jsonl"
 
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
-  intermediate build --config configs/widb-spx-reference.json \
+  intermediate build --config "$ACTIVE_DATASET_CONFIG" \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
   --through fitted-day --include-half-days --source optionmetrics \
   --source-generation default-v1 --max-workers 2 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/intermediate-build.jsonl"
 
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
-  dataset build --config configs/widb-spx-reference.json \
+  dataset build --config "$ACTIVE_DATASET_CONFIG" \
   --require-existing-intermediates --max-workers 2 \
   2>&1 | tee "$PRODUCTION_EVIDENCE/dataset-build.jsonl"
 
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
-  dataset validate --config configs/widb-spx-reference.json --deep-lineage \
+  dataset validate --config "$ACTIVE_DATASET_CONFIG" --deep-lineage \
   2>&1 | tee "$PRODUCTION_EVIDENCE/dataset-validation.jsonl"
 ```
 
@@ -221,11 +222,96 @@ Require 918 completed daily partitions, including the exact-schema typed-empty
 edit either downstream template by hand: step 6 binds both templates to this
 exact immutable identity and records their canonical digests.
 
+### Recover only failed smooth fits after a numerical-policy change
+
+Before changing the producer code, freeze the complete original fitted plan
+with the original checkout and its exact clean revision. The command is
+output-first and refuses to replace an existing evidence file:
+
+```bash
+ORIGINAL_REVISION=$(git rev-parse HEAD)
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
+  intermediate export-fitted-plan \
+  --config "$ACTIVE_DATASET_CONFIG" \
+  --source-revision "$ORIGINAL_REVISION" \
+  --output "$PRODUCTION_EVIDENCE/original-fitted-plan.json"
+```
+
+For the one-time CD-035 introduction, this CLI did not yet exist in revision
+`0116b154c86b36a4559ea20ec78958fedd98a647`. Before merging CD-035, an audited
+standalone exporter called that pinned checkout's `plan_internal_dataset` and
+exclusively created
+`phase-11/evidence/20261017-backfill-0116b15/original-fitted-plan.json`.
+The retained evidence contains 918 ordered sources, configuration digest
+`2566f3f8f6b877a6b2ca860fff4a703f4a997b45dab77013e7d544edb88bde8c`,
+self-authenticating plan digest
+`fedb12e3d1cbbe63105b625e6b1766a7ac94460183df63ce5c2ad605750d3e71`,
+and file SHA-256
+`07d1aa107c38355461c3e0c80b1b58b126cd8aa422d8c079d6bb58daf4bec7ec`.
+The same evidence directory retains `source-revision.txt`; the pinned restart
+script checks its checkout HEAD against that exact revision before doing work.
+Recovery parsing recomputes the plan digest over every embedded source chain.
+This bootstrap is historical evidence, not a repeatable bypass. The exporter
+accepts only an original Dataset config without `fitted_selection`; it refuses
+to flatten or reinterpret an earlier recovery. A later policy change starting
+from a mixed selection requires a separately reviewed lineage design. Future
+changes from an unselected baseline must run the authenticated CLI above while
+the prior checkout is still clean.
+
+After installing the approved recovery policy, use the original append-only
+intermediate run journal as failure evidence. List each failed date explicitly;
+never infer failures by scanning namespaces. First plan without writing, then
+run the identical recovery without `--dry-run`. Set `ORIGINAL_RUN_JOURNAL` to
+the exact `journal` path reported by the original `intermediate build` command,
+not to the tee'd console log:
+
+```bash
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --dry-run --log-format json \
+  intermediate recover-fitted \
+  --config "$ACTIVE_DATASET_CONFIG" \
+  --original-plan "$PRODUCTION_EVIDENCE/original-fitted-plan.json" \
+  --failure-evidence "$ORIGINAL_RUN_JOURNAL" \
+  --failed-date 2023-02-08 \
+  --output-config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json"
+
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
+  intermediate recover-fitted \
+  --config "$ACTIVE_DATASET_CONFIG" \
+  --original-plan "$PRODUCTION_EVIDENCE/original-fitted-plan.json" \
+  --failure-evidence "$ORIGINAL_RUN_JOURNAL" \
+  --failed-date 2023-02-08 \
+  --output-config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json"
+```
+
+Repeat `--failed-date YYYY-MM-DD` for every journal-confirmed failure. The
+generated config preserves every successful original fitted artifact exactly
+and binds each recovery to its original expected target, exact filtered input,
+policy, and embedded failure evidence. It may reference successful dates still
+being built, but Dataset publication remains fail-closed until every selected
+original or recovered artifact exists:
+
+```bash
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
+  dataset build --config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json" \
+  --require-existing-intermediates --max-workers 2
+
+env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
+  dataset validate --config "$PRODUCTION_EVIDENCE/widb-spx-recovered.json" --deep-lineage
+
+export ACTIVE_DATASET_CONFIG="$PRODUCTION_EVIDENCE/widb-spx-recovered.json"
+```
+
+Keep `ACTIVE_DATASET_CONFIG` set to the generated recovery config for every
+remaining comparison, finalization, public projection, and promotion command.
+The reference comparator parses the same strict `InternalDatasetConfig` and
+therefore plans and authenticates its explicit fitted selection; it does not
+reconstruct current-version fitted identities.
+
 ## 5. Full daily migration comparison
 
 ```bash
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos -v --root "$PRODUCTION_ROOT" --log-format json \
-  reference compare-daily --config configs/widb-spx-reference.json \
+  reference compare-daily --config "$ACTIVE_DATASET_CONFIG" \
   --ticker SPX --start-date 2022-01-03 --end-date 2025-08-29 \
   --source optionmetrics --source-generation default-v1 \
   --legacy-root "$LEGACY_MARKET_ROOT" \
@@ -250,7 +336,7 @@ the actual internal Dataset and write the canonical final documents once:
 ```bash
 env WRDS_OFF=1 "$SANOS_PYTHON" -m sanos --root "$PRODUCTION_ROOT" --log-format json \
   production finalize-configs \
-  --dataset-config configs/widb-spx-reference.json \
+  --dataset-config "$ACTIVE_DATASET_CONFIG" \
   --public-template configs/sanos-public-candidate-reference.json \
   --experiment-template configs/dysanos-daily-front-reference.json \
   --output-directory "$PRODUCTION_EVIDENCE/final-configs" \
@@ -428,15 +514,21 @@ missing artifact.
 Daily fitted outputs are immutable and output-first. Keep every completed,
 validated artifact when resuming an unchanged producer version; the normal
 exact-version lookup reuses it automatically. A fitted schema or producer
-version change deliberately creates new fitted identities. Resume by repeating
-the ordinary `intermediate build --through fitted-day` command from step 4 with
-the same production root, source generation, dates, and config. It reuses the
-existing fresh Raw and compatible pre-fit Intermediate artifacts and computes
-only missing new-version descendants. Do not re-download Raw merely because a
-fitted schema changed, and do not use `--version '*'` to cross a version
-boundary. Then repeat the ordinary `dataset build --require-existing-intermediates`
-and deep `dataset validate` commands. There is no historical-artifact exception
-or ad hoc migration tool.
+version change normally creates new fitted identities. For an ordinary
+same-policy rebuild, repeat `intermediate build --through fitted-day` from step
+4 with the same production root, source generation, dates, and config; it
+reuses fresh Raw and compatible pre-fit Intermediate artifacts and computes
+only missing descendants. Do not re-download Raw merely because a fitted
+schema changed, and do not use `--version '*'` to cross a version boundary.
+
+CD-035 is the sole explicit exception: when the reviewed feasible-nonoptimal
+policy is introduced after an original run has recorded failed dates, use the
+exact `export-fitted-plan` / `recover-fitted` workflow above. It retains exact
+old successful fitted pointers and creates separately identified recovery
+artifacts only for journal-confirmed failures; it is not wildcard reuse or an
+artifact relabel. Repeat Dataset build and deep validation using the generated
+recovery config. No other historical-artifact exception or ad hoc migration is
+permitted.
 
 Raw partitions, daily stages, Datasets, public candidates, Experiments, and the
 canonical designation are output-first. After an interruption, retain the same
@@ -447,6 +539,16 @@ still required, correct the cause and wait for the account monitor to permit the
 next attempt. Do not delete monitor state, delete a restart workspace, edit a
 config, or choose a new generation merely to bypass a failure. Preserve every
 attempt log in the evidence directory and give it a distinct suffix when needed.
+
+For smooth-SANOS dates recorded as `feasible_nonoptimal`, retain the complete
+ordered solver history and candidate-validation evidence. The label means the
+ordinary solver chain did not succeed but the selected raw candidate received
+no candidate-specific numerical repair. Its exact state after the
+unchanged common postprocessing passed the candidate-specific LP and
+fitted-state gates under CD-035; it does not mean `optimal`. Dataset evidence
+must list these dates and counts separately. A failed status without the
+complete acceptance record remains a failed date and must never be
+hand-promoted.
 
 ## 9. Evidence retention and safe cleanup
 

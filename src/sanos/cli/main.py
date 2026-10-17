@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import platform
 import sys
 import warnings
@@ -103,6 +104,13 @@ from sanos.runtime import (
 )
 from sanos.widb.build import IntermediateBuildRequest, IntermediateStage, build_intermediates
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
+from sanos.widb.recovery import (
+    ORIGINAL_FITTED_PLAN_SCHEMA,
+    OriginalFittedPlan,
+    OriginalFittedSource,
+    read_original_fitted_plan,
+    recover_failed_fitted_sources,
+)
 from sanos.wrds import (
     ALL_RAW_TABLES,
     RawDownloadConfig,
@@ -567,11 +575,7 @@ def production_runtime_fingerprint(context: CliContext, output: Path) -> None:
 
     try:
         fingerprint = runtime_fingerprint()
-        created = (
-            False
-            if context.dry_run
-            else write_runtime_fingerprint(output, fingerprint)
-        )
+        created = False if context.dry_run else write_runtime_fingerprint(output, fingerprint)
     except (OSError, RuntimeFingerprintError, RuntimeError, ValueError) as exc:
         raise MaterialCliError(str(exc), log_format=context.log_format) from exc
     _emit(
@@ -641,8 +645,7 @@ def production_finalize_configs(
         else:
             if dataset_name is None or dataset_artifact_id is None:
                 raise ValueError(
-                    "Provide --dataset-config or both --dataset-name and "
-                    "--dataset-artifact-id"
+                    "Provide --dataset-config or both --dataset-name and --dataset-artifact-id"
                 )
             dataset_pointer = ArtifactPointer(
                 StorageClass.DATASET,
@@ -652,9 +655,7 @@ def production_finalize_configs(
         ArtifactStore(context.locations.require_complete()).validate(dataset_pointer)
         public_document = json.loads(public_template.read_text(encoding="utf-8"))
         experiment_document = json.loads(experiment_template.read_text(encoding="utf-8"))
-        if not isinstance(public_document, Mapping) or not isinstance(
-            experiment_document, Mapping
-        ):
+        if not isinstance(public_document, Mapping) or not isinstance(experiment_document, Mapping):
             raise ValueError("Downstream templates must be JSON objects")
         bundle = finalize_phase11_downstream_configs(
             dataset_pointer,
@@ -1395,8 +1396,7 @@ def intermediate() -> None:
     required=True,
     type=click.Path(path_type=Path, dir_okay=False, exists=True),
     help=(
-        "Strict portable JSON containing 'daily' and an optional 'surface' "
-        "configuration object."
+        "Strict portable JSON containing 'daily' and an optional 'surface' configuration object."
     ),
 )
 @click.option("--ticker", required=True, help="OptionMetrics ticker, for example SPX.")
@@ -1414,9 +1414,7 @@ def intermediate() -> None:
 )
 @click.option(
     "--through",
-    type=click.Choice(
-        ("paired-day", "enriched-day", "no-arb-day", "filtered-day", "fitted-day")
-    ),
+    type=click.Choice(("paired-day", "enriched-day", "no-arb-day", "filtered-day", "fitted-day")),
     default="enriched-day",
     show_default=True,
 )
@@ -1540,6 +1538,218 @@ def intermediate_build(
         expected_artifact_paths=tuple(store.path_for(pointer) for pointer in result.expected),
         reuse_records=tuple(reuse.as_log_record() for reuse in result.reuses),
         warnings=tuple(reuse.warning for reuse in result.reuses if reuse.warning),
+    )
+
+
+@intermediate.command("export-fitted-plan")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Original portable internal Dataset configuration.",
+)
+@click.option(
+    "--source-revision",
+    required=True,
+    help="Exact 40-hex Git revision whose producer closure is being planned.",
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="New immutable original fitted-plan JSON; existing paths are refused.",
+)
+@click.pass_obj
+def intermediate_export_fitted_plan(
+    context: CliContext,
+    config_path: Path,
+    source_revision: str,
+    output: Path,
+) -> None:
+    """Freeze every exact daily source pointer before changing producer code."""
+
+    try:
+        if os.environ.get("SANOS_SOURCE_REVISION") is not None:
+            raise ValueError(
+                "export-fitted-plan refuses SANOS_SOURCE_REVISION; "
+                "it requires an authenticated clean Git checkout"
+            )
+        observed_revision = repository_source_revision()
+        if source_revision != observed_revision:
+            raise ValueError(
+                "--source-revision does not match the authenticated running checkout "
+                f"({observed_revision})"
+            )
+        config = _read_dataset_config(config_path)
+        if config.fitted_selection is not None:
+            raise ValueError(
+                "export-fitted-plan requires an original Dataset config without "
+                "fitted_selection; successive recovery policies require separate review"
+            )
+        plan = plan_internal_dataset(config)
+        configuration_sha256 = canonical_sha256(
+            {
+                "dataset": {
+                    "name": config.name,
+                    "ticker": config.ticker,
+                    "start_date": config.start_date,
+                    "end_date": config.end_date,
+                    "include_half_days": config.include_half_days,
+                    "source": config.source,
+                    "source_generation": config.source_generation,
+                },
+                "daily": config.daily,
+                "surface": config.surface,
+            }
+        )
+        sources = tuple(
+            OriginalFittedSource(
+                trading_date=item.trading_date,
+                raw_security=item.raw.security,
+                raw_options=item.raw.options,
+                raw_spot=item.raw.spot,
+                raw_previous_spot=item.raw.previous_spot,
+                raw_forwards=item.raw.forwards,
+                raw_zero_curve=item.raw.zero_curve,
+                paired=item.paired.pointer,
+                enriched=item.enriched.pointer,
+                no_arb=item.no_arb.pointer,
+                filtered=item.filtered.pointer,
+                expected_fitted=item.fitted.pointer,
+            )
+            for item in plan.daily_artifacts
+        )
+        unsigned = {
+            "schema": ORIGINAL_FITTED_PLAN_SCHEMA,
+            "ticker": config.ticker,
+            "source_revision": source_revision,
+            "configuration_sha256": configuration_sha256,
+            "sources": [item.as_dict() for item in sources],
+        }
+        frozen = OriginalFittedPlan(
+            ticker=config.ticker,
+            source_revision=source_revision,
+            configuration_sha256=configuration_sha256,
+            sources=sources,
+            evidence_sha256=canonical_sha256(unsigned),
+        )
+        if not context.dry_run:
+            atomic_create_json(output, frozen.as_dict())
+    except (ArtifactError, OSError, ReferenceComparisonError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    _emit(
+        context,
+        "original_fitted_plan_exported",
+        dry_run=context.dry_run,
+        source_revision=frozen.source_revision,
+        original_plan_sha256=frozen.evidence_sha256,
+        selected=len(frozen.sources),
+        output=None if context.dry_run else output,
+        network_accessed=False,
+    )
+
+
+@intermediate.command("recover-fitted")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Original portable internal Dataset configuration.",
+)
+@click.option(
+    "--original-plan",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Frozen complete fitted plan exported by the original source revision.",
+)
+@click.option(
+    "--failure-evidence",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Original append-only run journal recording each requested failed day.",
+)
+@click.option(
+    "--failed-date",
+    "failed_dates",
+    required=True,
+    multiple=True,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Exact journal-confirmed failed date to retry; repeat for multiple failures.",
+)
+@click.option(
+    "--output-config",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="New portable Dataset configuration binding all original/recovered pointers.",
+)
+@click.pass_obj
+def intermediate_recover_fitted(
+    context: CliContext,
+    config_path: Path,
+    original_plan: Path,
+    failure_evidence: Path,
+    failed_dates: tuple[datetime, ...],
+    output_config: Path,
+) -> None:
+    """Retry only explicit failed fits and bind them without replacing successes."""
+
+    try:
+        locations = context.locations.require_complete()
+        config = _read_dataset_config(config_path)
+        frozen = read_original_fitted_plan(original_plan)
+        configured_digest = canonical_sha256(
+            {
+                "dataset": {
+                    "name": config.name,
+                    "ticker": config.ticker,
+                    "start_date": config.start_date,
+                    "end_date": config.end_date,
+                    "include_half_days": config.include_half_days,
+                    "source": config.source,
+                    "source_generation": config.source_generation,
+                },
+                "daily": config.daily,
+                "surface": config.surface,
+            }
+        )
+        if frozen.configuration_sha256 != configured_digest:
+            raise ValueError("Original fitted plan belongs to a different Dataset configuration")
+        selection = recover_failed_fitted_sources(
+            locations,
+            original_plan=frozen,
+            failure_evidence=failure_evidence,
+            failed_dates=tuple(item.date() for item in failed_dates),
+            surface_config=config.surface,
+            include_half_days=config.include_half_days,
+            dry_run=context.dry_run,
+        )
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict) or "fitted_selection" in document:
+            raise ValueError(
+                "Recovery requires an original Dataset config without fitted_selection"
+            )
+        document["fitted_selection"] = selection.as_dict()
+        InternalDatasetConfig.from_document(document)
+        if not context.dry_run:
+            atomic_create_json(output_config, document)
+    except LocationConfigurationError as exc:
+        raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
+    except (ArtifactError, OSError, ValueError) as exc:
+        raise MaterialCliError(str(exc), log_format=context.log_format) from exc
+    recovered = tuple(item for item in selection.bindings if item.recovery_policy_id is not None)
+    _emit(
+        context,
+        "fitted_recovery_result",
+        dry_run=context.dry_run,
+        original_plan_sha256=selection.original_plan_sha256,
+        selected=len(selection.bindings),
+        recovered=len(recovered),
+        failed_dates=tuple(item.trading_date for item in recovered),
+        recovery_artifacts=tuple(item.selected for item in recovered),
+        output_config=None if context.dry_run else output_config,
+        network_accessed=False,
     )
 
 
@@ -1969,9 +2179,7 @@ def reference_dataset_promotion_template(
             try:
                 atomic_create_json(output, document)
             except FileExistsError as exc:
-                raise ValueError(
-                    f"Promotion configuration already exists: {output}"
-                ) from exc
+                raise ValueError(f"Promotion configuration already exists: {output}") from exc
     except LocationConfigurationError as exc:
         raise ConfigurationCliError(str(exc), log_format=context.log_format) from exc
     except (ArtifactError, OSError, RuntimeError, ValueError) as exc:
@@ -2340,9 +2548,7 @@ def public_dataset_approval_template(
             candidate_manifest_sha256=hashlib.sha256(
                 validated.path.joinpath(MANIFEST_NAME).read_bytes()
             ).hexdigest(),
-            candidate_logical_content_sha256=public_frame_logical_sha256(
-                candidate.load()
-            ),
+            candidate_logical_content_sha256=public_frame_logical_sha256(candidate.load()),
             release_license=release_license,
             redistribution_basis=redistribution_basis,
             approver=approver,
@@ -2534,9 +2740,7 @@ def public_dataset_validate(
                 )
             warning_records = tuple(caught_warnings)
             if reuse is None:
-                raise ValueError(
-                    "Requested public Dataset is absent; validation never builds it"
-                )
+                raise ValueError("Requested public Dataset is absent; validation never builds it")
             pointer = reuse.artifact.pointer
             reuse_record: Any = reuse.as_log_record()
         else:

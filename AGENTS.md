@@ -327,6 +327,33 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 - Record every attempted solver and algorithm in order. HiGHS simplex and IPM
   use the `1e-7` calendar gate; CLARABEL uses its status-dependent feasibility
   gate. The configured timeout applies separately to each attempt.
+- Exhaust that normal chain before considering a nonoptimal candidate. If no
+  attempt succeeds, a candidate returned with `user_limit`, recognized
+  `invalid_solution`, or `solver_error` may be retained only when it is bound
+  to that exact attempt, completely mapped back to every original variable,
+  finite, and independently satisfies every original LP constraint and
+  variable bound. Never accept an infeasible, unbounded, incomplete, stale,
+  or candidate-specifically repaired, projected, or clipped state.
+- Reconstruct the exact minimum quote auxiliaries from each candidate density
+  using the LP's inward-contracted bid/ask bands, then recheck the complete LP
+  and all density, mass, martingale, strike-shape, bound, and calendar
+  invariants. Apply only the established common surface postprocessing used by
+  normal successes, then recheck and record the exact published state.
+  If several failed attempts return feasible states, select the one with the
+  lowest exact reconstructed LP objective. Any normally successful attempt
+  takes precedence over every nonoptimal candidate.
+- Persist the original failure status, solver and algorithm, candidate digest,
+  exact residual maxima, objective decomposition, selection reason, and
+  acceptance-policy version. `feasible_nonoptimal` is an explicit outcome, not
+  a relabelled `optimal` status. Preserve already completed fitted-day
+  artifacts; this policy applies only when retrying unresolved failed dates.
+- Recovery must not change or alias an existing successful fitted pointer. For
+  an absent failed pointer, key the distinct recovery artifact by the exact
+  original expected pointer, recovery-policy identity, and filtered upstream
+  pointer. Dataset resolution checks the exact original pointer first and only
+  then its exact configured recovery pointer; it must not use wildcard lookup
+  or namespace discovery. Record both identities and recovery evidence in the
+  self-contained Dataset, with deep validation authenticating exact membership.
 
 ## CLI requirements
 

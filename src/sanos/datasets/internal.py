@@ -64,6 +64,12 @@ from sanos.widb.daily import (
     _implied_volatility_price_tolerance,
     _numerical_tolerances,
 )
+from sanos.widb.recovery import (
+    FittedSourceBinding,
+    OriginalFittedSource,
+    feasible_candidate_recovery_policy_id,
+    fitted_recovery_spec,
+)
 from sanos.widb.surface import (
     FILTERED_SCHEMA,
     FITTED_SCHEMA,
@@ -78,9 +84,9 @@ from sanos.widb.surface import (
 from sanos.wrds import raw_content_producer_version
 
 RAW_CATALOG_SCHEMA_VERSION = "widb-raw-lineage-catalog-v1"
-INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v6"
+INTERNAL_DATASET_SCHEMA_VERSION = "sanos-internal-widb-dataset-v7"
 PARTITION_CATALOG_SCHEMA = "sanos-internal-partitions-v1"
-LINEAGE_SCHEMA = "sanos-internal-lineage-v3"
+LINEAGE_SCHEMA = "sanos-internal-lineage-v4"
 VALIDATION_SCHEMA = "sanos-internal-validation-v7"
 DATASET_SCHEMA_DOCUMENT = "sanos-internal-schema-v5"
 LEGACY_COMPARISON_SCHEMA = "sanos-legacy-comparison-v4"
@@ -170,6 +176,7 @@ class InternalDatasetPlan:
     configuration: Mapping[str, Any]
     expected_dates: tuple[date, ...]
     daily_artifacts: tuple[DailyArtifactPlan, ...]
+    fitted_bindings: tuple[FittedSourceBinding, ...]
     raw_mapping_digest: str
     raw_catalog_spec: ArtifactSpec
     dataset_spec: ArtifactSpec
@@ -238,7 +245,7 @@ def _reason_counts(frame: pl.DataFrame) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-@version("1.1")
+@version("2.0")
 @dataclass(frozen=True, slots=True)
 class _SolverCall:
     """One logical solve, including its authenticated ordered attempts."""
@@ -250,6 +257,7 @@ class _SolverCall:
     used_fallback: bool
     terminal_solver: str
     terminal_algorithm: str
+    published_state_density_digest: str | None = None
 
 
 @version("1.0", dependencies=[_SolverCall])
@@ -264,7 +272,7 @@ class _TerminalSolverEvidence:
 _SolverPolicy = Literal["legacy_two_tier", "smooth_three_tier"]
 
 
-@version("1.3", dependencies=[_SolverCall])
+@version("2.0", dependencies=[_SolverCall])
 def _solver_calls(
     events: list[Any],
     label: str,
@@ -275,7 +283,7 @@ def _solver_calls(
 
     expiry_stages = {"expiry_soft", "expiry_hard"}
     allowed_stages = expiry_stages | {"surface"}
-    successful = {"optimal", "optimal_inaccurate"}
+    successful = {"optimal", "optimal_inaccurate", "feasible_nonoptimal"}
     retry_triggers = {"solver_error", "invalid_solution", "user_limit"}
     base_fields = {
         "stage",
@@ -286,6 +294,194 @@ def _solver_calls(
         "for_expiry",
         "objective",
     }
+    candidate_core_fields = {
+        "candidate_inspected",
+        "candidate_available",
+        "candidate_accepted",
+        "candidate_digest",
+        "candidate_policy",
+        "candidate_feasibility_tolerance",
+        "candidate_auxiliary_objective",
+        "explicit_constraint_max",
+        "variable_bound_max",
+        "density_min",
+        "density_max",
+        "mass_residual_max",
+        "moment_residual_max",
+        "calendar_violation_max",
+        "contracted_slack_sum",
+        "midpoint_max_sum",
+        "contracted_objective_recomputed",
+    }
+    native_fields = {
+        "native_model_status",
+        "native_solve_time",
+        "native_simplex_iteration_count",
+        "native_ipm_iteration_count",
+        "native_objective_function_value",
+        "native_max_primal_infeasibility",
+        "native_max_dual_infeasibility",
+        "native_iterations",
+        "native_cost_primal",
+        "native_cost_dual",
+        "native_gap_abs",
+        "native_gap_rel",
+        "native_res_primal",
+        "native_res_dual",
+    }
+
+    def validate_candidate_fields(event: Mapping[str, Any], expected_fields: set[str]) -> None:
+        extras = set(event) - expected_fields
+        if not extras:
+            return
+        if extras == {"candidate_inspected", "candidate_available"}:
+            if (
+                event.get("candidate_inspected") is not True
+                or event.get("candidate_available") is not False
+            ):
+                _fail(f"{label} diagnostics has invalid unavailable-candidate evidence")
+            return
+        rejected = {
+            "candidate_inspected",
+            "candidate_available",
+            "candidate_accepted",
+            "candidate_rejection",
+        }
+        if extras == rejected:
+            if (
+                event.get("candidate_inspected") is not True
+                or event.get("candidate_available") is not True
+                or event.get("candidate_accepted") is not False
+                or not isinstance(event.get("candidate_rejection"), str)
+            ):
+                _fail(f"{label} diagnostics has invalid rejected-candidate evidence")
+            return
+        terminal_fields = {
+            "accepted_feasible_nonoptimal",
+            "original_solver",
+            "original_algorithm",
+            "original_status",
+        }
+        allowed = candidate_core_fields | native_fields
+        if event.get("status") == "feasible_nonoptimal":
+            allowed |= terminal_fields
+            if not terminal_fields.issubset(extras):
+                _fail(f"{label} diagnostics feasible candidate has incomplete provenance")
+        if not candidate_core_fields.issubset(extras) or not extras.issubset(allowed):
+            _fail(f"{label} diagnostics candidate evidence fields changed")
+        if (
+            event.get("candidate_inspected") is not True
+            or event.get("candidate_available") is not True
+            or not isinstance(event.get("candidate_accepted"), bool)
+            or event.get("candidate_policy") != "smooth-feasible-nonoptimal-v1"
+            or not isinstance(event.get("candidate_digest"), str)
+            or _HEX_64.fullmatch(cast(str, event.get("candidate_digest"))) is None
+        ):
+            _fail(f"{label} diagnostics has invalid candidate provenance")
+        for name in candidate_core_fields - {
+            "candidate_inspected",
+            "candidate_available",
+            "candidate_accepted",
+            "candidate_digest",
+            "candidate_policy",
+        }:
+            value = event.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                _fail(f"{label} diagnostics candidate {name} is invalid")
+        for name in extras & native_fields:
+            value = event.get(name)
+            if name == "native_model_status":
+                if not isinstance(value, str) or not value:
+                    _fail(f"{label} diagnostics candidate native status is invalid")
+            elif (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                _fail(f"{label} diagnostics candidate native metadata is invalid")
+        tolerance = float(event["candidate_feasibility_tolerance"])
+        if tolerance <= 0.0:
+            _fail(f"{label} diagnostics candidate tolerance is invalid")
+        if event.get("candidate_accepted") is True and (
+            float(event["explicit_constraint_max"]) > tolerance
+            or float(event["variable_bound_max"]) > tolerance
+            or float(event["density_min"]) < -tolerance
+            or float(event["density_max"]) > 1.0 + tolerance
+            or float(event["mass_residual_max"]) > tolerance
+            or float(event["moment_residual_max"]) > tolerance
+            or float(event["calendar_violation_max"]) > tolerance
+        ):
+            _fail(f"{label} diagnostics accepted candidate violates its tolerance")
+        if event.get("status") == "feasible_nonoptimal" and (
+            event.get("accepted_feasible_nonoptimal") is not True
+            or event.get("candidate_accepted") is not True
+            or event.get("original_status") not in retry_triggers
+            or not isinstance(event.get("original_solver"), str)
+            or not isinstance(event.get("original_algorithm"), str)
+        ):
+            _fail(f"{label} diagnostics has invalid accepted-candidate provenance")
+
+    def validate_published(event: Any, terminal: Mapping[str, Any]) -> str:
+        if not isinstance(event, Mapping):
+            _fail(f"{label} diagnostics has no published-state event")
+        published_names = {
+            "density_min",
+            "density_max",
+            "mass_residual_max",
+            "moment_residual_max",
+            "calendar_violation_max",
+            "contracted_slack_sum",
+            "midpoint_max_sum",
+            "contracted_objective_recomputed",
+            "explicit_constraint_max",
+            "variable_bound_max",
+        }
+        expected = (
+            base_fields
+            | {
+                "accepted_feasible_nonoptimal",
+                "candidate_policy",
+                "published_state_density_digest",
+            }
+            | {f"published_state_{name}" for name in published_names}
+        )
+        if set(event) != expected:
+            _fail(f"{label} diagnostics published-state fields changed")
+        if (
+            event.get("stage") != terminal.get("stage")
+            or event.get("solver") != "POSTPROCESS"
+            or event.get("algorithm") != "established-density-postprocessing"
+            or event.get("status") != "feasible_nonoptimal_published"
+            or event.get("is_fallback") is not True
+            or event.get("for_expiry") is not False
+            or event.get("accepted_feasible_nonoptimal") is not True
+            or event.get("candidate_policy") != terminal.get("candidate_policy")
+        ):
+            _fail(f"{label} diagnostics has invalid published-state linkage")
+        digest = event.get("published_state_density_digest")
+        if not isinstance(digest, str) or _HEX_64.fullmatch(digest) is None:
+            _fail(f"{label} diagnostics has invalid published-state digest")
+        for name in published_names | {"objective"}:
+            key = name if name == "objective" else f"published_state_{name}"
+            value = event.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                _fail(f"{label} diagnostics published {key} is invalid")
+        if not math.isclose(
+            float(event["objective"]),
+            float(event["published_state_contracted_objective_recomputed"]),
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            _fail(f"{label} diagnostics published objective linkage changed")
+        return digest
 
     def validate_event(event: Any) -> tuple[str, int | None, int | None]:
         if not isinstance(event, Mapping):
@@ -297,8 +493,7 @@ def _solver_calls(
         expected_fields = base_fields | (
             {"input_expiry_index", "expiry_attempt"} if is_expiry else set()
         )
-        if set(event) != expected_fields:
-            _fail(f"{label} diagnostics {stage} event fields changed")
+        validate_candidate_fields(event, expected_fields)
         solver = event.get("solver")
         algorithm = event.get("algorithm")
         is_fallback = event.get("is_fallback")
@@ -336,9 +531,12 @@ def _solver_calls(
             or not math.isfinite(float(objective))
         ):
             _fail(f"{label} diagnostics {stage} has invalid solver objective")
-        if status in successful and objective is None:
+        if status in successful | {"feasible_nonoptimal"} and objective is None:
             _fail(f"{label} diagnostics {stage} success has no finite objective")
-        if status not in successful | {"user_limit"} and objective is not None:
+        if (
+            status not in successful | {"user_limit", "feasible_nonoptimal"}
+            and objective is not None
+        ):
             _fail(f"{label} diagnostics {stage} failure has an objective value")
         if not is_expiry:
             return stage, None, None
@@ -358,12 +556,14 @@ def _solver_calls(
     calls: list[_SolverCall] = []
     position = 0
     while position < len(events):
+        call_start = position
         primary = events[position]
         stage, input_index, attempt = validate_event(primary)
         if primary["is_fallback"]:
             _fail(f"{label} diagnostics has an orphan fallback event")
         terminal = primary
         used_fallback = False
+        published_digest: str | None = None
         if primary["status"] in retry_triggers:
             if position + 1 >= len(events):
                 _fail(f"{label} diagnostics has a dangling fallback trigger")
@@ -403,6 +603,37 @@ def _solver_calls(
                         and possible_final.get("stage") == stage
                     ):
                         _fail(f"{label} diagnostics retries after terminal IPM status")
+            if (
+                position + 1 < len(events)
+                and isinstance(events[position + 1], Mapping)
+                and events[position + 1].get("status") == "feasible_nonoptimal"
+            ):
+                recovered = events[position + 1]
+                recovered_key = validate_event(recovered)
+                if (
+                    recovered_key != (stage, input_index, attempt)
+                    or recovered.get("is_fallback") is not True
+                    or stage != "surface"
+                ):
+                    _fail(f"{label} diagnostics has a mismatched feasible candidate")
+                matched_candidates = [
+                    event
+                    for event in events[call_start : position + 1]
+                    if isinstance(event, Mapping)
+                    and event.get("candidate_digest") == recovered.get("candidate_digest")
+                    and event.get("solver") == recovered.get("original_solver")
+                    and event.get("algorithm") == recovered.get("original_algorithm")
+                    and event.get("status") == recovered.get("original_status")
+                    and event.get("candidate_accepted") is True
+                ]
+                if len(matched_candidates) != 1:
+                    _fail(f"{label} diagnostics accepted candidate is not uniquely linked")
+                terminal = recovered
+                position += 1
+                if position + 1 >= len(events):
+                    _fail(f"{label} diagnostics has no published feasible state")
+                published_digest = validate_published(events[position + 1], recovered)
+                position += 1
         calls.append(
             _SolverCall(
                 stage=stage,
@@ -412,6 +643,7 @@ def _solver_calls(
                 terminal_solver=cast(str, terminal["solver"]),
                 terminal_algorithm=cast(str, terminal["algorithm"]),
                 used_fallback=used_fallback,
+                published_state_density_digest=published_digest,
             )
         )
         position += 1
@@ -434,7 +666,7 @@ def _terminal_solver_events(
     events = value.get("solver_events")
     if not isinstance(events, list) or not events:
         _fail(f"{label} diagnostics has no non-empty solver_events list")
-    successful = {"optimal", "optimal_inaccurate"}
+    successful = {"optimal", "optimal_inaccurate", "feasible_nonoptimal"}
     hard_fallback = successful | {"infeasible", "infeasible_inaccurate"}
 
     if expected_expiry_indices is None or retained_expiry_indices is None:
@@ -516,10 +748,7 @@ def _terminal_solver_events(
             "infeasible",
             "infeasible_inaccurate",
         }:
-            _fail(
-                f"{label} diagnostics expiry {input_index} retries without "
-                "a failed hard fit"
-            )
+            _fail(f"{label} diagnostics expiry {input_index} retries without a failed hard fit")
         hard_failed = {"infeasible", "infeasible_inaccurate"}
         if len(history) == 1:
             valid_decision = retained and support_attempt == 1
@@ -594,6 +823,27 @@ def _max_abs(left: np.ndarray[Any, Any], right: np.ndarray[Any, Any]) -> float:
 
 
 @version("1.0")
+def _persisted_density_digest(
+    frame: pl.DataFrame,
+    *,
+    index_column: str,
+    density_column: str,
+) -> str:
+    """Hash persisted per-expiry densities as the numerical producer does."""
+
+    digest = hashlib.sha256()
+    state = frame.filter(pl.col(index_column).is_not_null()).sort(index_column)
+    for index in state.get_column(index_column).unique(maintain_order=True):
+        values = state.filter(pl.col(index_column) == index).get_column(density_column).to_list()
+        if not values or any(value != values[0] for value in values[1:]):
+            _fail(f"Persisted {density_column} state is inconsistent")
+        array = np.ascontiguousarray(values[0], dtype=np.float64)
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+@version("1.0")
 def _validate_calendar_residual(
     residual: float,
     *,
@@ -601,12 +851,7 @@ def _validate_calendar_residual(
     label: str,
 ) -> None:
     """Apply one inclusive finite calendar-feasibility boundary."""
-    if (
-        not np.isfinite(residual)
-        or residual < 0.0
-        or not np.isfinite(tolerance)
-        or tolerance < 0.0
-    ):
+    if not np.isfinite(residual) or residual < 0.0 or not np.isfinite(tolerance) or tolerance < 0.0:
         _fail(f"{label} has an invalid calendar residual or tolerance")
     if residual > tolerance:
         _fail(f"{label} normalized calls violate calendar monotonicity")
@@ -690,19 +935,11 @@ def _validate_pricer_state(
         previous_calls = calls
     for index in range(1, len(expiries)):
         support = np.union1d(supports[index - 1], supports[index])
-        previous_support_calls = np.asarray(
-            pricer(expiries[index - 1], support), dtype=np.float64
-        )
-        current_support_calls = np.asarray(
-            pricer(expiries[index], support), dtype=np.float64
-        )
+        previous_support_calls = np.asarray(pricer(expiries[index - 1], support), dtype=np.float64)
+        current_support_calls = np.asarray(pricer(expiries[index], support), dtype=np.float64)
         calendar_residual = max(
             calendar_residual,
-            float(
-                np.max(
-                    np.maximum(previous_support_calls - current_support_calls, 0.0)
-                )
-            ),
+            float(np.max(np.maximum(previous_support_calls - current_support_calls, 0.0))),
         )
     if strike_shape_residual > 1.0e-7:
         _fail(f"{label} normalized calls violate decreasing/convex strike shape")
@@ -723,7 +960,7 @@ def _validate_pricer_state(
     }
 
 
-@version("2.1", dependencies=[SanosLPSolver, _SolverCall])
+@version("3.0", dependencies=[SanosLPSolver, _SolverCall])
 def _surface_calendar_acceptance_tolerance(
     terminal_solver_call: _SolverCall,
     label: str,
@@ -733,8 +970,11 @@ def _surface_calendar_acceptance_tolerance(
     if terminal_solver_call.stage != "surface" or terminal_solver_call.terminal_status not in {
         "optimal",
         "optimal_inaccurate",
+        "feasible_nonoptimal",
     }:
         _fail(f"{label} diagnostics has no accepted surface solve")
+    if terminal_solver_call.terminal_status == "feasible_nonoptimal":
+        return 1.0e-7
     if terminal_solver_call.terminal_solver == "HIGHS":
         _, settings = SanosLPSolver()._lp_solver_settings(
             for_expiry=False,
@@ -751,11 +991,7 @@ def _surface_calendar_acceptance_tolerance(
         is_fallback=True,
         attempt_algorithm="clarabel",
     )
-    key = (
-        "tol_feas"
-        if terminal_solver_call.terminal_status == "optimal"
-        else "reduced_tol_feas"
-    )
+    key = "tol_feas" if terminal_solver_call.terminal_status == "optimal" else "reduced_tol_feas"
     return float(settings[key])
 
 
@@ -777,8 +1013,7 @@ def _business_dte_replay(
         dtype=np.float32,
     )
     return np.clip(
-        integer_business_dte
-        - np.where(expiry_is_am, am_business_day_subtraction, 0.0),
+        integer_business_dte - np.where(expiry_is_am, am_business_day_subtraction, 0.0),
         a_min=0.0,
         a_max=None,
     ).astype(np.float32)
@@ -919,9 +1154,7 @@ def _expiry_state_pricer(
         maxima["surface_density_minimum_violation"] = max(
             maxima["surface_density_minimum_violation"], max(-surface_minimum, 0.0)
         )
-        maxima["surface_density_moment"] = max(
-            maxima["surface_density_moment"], surface_moment
-        )
+        maxima["surface_density_moment"] = max(maxima["surface_density_moment"], surface_moment)
         expiries.append(float(expiry_values[0]))
         variances.append(float(variance_values[0]))
         expiry_strikes.append(xstrikes)
@@ -962,8 +1195,10 @@ def _validate_support_mask_geometry(
             continue
         state_rows = group.filter(pl.Series("__state", local_present))
         supports = state_rows.get_column(expiry_strikes_column).to_list()
-        if not supports or supports[0] is None or any(
-            value != supports[0] for value in supports[1:]
+        if (
+            not supports
+            or supports[0] is None
+            or any(value != supports[0] for value in supports[1:])
         ):
             _fail(f"{label} has inconsistent retained expiry support")
         support = np.asarray(supports[0], dtype=np.float64)
@@ -993,10 +1228,7 @@ def _validate_support_mask_geometry(
             and np.array_equal(interior[positions], masked_strikes)
         )
         if not is_strict_ordered_subset:
-            _fail(
-                f"{label} must be a strict ordered subset after a failed second "
-                "hard fit"
-            )
+            _fail(f"{label} must be a strict ordered subset after a failed second hard fit")
 
 
 @version("1.0")
@@ -1156,8 +1388,7 @@ def _smooth_market_fit_prices(
     left = at_state(insertion - 1)
     right = at_state(insertion)
     return (
-        (expiry - expiries64[insertion - 1]) * right
-        + (expiries64[insertion] - expiry) * left
+        (expiry - expiries64[insertion - 1]) * right + (expiries64[insertion] - expiry) * left
     ) / (expiries64[insertion] - expiries64[insertion - 1])
 
 
@@ -1177,9 +1408,7 @@ def _validate_smooth_canonical_market_fit_bridge(
     """Reject a canonical consumer that diverges from the producer market fit."""
 
     if residual > _smooth_canonical_market_fit_bridge_tolerance():
-        _fail(
-            f"{label}: smooth canonical market-fit bridge residual is {residual}"
-        )
+        _fail(f"{label}: smooth canonical market-fit bridge residual is {residual}")
 
 
 @version("initial-expiry-quote-containment-1e-6-v1")
@@ -1203,12 +1432,7 @@ def _masked_quote_band_residual(
     ask_values = np.asarray(asks)
     fit_values = np.asarray(fits)
     mask_values = np.asarray(mask, dtype=bool)
-    if not (
-        bid_values.shape
-        == ask_values.shape
-        == fit_values.shape
-        == mask_values.shape
-    ):
+    if not (bid_values.shape == ask_values.shape == fit_values.shape == mask_values.shape):
         _fail("initial quote-band residual inputs have inconsistent shapes")
     if not np.any(mask_values):
         return 0.0
@@ -1239,10 +1463,7 @@ def _validate_initial_fit_quote_contract(
         if not np.isfinite(residual) or residual < 0.0:
             _fail(f"{label}: initial {name} quote-band residual is invalid")
     if expiry_fit_residual > _initial_expiry_quote_containment_tolerance():
-        _fail(
-            f"{label}: initial expiry-fit quote containment residual is "
-            f"{expiry_fit_residual}"
-        )
+        _fail(f"{label}: initial expiry-fit quote containment residual is {expiry_fit_residual}")
 
 
 @version(
@@ -1303,11 +1524,7 @@ def _smooth_producer_replay(
             ("smooth_surface_model_strikes", surface_supports, "support"),
         ):
             values = group.get_column(column).to_list()
-            if (
-                not values
-                or values[0] is None
-                or any(value != values[0] for value in values[1:])
-            ):
+            if not values or values[0] is None or any(value != values[0] for value in values[1:]):
                 _fail(f"smooth producer state {input_index} has inconsistent {column}")
             target.append(
                 _exact_float32_state(
@@ -1320,11 +1537,7 @@ def _smooth_producer_replay(
             ("smooth_surface_model_density", surface_densities),
         ):
             values = group.get_column(column).to_list()
-            if (
-                not values
-                or values[0] is None
-                or any(value != values[0] for value in values[1:])
-            ):
+            if not values or values[0] is None or any(value != values[0] for value in values[1:]):
                 _fail(f"smooth producer state {input_index} has inconsistent {column}")
             target.append(np.asarray(values[0], dtype=np.float64))
 
@@ -1341,9 +1554,7 @@ def _smooth_producer_replay(
     surface_fits: list[np.ndarray[Any, Any]] = []
     for model_index, input_index in enumerate(retained_indices):
         group = selected_groups[input_index]
-        strikes32 = group.get_column("normalized_strike").to_numpy().astype(
-            np.float32, copy=False
-        )
+        strikes32 = group.get_column("normalized_strike").to_numpy().astype(np.float32, copy=False)
         expiry = expiries64[model_index]
         expiry_fits.append(
             np.maximum(
@@ -1368,15 +1579,9 @@ def _smooth_producer_replay(
     market_fit_errors: list[np.ndarray[Any, Any]] = []
     for group in selected_groups:
         expiry = np.float32(group.get_column("time_to_expiry_years").item(0))
-        strikes32 = group.get_column("normalized_strike").to_numpy().astype(
-            np.float32, copy=False
-        )
-        bids32 = group.get_column("pure_bid_price").to_numpy().astype(
-            np.float32, copy=False
-        )
-        asks32 = group.get_column("pure_ask_price").to_numpy().astype(
-            np.float32, copy=False
-        )
+        strikes32 = group.get_column("normalized_strike").to_numpy().astype(np.float32, copy=False)
+        bids32 = group.get_column("pure_bid_price").to_numpy().astype(np.float32, copy=False)
+        asks32 = group.get_column("pure_ask_price").to_numpy().astype(np.float32, copy=False)
         fitted = _smooth_market_fit_prices(
             expiry=expiry,
             strikes32=strikes32,
@@ -1391,8 +1596,7 @@ def _smooth_producer_replay(
             min_half_spread,
         )
         errors = (
-            np.maximum(0.0, fitted - asks32)
-            + np.maximum(0.0, bids32 - fitted)
+            np.maximum(0.0, fitted - asks32) + np.maximum(0.0, bids32 - fitted)
         ) / half_spreads
         market_fits.append(fitted)
         market_fit_errors.append(errors)
@@ -1485,18 +1689,10 @@ def _black_source_vector_residual(
             "source Black prices have the wrong shape for deterministic replay: "
             f"{source.shape} != {(frame.height,)}"
         )
-    times = (
-        frame.get_column("time_to_expiry_years")
-        .to_numpy()
-        .astype(np.float64, copy=False)
-    )
+    times = frame.get_column("time_to_expiry_years").to_numpy().astype(np.float64, copy=False)
     if not len(times) or np.any(times != times[0]) or times[0] <= 0.0:
         _fail("deterministic Black replay requires one positive expiry")
-    strikes = (
-        frame.get_column("normalized_strike")
-        .to_numpy()
-        .astype(np.float64, copy=False)
-    )
+    strikes = frame.get_column("normalized_strike").to_numpy().astype(np.float64, copy=False)
     implied_epsilon, greek_epsilon = _numerical_tolerances()
     volatility = _black_implied(
         k=strikes,
@@ -1584,23 +1780,19 @@ def _black_value_envelope(
         strike_lower = strike_center
         strike_upper = strike_center
     else:
-        strike_lower = np.nextafter(
-            strikes32, np.float32(-np.inf), dtype=np.float32
-        ).astype(np.float64)
-        strike_upper = np.nextafter(
-            strikes32, np.float32(np.inf), dtype=np.float32
-        ).astype(np.float64)
+        strike_lower = np.nextafter(strikes32, np.float32(-np.inf), dtype=np.float32).astype(
+            np.float64
+        )
+        strike_upper = np.nextafter(strikes32, np.float32(np.inf), dtype=np.float32).astype(
+            np.float64
+        )
     volatility_lower = np.clip(
-        np.nextafter(
-            volatilities32, np.float32(-np.inf), dtype=np.float32
-        ).astype(np.float64),
+        np.nextafter(volatilities32, np.float32(-np.inf), dtype=np.float32).astype(np.float64),
         volatility_minimum,
         volatility_maximum,
     )
     volatility_upper = np.clip(
-        np.nextafter(
-            volatilities32, np.float32(np.inf), dtype=np.float32
-        ).astype(np.float64),
+        np.nextafter(volatilities32, np.float32(np.inf), dtype=np.float32).astype(np.float64),
         volatility_minimum,
         volatility_maximum,
     )
@@ -1609,9 +1801,7 @@ def _black_value_envelope(
     total_volatility_lower = volatility_lower * sqrt_time
     total_volatility_upper = volatility_upper * sqrt_time
     names = ("price", "delta", "gamma", "vega", "theta", "dk")
-    candidate_values: dict[str, list[np.ndarray[Any, Any]]] = {
-        name: [] for name in names
-    }
+    candidate_values: dict[str, list[np.ndarray[Any, Any]]] = {name: [] for name in names}
 
     def append_candidate(
         strike: np.ndarray[Any, Any],
@@ -1625,9 +1815,7 @@ def _black_value_envelope(
             what=bs.PRICE | bs.DELTA | bs.GAMMA | bs.VEGA | bs.THETA | bs.DK,
         )
         for name in names:
-            candidate_values[name].append(
-                np.asarray(getattr(values, name), dtype=np.float64)
-            )
+            candidate_values[name].append(np.asarray(getattr(values, name), dtype=np.float64))
 
     for strike in (strike_lower, strike_upper):
         for volatility in (volatility_lower, volatility_upper):
@@ -1705,9 +1893,7 @@ def _merge_black_vector_residuals(
         "greek_rounding_excess",
         "volatility_bound_excess",
     )
-    return _BlackVectorResiduals(
-        *(max(getattr(item, field) for item in items) for field in fields)
-    )
+    return _BlackVectorResiduals(*(max(getattr(item, field) for item in items) for field in fields))
 
 
 @version(
@@ -1739,18 +1925,10 @@ def _black_vector_residual(
     """
 
     _, greek_epsilon = _numerical_tolerances()
-    strikes32 = (
-        frame.get_column("normalized_strike")
-        .to_numpy()
-        .astype(np.float32, copy=False)
-    )
+    strikes32 = frame.get_column("normalized_strike").to_numpy().astype(np.float32, copy=False)
     prices32 = frame.get_column(price_column).to_numpy().astype(np.float32, copy=False)
-    volatilities32 = (
-        frame.get_column(volatility_column).to_numpy().astype(np.float32, copy=False)
-    )
-    sqrt_time = np.sqrt(
-        frame.get_column("time_to_expiry_years").to_numpy().astype(np.float64)
-    )
+    volatilities32 = frame.get_column(volatility_column).to_numpy().astype(np.float32, copy=False)
+    sqrt_time = np.sqrt(frame.get_column("time_to_expiry_years").to_numpy().astype(np.float64))
     strikes = strikes32.astype(np.float64)
     volatilities = volatilities32.astype(np.float64)
     center = _black_values(
@@ -1794,9 +1972,7 @@ def _black_vector_residual(
     greek_rounding_excess = 0.0
     for name in names[1:]:
         observed32 = (
-            frame.get_column(f"{greek_prefix}_{name}")
-            .to_numpy()
-            .astype(np.float32, copy=False)
+            frame.get_column(f"{greek_prefix}_{name}").to_numpy().astype(np.float32, copy=False)
         )
         observed = observed32.astype(np.float64)
         greek_center = max(
@@ -1858,18 +2034,12 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
             for row_index, items in enumerate(values.to_list()):
                 if items is None:
                     continue
-                if any(
-                    item is not None and not np.isfinite(float(item))
-                    for item in items
-                ):
-                    _fail(
-                        f"{column} contains a non-finite numeric value at row "
-                        f"{row_index}"
-                    )
+                if any(item is not None and not np.isfinite(float(item)) for item in items):
+                    _fail(f"{column} contains a non-finite numeric value at row {row_index}")
 
 
 @version(
-    "5.0",
+    "6.0",
     dependencies=[
         PartitionStatistics,
         _canonical_object,
@@ -1877,6 +2047,7 @@ def _validate_fitted_numeric_finiteness(frame: pl.DataFrame) -> None:
         _expected_solver_expiry_indices,
         _terminal_solver_events,
         _max_abs,
+        _persisted_density_digest,
         _validate_pricer_state,
         _validate_calendar_residual,
         _surface_calendar_acceptance_tolerance,
@@ -2008,9 +2179,7 @@ def validate_fitted_partition(
                     f"expiry_id={expiry_id}"
                 )
 
-    initial_index_null = frame.get_column(
-        "initial_no_arb_input_expiry_index"
-    ).is_null().to_numpy()
+    initial_index_null = frame.get_column("initial_no_arb_input_expiry_index").is_null().to_numpy()
     for column in (
         "initial_model_variance",
         "fit1_volatility",
@@ -2053,9 +2222,7 @@ def validate_fitted_partition(
             _fail(f"{trading_date}: {column} nullability differs from smooth model index")
     expected_ids = {
         "configuration_id": canonical_sha256(config.daily),
-        "no_arb_configuration_id": canonical_sha256(
-            {"no_arbitrage": config.surface.no_arbitrage}
-        ),
+        "no_arb_configuration_id": canonical_sha256({"no_arbitrage": config.surface.no_arbitrage}),
         "options_filter_configuration_id": canonical_sha256(
             {"options_filter": config.surface.options_filter}
         ),
@@ -2089,9 +2256,7 @@ def validate_fitted_partition(
         frame.select(*NO_ARB_SCHEMA),
         config=config.surface,
     )
-    filter_output_columns = tuple(
-        name for name in FILTERED_SCHEMA if name not in NO_ARB_SCHEMA
-    )
+    filter_output_columns = tuple(name for name in FILTERED_SCHEMA if name not in NO_ARB_SCHEMA)
     for column in filter_output_columns:
         if not frame.get_column(column).equals(recomputed_filtered.get_column(column)):
             _fail(
@@ -2125,9 +2290,7 @@ def validate_fitted_partition(
         _fail(f"{trading_date}: rejected rows lack a filter rejection reason")
 
     pre_mask = frame.get_column("mask_arb_free").to_numpy().astype(bool)
-    initial_retained = frame.get_column(
-        "initial_no_arb_expiry_retained"
-    ).to_numpy().astype(bool)
+    initial_retained = frame.get_column("initial_no_arb_expiry_retained").to_numpy().astype(bool)
     initial_reasons = frame.get_column("initial_no_arb_rejection_reason").to_numpy()
     expected_initial_reasons = np.full(frame.height, None, dtype=object)
     expected_initial_reasons[~initial_retained] = "initial_no_arb_expiry_dropped"
@@ -2226,9 +2389,7 @@ def validate_fitted_partition(
 
     expiry_dates = frame.get_column("expiry_date").to_numpy().astype("datetime64[D]")
     expiry_is_am = frame.get_column("expiry_is_am").to_numpy().astype(bool)
-    expected_calendar_dte = (
-        expiry_dates - np.datetime64(trading_date, "D")
-    ).astype(np.int32)
+    expected_calendar_dte = (expiry_dates - np.datetime64(trading_date, "D")).astype(np.int32)
     observed_calendar_dte = frame.get_column("calendar_dte").to_numpy()
     if not np.array_equal(observed_calendar_dte, expected_calendar_dte):
         _fail(f"{trading_date}: calendar_dte differs from expiry_date minus trading_date")
@@ -2240,9 +2401,7 @@ def validate_fitted_partition(
     )
     observed_business_dte = frame.get_column("business_dte").to_numpy()
     if not np.array_equal(observed_business_dte, expected_business_dte):
-        _fail(
-            f"{trading_date}: business_dte differs from the configured AM/PM business clock"
-        )
+        _fail(f"{trading_date}: business_dte differs from the configured AM/PM business clock")
     expected_time = (expected_business_dte / np.float32(DAYS_PER_YEAR)).astype(np.float32)
     if not np.array_equal(frame.get_column("time_to_expiry_years").to_numpy(), expected_time):
         _fail(f"{trading_date}: time_to_expiry_years differs from business_dte/252")
@@ -2259,9 +2418,7 @@ def validate_fitted_partition(
     observed_spot = frame.get_column("spot").to_numpy()
     observed_previous_spot = frame.get_column("previous_spot").to_numpy()
     expected_spot_return = np.float32(
-        np.float32(observed_spot[0])
-        / np.float32(observed_previous_spot[0])
-        - np.float32(1.0)
+        np.float32(observed_spot[0]) / np.float32(observed_previous_spot[0]) - np.float32(1.0)
     )
     if not np.array_equal(
         frame.get_column("spot_return").to_numpy(),
@@ -2299,12 +2456,10 @@ def validate_fitted_partition(
     call_ask = floats("pure_market_call_ask")
     put_bid = floats("pure_market_put_bid")
     put_ask = floats("pure_market_put_ask")
-    valid_call = np.isfinite(call_bid) & np.isfinite(call_ask) & (call_bid >= 0.0) & (
-        call_ask > call_bid
+    valid_call = (
+        np.isfinite(call_bid) & np.isfinite(call_ask) & (call_bid >= 0.0) & (call_ask > call_bid)
     )
-    valid_put = np.isfinite(put_bid) & np.isfinite(put_ask) & (put_bid >= 0.0) & (
-        put_ask > put_bid
-    )
+    valid_put = np.isfinite(put_bid) & np.isfinite(put_ask) & (put_bid >= 0.0) & (put_ask > put_bid)
     expected_call_active = selected & pre_mask & valid_call
     expected_put_active = selected & pre_mask & valid_put
     call_active = frame.get_column("call_active").to_numpy().astype(bool)
@@ -2343,9 +2498,7 @@ def validate_fitted_partition(
     previous_spot_residual = _max_abs(
         floats("normalized_previous_spot"), floats("previous_spot") / spot
     )
-    forward_residual = _max_abs(
-        floats("spot_normalized_implied_forward"), forward / spot
-    )
+    forward_residual = _max_abs(floats("spot_normalized_implied_forward"), forward / spot)
     discounted_forward = discount * floats("spot_normalized_implied_forward")
     direct_call_residual = _max_abs(
         call_bid[selected],
@@ -2355,8 +2508,7 @@ def validate_fitted_partition(
         direct_call_residual,
         _max_abs(
             call_ask[selected],
-            floats("spot_normalized_market_call_ask")[selected]
-            / discounted_forward[selected],
+            floats("spot_normalized_market_call_ask")[selected] / discounted_forward[selected],
         ),
     )
     direct_put_residual = _max_abs(
@@ -2367,19 +2519,21 @@ def validate_fitted_partition(
         direct_put_residual,
         _max_abs(
             put_ask[selected],
-            floats("spot_normalized_market_put_ask")[selected]
-            / discounted_forward[selected],
+            floats("spot_normalized_market_put_ask")[selected] / discounted_forward[selected],
         ),
     )
-    if max(
-        strike_residual,
-        spot_strike_residual,
-        spot_reference_residual,
-        previous_spot_residual,
-        forward_residual,
-        direct_call_residual,
-        direct_put_residual,
-    ) > 2e-6:
+    if (
+        max(
+            strike_residual,
+            spot_strike_residual,
+            spot_reference_residual,
+            previous_spot_residual,
+            forward_residual,
+            direct_call_residual,
+            direct_put_residual,
+        )
+        > 2e-6
+    ):
         _fail(f"{trading_date}: normalized-unit bridge residual exceeds 2e-6")
 
     expected_no_arb = {
@@ -2440,9 +2594,7 @@ def validate_fitted_partition(
             "selected_expiries": len(selected_expiry_ids),
             "retained_expiries": len(smooth_retained_ids),
             "dropped_expiry_ids": [
-                value
-                for value in selected_expiry_ids
-                if value not in set(smooth_retained_ids)
+                value for value in selected_expiry_ids if value not in set(smooth_retained_ids)
             ],
             "smooth_masked_strikes": int(np.sum(selected & ~smooth_fit_mask)),
             "model_mask_rows": int(np.sum(smooth_model_mask)),
@@ -2460,20 +2612,18 @@ def validate_fitted_partition(
         _fail(f"{trading_date}: zero-selected day lacks explicit smooth outcome")
 
     input_expiry_ids_tuple = tuple(int(value) for value in input_expiry_ids)
-    initial_expiry_pricer, initial_state_indices, initial_expiry_residuals = (
-        _expiry_state_pricer(
-            frame,
-            index_column="initial_no_arb_input_expiry_index",
-            expiry_strikes_column="initial_expiry_model_strikes",
-            expiry_density_column="initial_expiry_model_density",
-            surface_strikes_column="initial_surface_model_strikes",
-            surface_density_column="initial_surface_model_density",
-            mapping_column="initial_x_to_surface_indices",
-            variance_column="initial_model_variance",
-            expected_source_expiry_ids=input_expiry_ids_tuple,
-            smoothness=None,
-            label=f"{trading_date} initial",
-        )
+    initial_expiry_pricer, initial_state_indices, initial_expiry_residuals = _expiry_state_pricer(
+        frame,
+        index_column="initial_no_arb_input_expiry_index",
+        expiry_strikes_column="initial_expiry_model_strikes",
+        expiry_density_column="initial_expiry_model_density",
+        surface_strikes_column="initial_surface_model_strikes",
+        surface_density_column="initial_surface_model_density",
+        mapping_column="initial_x_to_surface_indices",
+        variance_column="initial_model_variance",
+        expected_source_expiry_ids=input_expiry_ids_tuple,
+        smoothness=None,
+        label=f"{trading_date} initial",
     )
     selected_expiry_ids_tuple = tuple(
         int(value)
@@ -2486,23 +2636,33 @@ def validate_fitted_partition(
     smooth_state_indices: tuple[int, ...] = ()
     smooth_expiry_residuals: dict[str, float] = {}
     if np.any(selected):
-        smooth_expiry_pricer, smooth_state_indices, smooth_expiry_residuals = (
-            _expiry_state_pricer(
+        smooth_expiry_pricer, smooth_state_indices, smooth_expiry_residuals = _expiry_state_pricer(
+            frame,
+            index_column="smooth_input_expiry_index",
+            expiry_strikes_column="smooth_expiry_model_strikes",
+            expiry_density_column="smooth_expiry_model_density",
+            surface_strikes_column="smooth_surface_model_strikes",
+            surface_density_column="smooth_surface_model_density",
+            mapping_column="smooth_x_to_surface_indices",
+            variance_column="smooth_model_variance",
+            expected_source_expiry_ids=selected_expiry_ids_tuple,
+            # The recovered smooth fitter deliberately performs each expiry fit
+            # with a linear payoff before fitting the smoothed surface.
+            smoothness=None,
+            label=f"{trading_date} smooth",
+        )
+        terminal_smooth = cast(_TerminalSolverEvidence, smooth_solver_evidence).terminal_solver_call
+        published_digest = terminal_smooth.published_state_density_digest
+        if terminal_smooth.terminal_status == "feasible_nonoptimal":
+            observed_digest = _persisted_density_digest(
                 frame,
                 index_column="smooth_input_expiry_index",
-                expiry_strikes_column="smooth_expiry_model_strikes",
-                expiry_density_column="smooth_expiry_model_density",
-                surface_strikes_column="smooth_surface_model_strikes",
-                surface_density_column="smooth_surface_model_density",
-                mapping_column="smooth_x_to_surface_indices",
-                variance_column="smooth_model_variance",
-                expected_source_expiry_ids=selected_expiry_ids_tuple,
-                # The recovered smooth fitter deliberately performs each expiry fit
-                # with a linear payoff before fitting the smoothed surface.
-                smoothness=None,
-                label=f"{trading_date} smooth",
+                density_column="smooth_expiry_model_density",
             )
-        )
+            if published_digest != observed_digest:
+                _fail(f"{trading_date}: feasible-nonoptimal published density digest differs")
+        elif published_digest is not None:
+            _fail(f"{trading_date}: optimal smooth solve has recovery publication evidence")
 
     initial_surface_pricer = initial_no_arb_pricer(frame)
     smooth_pricer = smooth_sanos_pricer(frame) if np.any(selected) else None
@@ -2545,9 +2705,7 @@ def validate_fitted_partition(
         zip(initial_state_indices, initial_surface_pricer.expiries, strict=True)
     ):
         rows = frame.filter(pl.col("initial_no_arb_input_expiry_index") == input_index)
-        observed = np.asarray(
-            initial_surface_pricer(expiry, rows["normalized_strike"].to_numpy())
-        )
+        observed = np.asarray(initial_surface_pricer(expiry, rows["normalized_strike"].to_numpy()))
         surface_replay = _black_source_vector_residual(
             rows,
             source_prices=observed,
@@ -2746,9 +2904,7 @@ def validate_fitted_partition(
                 ),
             )
             expiry = np.float32(group.get_column("time_to_expiry_years").item(0))
-            canonical = np.asarray(
-                smooth_pricer(expiry, group["normalized_strike"].to_numpy())
-            )
+            canonical = np.asarray(smooth_pricer(expiry, group["normalized_strike"].to_numpy()))
             smooth_canonical_market_fit_bridge = max(
                 smooth_canonical_market_fit_bridge,
                 _max_abs(canonical, fitted_values),
@@ -2826,25 +2982,15 @@ def validate_fitted_partition(
     residuals = {
         "black_enrichment_vectors": black_vector_residual.center_residual,
         "black_enrichment_price_repricing": black_vector_residual.price_repricing,
-        "black_enrichment_price_rounding_excess": (
-            black_vector_residual.price_rounding_excess
-        ),
+        "black_enrichment_price_rounding_excess": (black_vector_residual.price_rounding_excess),
         "black_enrichment_greek_center": black_vector_residual.greek_center,
-        "black_enrichment_greek_rounding_excess": (
-            black_vector_residual.greek_rounding_excess
-        ),
-        "black_enrichment_volatility_bound_excess": (
-            black_vector_residual.volatility_bound_excess
-        ),
+        "black_enrichment_greek_rounding_excess": (black_vector_residual.greek_rounding_excess),
+        "black_enrichment_volatility_bound_excess": (black_vector_residual.volatility_bound_excess),
         "black_fitted_vectors": fitted_black_vector_residual.center_residual,
         "black_fitted_price_repricing": fitted_black_vector_residual.price_repricing,
-        "black_fitted_price_rounding_excess": (
-            fitted_black_vector_residual.price_rounding_excess
-        ),
+        "black_fitted_price_rounding_excess": (fitted_black_vector_residual.price_rounding_excess),
         "black_fitted_greek_center": fitted_black_vector_residual.greek_center,
-        "black_fitted_greek_rounding_excess": (
-            fitted_black_vector_residual.greek_rounding_excess
-        ),
+        "black_fitted_greek_rounding_excess": (fitted_black_vector_residual.greek_rounding_excess),
         "black_fitted_volatility_bound_excess": (
             fitted_black_vector_residual.volatility_bound_excess
         ),
@@ -2859,29 +3005,17 @@ def validate_fitted_partition(
         "normalized_strike": strike_residual,
         "previous_spot_over_spot": previous_spot_residual,
         "put_call_parity": put_call_residual,
-        "initial_surface_fit_quote_band_violation": (
-            initial_surface_fit_quote_band_violation
-        ),
+        "initial_surface_fit_quote_band_violation": (initial_surface_fit_quote_band_violation),
         "initial_surface_fit_reconstruction": initial_surface_fit_reconstruction,
-        "initial_surface_fit_contract_excess": (
-            initial_surface_fit_contract_excess
-        ),
-        "initial_surface_fit_black_roundtrip": (
-            initial_surface_fit_black_roundtrip
-        ),
-        "initial_surface_calendar_acceptance_tolerance": (
-            initial_surface_calendar_tolerance
-        ),
+        "initial_surface_fit_contract_excess": (initial_surface_fit_contract_excess),
+        "initial_surface_fit_black_roundtrip": (initial_surface_fit_black_roundtrip),
+        "initial_surface_calendar_acceptance_tolerance": (initial_surface_calendar_tolerance),
         "smooth_expiry_reconstruction": smooth_expiry_reconstruction,
         "smooth_surface_fit_reconstruction": smooth_surface_fit_reconstruction,
         "smooth_fit_error_reconstruction": smooth_fit_error_reconstruction,
         "smooth_reconstruction": smooth_reconstruction,
-        "smooth_canonical_market_fit_bridge": (
-            smooth_canonical_market_fit_bridge
-        ),
-        "smooth_canonical_surface_fit_bridge": (
-            smooth_canonical_surface_fit_bridge
-        ),
+        "smooth_canonical_market_fit_bridge": (smooth_canonical_market_fit_bridge),
+        "smooth_canonical_surface_fit_bridge": (smooth_canonical_surface_fit_bridge),
         "smooth_calendar_acceptance_tolerance": smooth_calendar_tolerance,
         "spot_reference": spot_reference_residual,
         "spot_normalized_strike": spot_strike_residual,
@@ -2897,9 +3031,7 @@ def validate_fitted_partition(
         trading_date=trading_date,
         row_count=frame.height,
         input_expiries=frame["expiry_id"].n_unique(),
-        initial_retained_expiries=frame.filter(pl.Series(initial_retained))[
-            "expiry_id"
-        ].n_unique(),
+        initial_retained_expiries=frame.filter(pl.Series(initial_retained))["expiry_id"].n_unique(),
         mask_arb_free_rows=int(np.sum(pre_mask)),
         eligible_rows=int(np.sum(selected)),
         selected_expiries=frame.filter(pl.Series(selected))["expiry_id"].n_unique(),
@@ -2990,36 +3122,55 @@ def _raw_role_mapping(
     return tuple(records)
 
 
-@version("1.0")
+@version("2.0")
 def _dataset_configuration(
     config: InternalDatasetConfig,
     expected_dates: tuple[date, ...],
     raw_mapping_digest: str,
 ) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "dataset": {
+            "name": config.name,
+            "ticker": config.ticker,
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+            "include_half_days": config.include_half_days,
+            "source": config.source,
+            "source_generation": config.source_generation,
+        },
+        "daily": config.daily,
+        "surface": config.surface,
+        "planned_dates": expected_dates,
+        "raw_mapping_digest": raw_mapping_digest,
+    }
+    if config.fitted_selection is not None:
+        payload["fitted_selection"] = config.fitted_selection.as_dict()
     return cast(
         dict[str, Any],
-        canonical_value(
-            {
-                "dataset": {
-                    "name": config.name,
-                    "ticker": config.ticker,
-                    "start_date": config.start_date,
-                    "end_date": config.end_date,
-                    "include_half_days": config.include_half_days,
-                    "source": config.source,
-                    "source_generation": config.source_generation,
-                },
-                "daily": config.daily,
-                "surface": config.surface,
-                "planned_dates": expected_dates,
-                "raw_mapping_digest": raw_mapping_digest,
-            }
-        ),
+        canonical_value(payload),
+    )
+
+
+@version("1.0", dependencies=[OriginalFittedSource, DailyArtifactPlan])
+def _original_source_from_item(item: DailyArtifactPlan) -> OriginalFittedSource:
+    return OriginalFittedSource(
+        trading_date=item.trading_date,
+        raw_security=item.raw.security,
+        raw_options=item.raw.options,
+        raw_spot=item.raw.spot,
+        raw_previous_spot=item.raw.previous_spot,
+        raw_forwards=item.raw.forwards,
+        raw_zero_curve=item.raw.zero_curve,
+        paired=item.paired.pointer,
+        enriched=item.enriched.pointer,
+        no_arb=item.no_arb.pointer,
+        filtered=item.filtered.pointer,
+        expected_fitted=item.fitted.pointer,
     )
 
 
 @version(
-    "1.0",
+    "2.0",
     dependencies=[_raw_role_mapping, "_raw_artifact_records", "publish_raw_lineage_catalog"],
 )
 def raw_catalog_producer_version() -> str:
@@ -3080,10 +3231,38 @@ def plan_internal_dataset(config: InternalDatasetConfig) -> InternalDatasetPlan:
     expected_dates = tuple(item.trading_date for item in daily_artifacts)
     if expected_dates != tuple(sorted(set(expected_dates))):
         raise ValueError("Dataset planning produced duplicate or unordered sessions")
-    mapping = _raw_role_mapping(daily_artifacts)
+    if config.fitted_selection is None:
+        fitted_bindings = tuple(
+            FittedSourceBinding(
+                trading_date=item.trading_date,
+                original_source=_original_source_from_item(item),
+                selected=item.fitted.pointer,
+            )
+            for item in daily_artifacts
+        )
+    else:
+        fitted_bindings = config.fitted_selection.bindings
+        if tuple(item.trading_date for item in fitted_bindings) != expected_dates:
+            raise ValueError(
+                "Fitted source selection must cover every planned date exactly; "
+                "arbitrary Dataset omissions are prohibited"
+            )
+    mapping = tuple(
+        {
+            "trading_date": binding.trading_date,
+            "roles": binding.original_source.raw_roles,
+        }
+        for binding in fitted_bindings
+    )
     mapping_digest = canonical_sha256(mapping)
     raw_pointers = tuple(
-        sorted({pointer for item in daily_artifacts for pointer in item.raw.all()})
+        sorted(
+            {
+                pointer
+                for binding in fitted_bindings
+                for pointer in binding.original_source.raw_roles.values()
+            }
+        )
     )
     label = _safe_dataset_label(config.name)
     catalog_configuration = {
@@ -3126,13 +3305,15 @@ def plan_internal_dataset(config: InternalDatasetConfig) -> InternalDatasetPlan:
         {
             "dataset": dataset_spec.pointer,
             "raw_catalog": raw_catalog_spec.pointer,
-            "fitted": tuple(item.fitted.pointer for item in daily_artifacts),
+            "fitted": tuple(item.selected for item in fitted_bindings),
+            "original_fitted": tuple(item.original_expected for item in fitted_bindings),
         }
     )
     return InternalDatasetPlan(
         configuration=configuration,
         expected_dates=expected_dates,
         daily_artifacts=daily_artifacts,
+        fitted_bindings=fitted_bindings,
         raw_mapping_digest=mapping_digest,
         raw_catalog_spec=raw_catalog_spec,
         dataset_spec=dataset_spec,
@@ -3172,11 +3353,16 @@ def _read_json_file(path: Path, label: str) -> dict[str, Any]:
 @version("1.0", dependencies=[InternalDatasetConfig])
 def _config_from_published(value: Mapping[str, Any]) -> InternalDatasetConfig:
     required = {"dataset", "daily", "surface", "planned_dates", "raw_mapping_digest"}
-    if set(value) != required:
+    allowed = required | {"fitted_selection"}
+    if not required.issubset(value) or not set(value).issubset(allowed):
         _fail("Published config.json has missing or unexpected sections")
     try:
         return InternalDatasetConfig.from_document(
-            {name: value[name] for name in ("dataset", "daily", "surface")}
+            {
+                name: value[name]
+                for name in ("dataset", "daily", "surface", "fitted_selection")
+                if name in value
+            }
         )
     except ValueError as exc:
         raise DatasetValidationError(f"Published Dataset configuration is invalid: {exc}") from exc
@@ -3330,8 +3516,10 @@ def _field_units(name: str) -> tuple[str, str]:
         return "absolute option-price units", "none"
     if name in {"synthetic_call_ask", "synthetic_call_bid"}:
         return "absolute option-price units", "put/call-parity synthesized call"
-    if name.endswith("log_volume") or name.endswith("log_open_interest") or name.startswith(
-        "combined_log_"
+    if (
+        name.endswith("log_volume")
+        or name.endswith("log_open_interest")
+        or name.startswith("combined_log_")
     ):
         return "dimensionless", "log10(1 + vendor count)"
     if name in {"normalized_moneyness", "atm_normalized_moneyness"}:
@@ -3499,7 +3687,7 @@ losslessly copied fitted-day Polars/Parquet frame per planned NYSE session, incl
 all audit rows, no-arbitrage/filter masks, the initial full no-arbitrage DLV
 support/density state, independent smooth SANOS state, fitted values, and diagnostics.
 Half days are
-{'included' if config.include_half_days else 'excluded'}.
+{"included" if config.include_half_days else "excluded"}.
 
 The source stream is WRDS OptionMetrics/IvyDB security identity, option quotes,
 underlying closes, forward prices, and zero curves. Prices named `pure_*` and smooth
@@ -3649,9 +3837,7 @@ def _raw_artifact_records(
                 "ticker": configuration.get("ticker"),
                 "observation_date": configuration.get("observation_date"),
                 "source_generation": artifact.manifest["source_generation"],
-                "manifest_sha256": _dataset_sha256_file(
-                    artifact.path / "manifest.json"
-                ),
+                "manifest_sha256": _dataset_sha256_file(artifact.path / "manifest.json"),
                 "payloads": artifact.manifest["files"],
             }
         )
@@ -3669,7 +3855,13 @@ def publish_raw_lineage_catalog(
     if reuse is not None:
         return store.validate(reuse.artifact.pointer, expected=plan.raw_catalog_spec, deep=True)
     records = _raw_artifact_records(store, plan)
-    mapping = _raw_role_mapping(plan.daily_artifacts)
+    mapping = tuple(
+        {
+            "trading_date": binding.trading_date,
+            "roles": binding.original_source.raw_roles,
+        }
+        for binding in plan.fitted_bindings
+    )
     if canonical_sha256(mapping) != plan.raw_mapping_digest:
         _fail("Planned Raw role mapping digest changed during publication")
     document = {
@@ -3867,15 +4059,32 @@ def validate_internal_dataset(
     if schema != _schema_document():
         _fail("schema.json differs from the current immutable Dataset schema contract")
     lineage = _read_json_file(validated.path / "lineage.json", "lineage.json")
-    if set(lineage) != {
-        "schema",
-        "raw_catalog",
-        "raw_mapping_digest",
-        "daily_chains",
-    } or lineage.get("schema") != LINEAGE_SCHEMA:
+    if (
+        set(lineage)
+        != {
+            "schema",
+            "raw_catalog",
+            "raw_mapping_digest",
+            "fitted_source_selection",
+            "daily_chains",
+        }
+        or lineage.get("schema") != LINEAGE_SCHEMA
+    ):
         _fail("Unsupported Dataset lineage schema")
     if lineage.get("raw_mapping_digest") != configuration.get("raw_mapping_digest"):
         _fail("Dataset lineage Raw mapping digest differs from configuration")
+    configured_selection = dataset.config.fitted_selection
+    expected_selection_lineage = (
+        None
+        if configured_selection is None
+        else {
+            "original_plan_sha256": configured_selection.original_plan_sha256,
+            "original_source_revision": configured_selection.original_source_revision,
+            "original_configuration_sha256": (configured_selection.original_configuration_sha256),
+        }
+    )
+    if lineage.get("fitted_source_selection") != expected_selection_lineage:
+        _fail("Dataset lineage fitted selection provenance differs from configuration")
     raw_catalog = _pointer_from_value(lineage.get("raw_catalog"), "lineage Raw catalog")
     manifest_upstream = validated.manifest.get("upstream")
     if not isinstance(manifest_upstream, list) or len(manifest_upstream) != 1:
@@ -3888,6 +4097,9 @@ def validate_internal_dataset(
     role_mapping: list[dict[str, Any]] = []
     chain_raw_roles: list[dict[str, ArtifactPointer]] = []
     chain_fitted: list[ArtifactPointer] = []
+    chain_original_fitted: list[ArtifactPointer] = []
+    chain_recovery_policy: list[str | None] = []
+    chain_failure_evidence: list[str | None] = []
     chain_stages: list[dict[str, ArtifactPointer]] = []
     expected_chain_fields = {
         "trading_date",
@@ -3896,7 +4108,10 @@ def validate_internal_dataset(
         "enriched",
         "no_arb",
         "filtered",
+        "fitted_original_expected",
         "fitted",
+        "fitted_recovery_policy_id",
+        "fitted_failure_evidence_sha256",
     }
     expected_roles = {
         "security",
@@ -3906,9 +4121,7 @@ def validate_internal_dataset(
         "forwards",
         "zero_curve",
     }
-    for index, (expected_date, chain) in enumerate(
-        zip(expected_dates, fitted_values, strict=True)
-    ):
+    for index, (expected_date, chain) in enumerate(zip(expected_dates, fitted_values, strict=True)):
         if not isinstance(chain, Mapping) or set(chain) != expected_chain_fields:
             _fail(f"Dataset lineage chain {index} has missing or unexpected fields")
         if chain.get("trading_date") != expected_date.isoformat():
@@ -3922,23 +4135,92 @@ def validate_internal_dataset(
         }
         if any(pointer.storage_class is not StorageClass.RAW for pointer in parsed_roles.values()):
             _fail(f"Dataset lineage chain {index} contains a non-Raw role pointer")
-        normalized_roles = {
-            role: pointer.as_dict() for role, pointer in parsed_roles.items()
-        }
+        normalized_roles = {role: pointer.as_dict() for role, pointer in parsed_roles.items()}
         chain_raw_roles.append(parsed_roles)
-        role_mapping.append(
-            {"trading_date": expected_date, "roles": normalized_roles}
-        )
+        role_mapping.append({"trading_date": expected_date, "roles": normalized_roles})
         parsed_stages: dict[str, ArtifactPointer] = {}
         for stage in ("paired", "enriched", "no_arb", "filtered", "fitted"):
-            stage_pointer = _pointer_from_value(
-                chain.get(stage), f"daily chain {index} {stage}"
-            )
+            stage_pointer = _pointer_from_value(chain.get(stage), f"daily chain {index} {stage}")
             if stage_pointer.storage_class is not StorageClass.INTERMEDIATE:
                 _fail(f"Dataset lineage chain {index} {stage} is not Intermediate")
             parsed_stages[stage] = stage_pointer
         chain_stages.append(parsed_stages)
         chain_fitted.append(parsed_stages["fitted"])
+        chain_original_fitted.append(
+            _pointer_from_value(
+                chain.get("fitted_original_expected"),
+                f"daily chain {index} original fitted",
+            )
+        )
+        policy = chain.get("fitted_recovery_policy_id")
+        evidence = chain.get("fitted_failure_evidence_sha256")
+        if policy is not None and not isinstance(policy, str):
+            _fail(f"Dataset lineage chain {index} has invalid recovery policy")
+        if evidence is not None and not isinstance(evidence, str):
+            _fail(f"Dataset lineage chain {index} has invalid failure evidence")
+        chain_recovery_policy.append(policy)
+        chain_failure_evidence.append(evidence)
+    selection = dataset.config.fitted_selection
+    if selection is None:
+        if any(
+            selected != original or policy is not None or evidence is not None
+            for selected, original, policy, evidence in zip(
+                chain_fitted,
+                chain_original_fitted,
+                chain_recovery_policy,
+                chain_failure_evidence,
+                strict=True,
+            )
+        ):
+            _fail("Dataset lineage records recovery without an explicit selection")
+    else:
+        observed_bindings_list: list[FittedSourceBinding] = []
+        for index, (
+            trading_date,
+            roles,
+            stages,
+            original,
+            selected,
+            policy,
+            evidence,
+        ) in enumerate(
+            zip(
+                expected_dates,
+                chain_raw_roles,
+                chain_stages,
+                chain_original_fitted,
+                chain_fitted,
+                chain_recovery_policy,
+                chain_failure_evidence,
+                strict=True,
+            )
+        ):
+            observed_bindings_list.append(
+                FittedSourceBinding(
+                    trading_date=trading_date,
+                    original_source=OriginalFittedSource(
+                        trading_date=trading_date,
+                        raw_security=roles["security"],
+                        raw_options=roles["options"],
+                        raw_spot=roles["spot"],
+                        raw_previous_spot=roles["previous_spot"],
+                        raw_forwards=roles["forwards"],
+                        raw_zero_curve=roles["zero_curve"],
+                        paired=stages["paired"],
+                        enriched=stages["enriched"],
+                        no_arb=stages["no_arb"],
+                        filtered=stages["filtered"],
+                        expected_fitted=original,
+                    ),
+                    selected=selected,
+                    recovery_policy_id=policy,
+                    failure_evidence_sha256=evidence,
+                    failure_evidence=selection.bindings[index].failure_evidence,
+                )
+            )
+        observed_bindings = tuple(observed_bindings_list)
+        if observed_bindings != selection.bindings:
+            _fail("Dataset lineage fitted sources differ from explicit selection")
     if canonical_sha256(role_mapping) != configuration.get("raw_mapping_digest"):
         _fail("Dataset lineage date/role Raw mapping does not match its digest")
     expected_raw_pointers = tuple(
@@ -3957,6 +4239,10 @@ def validate_internal_dataset(
         "raw_mapping_digest",
         "raw_artifacts",
         "fitted_artifacts",
+        "fitted_original_expected",
+        "fitted_recovery_count",
+        "fitted_original_plan_sha256",
+        "fitted_original_source_revision",
         "planned_date_count",
         "partition_count",
         "populated_date_count",
@@ -3974,9 +4260,10 @@ def validate_internal_dataset(
     }
     if set(metadata) != expected_metadata_fields:
         _fail("Dataset manifest metadata has missing or unexpected fields")
-    if not isinstance(metadata.get("source_revision"), str) or _HEX_40.fullmatch(
-        str(metadata["source_revision"])
-    ) is None:
+    if (
+        not isinstance(metadata.get("source_revision"), str)
+        or _HEX_40.fullmatch(str(metadata["source_revision"])) is None
+    ):
         _fail("Dataset manifest has no exact source revision")
     if metadata.get("dataset_schema_version") != INTERNAL_DATASET_SCHEMA_VERSION:
         _fail("Dataset manifest schema version differs from the payload contract")
@@ -3992,14 +4279,32 @@ def validate_internal_dataset(
         _fail("Dataset manifest Raw mapping digest differs")
     raw_metadata = metadata.get("raw_artifacts")
     fitted_metadata = metadata.get("fitted_artifacts")
-    if not isinstance(raw_metadata, list) or tuple(
-        _pointer_from_value(value, "metadata Raw artifact") for value in raw_metadata
-    ) != expected_raw_pointers:
+    if (
+        not isinstance(raw_metadata, list)
+        or tuple(_pointer_from_value(value, "metadata Raw artifact") for value in raw_metadata)
+        != expected_raw_pointers
+    ):
         _fail("Dataset manifest flattened Raw identities differ from daily lineage")
     if not isinstance(fitted_metadata, list) or tuple(
         _pointer_from_value(value, "metadata fitted artifact") for value in fitted_metadata
     ) != tuple(chain_fitted):
         _fail("Dataset manifest fitted identities differ from daily lineage")
+    original_metadata = metadata.get("fitted_original_expected")
+    if not isinstance(original_metadata, list) or tuple(
+        _pointer_from_value(value, "metadata original fitted artifact")
+        for value in original_metadata
+    ) != tuple(chain_original_fitted):
+        _fail("Dataset manifest original fitted identities differ from daily lineage")
+    if metadata.get("fitted_recovery_count") != sum(
+        policy is not None for policy in chain_recovery_policy
+    ):
+        _fail("Dataset manifest fitted recovery count differs from daily lineage")
+    if metadata.get("fitted_original_plan_sha256") != (
+        None if selection is None else selection.original_plan_sha256
+    ) or metadata.get("fitted_original_source_revision") != (
+        None if selection is None else selection.original_source_revision
+    ):
+        _fail("Dataset manifest original fitted-plan provenance differs")
     expected_exclusions = canonical_value(_scheduled_exclusions(dataset.config))
     if metadata.get("scheduled_exclusions") != expected_exclusions:
         _fail("Dataset manifest scheduled exclusions differ from configuration")
@@ -4030,12 +4335,16 @@ def validate_internal_dataset(
         catalog_document = _read_json_file(
             catalog_artifact.path / "raw-catalog.json", "raw-catalog.json"
         )
-        if set(catalog_document) != {
-            "schema",
-            "raw_mapping_digest",
-            "date_roles",
-            "artifacts",
-        } or catalog_document.get("schema") != RAW_CATALOG_SCHEMA_VERSION:
+        if (
+            set(catalog_document)
+            != {
+                "schema",
+                "raw_mapping_digest",
+                "date_roles",
+                "artifacts",
+            }
+            or catalog_document.get("schema") != RAW_CATALOG_SCHEMA_VERSION
+        ):
             _fail("Raw catalog payload has an invalid schema")
         if catalog_document.get("raw_mapping_digest") != configuration.get(
             "raw_mapping_digest"
@@ -4066,11 +4375,13 @@ def validate_internal_dataset(
             ) or record.get("payloads") != raw_artifact.manifest.get("files"):
                 _fail("Raw catalog record checksum evidence differs from retained Raw")
             raw_configuration = raw_artifact.manifest.get("configuration")
-            if not isinstance(raw_configuration, Mapping) or any(
-                record.get(name) != raw_configuration.get(name)
-                for name in ("source", "table", "ticker", "observation_date")
-            ) or record.get("source_generation") != raw_artifact.manifest.get(
-                "source_generation"
+            if (
+                not isinstance(raw_configuration, Mapping)
+                or any(
+                    record.get(name) != raw_configuration.get(name)
+                    for name in ("source", "table", "ticker", "observation_date")
+                )
+                or record.get("source_generation") != raw_artifact.manifest.get("source_generation")
             ):
                 _fail("Raw catalog record semantics differ from retained Raw manifest")
             observed_record_pointers.append(raw_pointer)
@@ -4097,13 +4408,31 @@ def validate_internal_dataset(
         if tuple(observed_record_pointers) != expected_raw_pointers:
             _fail("Raw catalog records differ from its manifest upstream")
 
-        for index, (roles, stages) in enumerate(
-            zip(chain_raw_roles, chain_stages, strict=True)
-        ):
+        for index, (roles, stages) in enumerate(zip(chain_raw_roles, chain_stages, strict=True)):
             validated_stages = {
-                name: store.validate(stage_pointer)
-                for name, stage_pointer in stages.items()
+                name: store.validate(stage_pointer) for name, stage_pointer in stages.items()
             }
+            if chain_recovery_policy[index] is not None:
+                if selection is None:
+                    _fail(f"Dataset daily chain {index} has an unbound recovery")
+                expected_recovery = fitted_recovery_spec(
+                    ticker=dataset.config.ticker,
+                    trading_date=expected_dates[index],
+                    surface_config=dataset.config.surface,
+                    filtered=stages["filtered"],
+                    original_expected=chain_original_fitted[index],
+                    original_plan_sha256=selection.original_plan_sha256,
+                    failure_evidence_sha256=cast(str, chain_failure_evidence[index]),
+                    failure_evidence=cast(
+                        tuple[Mapping[str, Any], ...],
+                        selection.bindings[index].failure_evidence,
+                    ),
+                )
+                if expected_recovery.pointer != stages["fitted"]:
+                    _fail(f"Dataset daily chain {index} recovery identity differs")
+                validated_stages["fitted"] = store.validate(
+                    stages["fitted"], expected=expected_recovery, deep=True
+                )
             expected_upstreams = {
                 "paired": tuple(sorted(set(roles.values()))),
                 "enriched": (stages["paired"],),
@@ -4162,6 +4491,9 @@ def validate_internal_dataset(
         "sha256",
         "byte_size",
         "fitted_artifact",
+        "fitted_original_expected",
+        "fitted_recovery_policy_id",
+        "fitted_failure_evidence_sha256",
         "fitted_manifest_sha256",
         "fitted_source_sha256",
         "typed_empty",
@@ -4175,9 +4507,7 @@ def validate_internal_dataset(
             _fail(f"{expected_date}: partition record has missing or unexpected fields")
         relative = str(record["path"])
         match = _PARTITION_PATH.fullmatch(relative)
-        if match is None or match.group(1) != _safe_partition_ticker_label(
-            dataset.config.ticker
-        ):
+        if match is None or match.group(1) != _safe_partition_ticker_label(dataset.config.ticker):
             _fail(f"{expected_date}: partition path ticker is inconsistent")
         if match.group(2) != str(expected_date.year) or match.group(3) != expected_date.isoformat():
             _fail(f"{expected_date}: partition path date is inconsistent")
@@ -4196,6 +4526,16 @@ def validate_internal_dataset(
         )
         if fitted_pointer != chain_fitted[index]:
             _fail(f"{expected_date}: partition and lineage fitted pointers differ")
+        original_pointer = _pointer_from_value(
+            record.get("fitted_original_expected"),
+            f"{expected_date} original fitted artifact",
+        )
+        if original_pointer != chain_original_fitted[index]:
+            _fail(f"{expected_date}: partition and lineage original pointers differ")
+        if record.get("fitted_recovery_policy_id") != chain_recovery_policy[index]:
+            _fail(f"{expected_date}: partition and lineage recovery policies differ")
+        if record.get("fitted_failure_evidence_sha256") != chain_failure_evidence[index]:
+            _fail(f"{expected_date}: partition and lineage failure evidence differs")
         if deep_lineage:
             source_artifact = store.validate(fitted_pointer)
             if record.get("fitted_manifest_sha256") != _dataset_sha256_file(
@@ -4282,15 +4622,18 @@ def validate_internal_dataset(
     if evidence != expected_evidence:
         _fail("Dataset manifest evidence checksums differ from immutable payloads")
     report = _read_json_file(validated.path / "validation.json", "validation.json")
-    if set(report) != {
-        "schema",
-        "validator_version",
-        "outcome",
-        "failure_count",
-        "summary",
-    } or not isinstance(report.get("validator_version"), str) or not report[
-        "validator_version"
-    ].strip():
+    if (
+        set(report)
+        != {
+            "schema",
+            "validator_version",
+            "outcome",
+            "failure_count",
+            "summary",
+        }
+        or not isinstance(report.get("validator_version"), str)
+        or not report["validator_version"].strip()
+    ):
         _fail("validation.json has an invalid immutable report envelope")
     if (
         report.get("schema") != VALIDATION_SCHEMA
@@ -4303,11 +4646,16 @@ def validate_internal_dataset(
         validated.path / "legacy-comparison.json", "legacy-comparison.json"
     )
     expected_comparison = canonical_value(_legacy_comparison_document(dataset.config))
-    if set(comparison) != set(expected_comparison) or any(
-        comparison.get(name) != value
-        for name, value in expected_comparison.items()
-        if name != "notes"
-    ) or not isinstance(comparison.get("notes"), str) or not comparison["notes"].strip():
+    if (
+        set(comparison) != set(expected_comparison)
+        or any(
+            comparison.get(name) != value
+            for name, value in expected_comparison.items()
+            if name != "notes"
+        )
+        or not isinstance(comparison.get("notes"), str)
+        or not comparison["notes"].strip()
+    ):
         _fail("legacy-comparison.json differs from the migration-oracle contract")
     _emit_progress(
         progress,
@@ -4320,26 +4668,23 @@ def validate_internal_dataset(
     return summary
 
 
-@version("1.1")
+@version("2.0")
 def _daily_chain_record(
     item: DailyArtifactPlan,
-    fitted_artifact: ArtifactPointer,
+    binding: FittedSourceBinding,
 ) -> dict[str, Any]:
+    original = binding.original_source
     return {
         "trading_date": item.trading_date,
-        "raw_roles": {
-            "security": item.raw.security,
-            "options": item.raw.options,
-            "spot": item.raw.spot,
-            "previous_spot": item.raw.previous_spot,
-            "forwards": item.raw.forwards,
-            "zero_curve": item.raw.zero_curve,
-        },
-        "paired": item.paired.pointer,
-        "enriched": item.enriched.pointer,
-        "no_arb": item.no_arb.pointer,
-        "filtered": item.filtered.pointer,
-        "fitted": fitted_artifact,
+        "raw_roles": original.raw_roles,
+        "paired": original.paired,
+        "enriched": original.enriched,
+        "no_arb": original.no_arb,
+        "filtered": original.filtered,
+        "fitted_original_expected": binding.original_expected,
+        "fitted": binding.selected,
+        "fitted_recovery_policy_id": binding.recovery_policy_id,
+        "fitted_failure_evidence_sha256": binding.failure_evidence_sha256,
     }
 
 
@@ -4364,7 +4709,7 @@ def _emit_progress(
 
 
 @version(
-    "2.0",
+    "3.0",
     dependencies=[
         read_daily_frame,
         validate_fitted_partition,
@@ -4384,8 +4729,30 @@ def _validate_fitted_sources(
     started = time.monotonic()
     last_progress = started
     total = len(plan.daily_artifacts)
-    for completed, item in enumerate(plan.daily_artifacts, start=1):
-        artifact = store.validate(item.fitted.pointer, expected=item.fitted, deep=True)
+    for completed, (item, binding) in enumerate(
+        zip(plan.daily_artifacts, plan.fitted_bindings, strict=True), start=1
+    ):
+        if binding.recovery_policy_id is None:
+            artifact = store.validate(binding.selected, deep=True)
+        else:
+            selection = config.fitted_selection
+            if selection is None:
+                _fail(f"{item.trading_date}: recovered binding has no source selection")
+            if binding.recovery_policy_id != feasible_candidate_recovery_policy_id():
+                _fail(f"{item.trading_date}: unsupported fitted recovery policy")
+            expected_recovery = fitted_recovery_spec(
+                ticker=config.ticker,
+                trading_date=item.trading_date,
+                surface_config=config.surface,
+                filtered=binding.filtered,
+                original_expected=binding.original_expected,
+                original_plan_sha256=selection.original_plan_sha256,
+                failure_evidence_sha256=cast(str, binding.failure_evidence_sha256),
+                failure_evidence=cast(tuple[Mapping[str, Any], ...], binding.failure_evidence),
+            )
+            if binding.selected != expected_recovery.pointer:
+                _fail(f"{item.trading_date}: recovered fitted pointer is not authentic")
+            artifact = store.validate(binding.selected, expected=expected_recovery, deep=True)
         metadata = artifact.manifest.get("metadata")
         if not isinstance(metadata, Mapping):
             _fail(f"{item.trading_date}: fitted artifact metadata is malformed")
@@ -4404,7 +4771,7 @@ def _validate_fitted_sources(
             config=config,
             trading_date=item.trading_date,
             typed_empty_reason=typed_reason,
-            expected_raw_options_artifact_id=item.raw.options.artifact_id,
+            expected_raw_options_artifact_id=binding.original_source.raw_options.artifact_id,
         )
         artifacts.append(artifact)
         statistics.append(item_statistics)
@@ -4424,7 +4791,9 @@ def _validate_fitted_sources(
             )
             last_progress = now
     planned_raw = {
-        pointer for item in plan.daily_artifacts for pointer in item.raw.all()
+        pointer
+        for binding in plan.fitted_bindings
+        for pointer in binding.original_source.raw_roles.values()
     }
     catalog_raw = set(plan.raw_catalog_spec.upstream)
     if planned_raw != catalog_raw:
@@ -4433,7 +4802,7 @@ def _validate_fitted_sources(
 
 
 @version(
-    "2.0",
+    "3.0",
     dependencies=[
         _scheduled_exclusions,
         aggregate_statistics,
@@ -4468,8 +4837,9 @@ def _publish_internal_dataset(
         exclusions=exclusions,
     )
     partitions: list[dict[str, Any]] = []
-    for item, artifact, item_statistics in zip(
+    for item, binding, artifact, item_statistics in zip(
         plan.daily_artifacts,
+        plan.fitted_bindings,
         fitted_artifacts,
         statistics,
         strict=True,
@@ -4485,9 +4855,10 @@ def _publish_internal_dataset(
                 "sha256": source_checksum,
                 "byte_size": source_path.stat().st_size,
                 "fitted_artifact": artifact.pointer,
-                "fitted_manifest_sha256": _dataset_sha256_file(
-                    artifact.path / "manifest.json"
-                ),
+                "fitted_original_expected": binding.original_expected,
+                "fitted_recovery_policy_id": binding.recovery_policy_id,
+                "fitted_failure_evidence_sha256": binding.failure_evidence_sha256,
+                "fitted_manifest_sha256": _dataset_sha256_file(artifact.path / "manifest.json"),
                 "fitted_source_sha256": source_checksum,
                 "typed_empty": item_statistics.typed_empty,
                 "typed_empty_reason": item_statistics.typed_empty_reason,
@@ -4503,11 +4874,22 @@ def _publish_internal_dataset(
         "schema": LINEAGE_SCHEMA,
         "raw_catalog": plan.raw_catalog_spec.pointer,
         "raw_mapping_digest": plan.raw_mapping_digest,
+        "fitted_source_selection": (
+            None
+            if config.fitted_selection is None
+            else {
+                "original_plan_sha256": config.fitted_selection.original_plan_sha256,
+                "original_source_revision": (config.fitted_selection.original_source_revision),
+                "original_configuration_sha256": (
+                    config.fitted_selection.original_configuration_sha256
+                ),
+            }
+        ),
         "daily_chains": tuple(
-            _daily_chain_record(item, artifact.pointer)
-            for item, artifact in zip(
+            _daily_chain_record(item, binding)
+            for item, binding in zip(
                 plan.daily_artifacts,
-                fitted_artifacts,
+                plan.fitted_bindings,
                 strict=True,
             )
         ),
@@ -4543,6 +4925,22 @@ def _publish_internal_dataset(
         "raw_mapping_digest": plan.raw_mapping_digest,
         "raw_artifacts": plan.raw_catalog_spec.upstream,
         "fitted_artifacts": tuple(artifact.pointer for artifact in fitted_artifacts),
+        "fitted_original_expected": tuple(
+            binding.original_expected for binding in plan.fitted_bindings
+        ),
+        "fitted_recovery_count": sum(
+            binding.recovery_policy_id is not None for binding in plan.fitted_bindings
+        ),
+        "fitted_original_plan_sha256": (
+            None
+            if config.fitted_selection is None
+            else config.fitted_selection.original_plan_sha256
+        ),
+        "fitted_original_source_revision": (
+            None
+            if config.fitted_selection is None
+            else config.fitted_selection.original_source_revision
+        ),
         "planned_date_count": len(plan.expected_dates),
         "partition_count": len(partitions),
         "populated_date_count": summary.populated_dates,
@@ -4573,13 +4971,17 @@ def _publish_internal_dataset(
             started = time.monotonic()
             last_progress = started
             total = len(partitions)
-            for completed, (item, artifact, record) in enumerate(
-                zip(plan.daily_artifacts, fitted_artifacts, partitions, strict=True),
+            for completed, (item, binding, artifact, record) in enumerate(
+                zip(
+                    plan.daily_artifacts,
+                    plan.fitted_bindings,
+                    fitted_artifacts,
+                    partitions,
+                    strict=True,
+                ),
                 start=1,
             ):
-                copied = staging.copy_file(
-                    str(record["path"]), artifact.path / "data.parquet"
-                )
+                copied = staging.copy_file(str(record["path"]), artifact.path / "data.parquet")
                 if _dataset_sha256_file(copied) != record["sha256"]:
                     _fail(f"{item.trading_date}: copied partition checksum changed")
                 copied_frame = pl.read_parquet(copied, hive_partitioning=False)
@@ -4588,7 +4990,9 @@ def _publish_internal_dataset(
                     config=config,
                     trading_date=item.trading_date,
                     typed_empty_reason=cast(str | None, record["typed_empty_reason"]),
-                    expected_raw_options_artifact_id=item.raw.options.artifact_id,
+                    expected_raw_options_artifact_id=(
+                        binding.original_source.raw_options.artifact_id
+                    ),
                 )
                 now = time.monotonic()
                 if completed == total or now - last_progress >= progress_interval_seconds:
@@ -4611,7 +5015,7 @@ def _publish_internal_dataset(
 
 
 @version(
-    "1.3",
+    "2.0",
     dependencies=[
         InternalDatasetBuildResult,
         plan_internal_dataset,
@@ -4685,7 +5089,15 @@ def build_internal_dataset(
     )
     daily_summary: DailyRunSummary | None = None
     try:
-        if not options.require_existing_intermediates:
+        if config.fitted_selection is not None:
+            _emit_progress(
+                progress,
+                "dataset_explicit_fitted_selection",
+                completed=len(plan.fitted_bindings),
+                total=len(plan.fitted_bindings),
+                failed=0,
+            )
+        elif not options.require_existing_intermediates:
             daily_result = build_intermediates(
                 locations,
                 IntermediateBuildRequest(

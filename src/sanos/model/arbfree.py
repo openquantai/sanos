@@ -27,8 +27,10 @@ A really diffult day for testing (likely very wrong data) is ``SPX 2005-11-21``.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import warnings as warnings
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Literal
 
@@ -44,9 +46,22 @@ from sanos.model import IMPOSE_FLOOR_ON_DENSITY, density_floor_enabled
 from sanos.model.constants import DAYS_PER_YEAR, ONE_MINUTE, one_minute_year_fraction
 from sanos.model.tools import (
     SanosLPSolver,
+    _candidate_constraint_residuals,
     _compute_market_fit,
     warn_and_fix_density,
 )
+
+
+@version("1.0")
+def _surface_density_digest(densities: list[np.ndarray]) -> str:
+    """Hash a returned surface state in canonical Float64 representation."""
+
+    digest = hashlib.sha256()
+    for density in densities:
+        array = np.ascontiguousarray(density, dtype=np.float64)
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
 
 
 @version(
@@ -552,10 +567,12 @@ class ArbFreePricer(PrettyObject):
 
 
 @version(
-    "0.54",
+    "0.55",
     dependencies=[
         ArbFreePricer,
         SanosLPSolver,
+        _candidate_constraint_residuals,
+        _surface_density_digest,
         warn_and_fix_density,
         one_minute_year_fraction,
         density_floor_enabled,
@@ -613,6 +630,7 @@ class MkArbFree:
     _eps_no_arb: float = 0.01  #: % half spread to tighten fit.
     _solver_fallback_algorithms: tuple[Literal["ipm", "clarabel"], ...] = ("clarabel",)
     _solver_diagnostic_sink: callable | None = None
+    _accept_feasible_nonoptimal: bool = False
 
     def __post_init__(self):
         verify_inp(
@@ -1246,6 +1264,7 @@ class MkArbFree:
             objective = 0.0
             xdensities = []
             CXs = []
+            candidate_blocks: list[dict[str, object]] = []
 
             avhs_sum = 0.0
             avhs_count = 0
@@ -1382,7 +1401,8 @@ class MkArbFree:
                     ]
 
                     objective += (1.0 - eff_mid_fit_weight) * cp.sum(e_box)
-                    del e_box
+                else:
+                    e_box = None
 
                 if eff_mid_fit_weight > 0.0:
                     z_init = (
@@ -1402,15 +1422,114 @@ class MkArbFree:
                     ]
 
                     objective += eff_mid_fit_weight * z_mid
-                    del z_mid
+                else:
+                    z_mid = None
 
                 xdensities.append(q_t)
                 CXs.append(CX)
+                candidate_blocks.append(
+                    {
+                        "q": q_t,
+                        "e": e_box,
+                        "z": z_mid,
+                        "CX": CX[mask_t, :],
+                        "bid": bid_t,
+                        "ask": ask_t,
+                        "half": half_spread,
+                        "whalf": whalf_spread,
+                        "mid": mid_t,
+                        "xstrikes": xstrikes_t,
+                    }
+                )
 
+            def validate_feasible_nonoptimal() -> Mapping[str, object]:
+                """Complete auxiliaries from q and authenticate the untouched surface."""
+
+                slack_sum = 0.0
+                midpoint_sum = 0.0
+                density_min = math.inf
+                density_max = -math.inf
+                mass_max = 0.0
+                moment_max = 0.0
+                calendar_violation = 0.0
+                previous_x: np.ndarray | None = None
+                previous_q: np.ndarray | None = None
+                for block in candidate_blocks:
+                    q_var = block["q"]
+                    assert isinstance(q_var, cp.Variable) and q_var.value is not None
+                    q = np.asarray(q_var.value, dtype=np.float64)
+                    x = np.asarray(block["xstrikes"], dtype=np.float64)
+                    if not np.all(np.isfinite(q)):
+                        raise ValueError("non-finite surface density")
+                    fit = np.asarray(block["CX"], dtype=np.float64) @ q
+                    bid = np.asarray(block["bid"], dtype=np.float64)
+                    ask = np.asarray(block["ask"], dtype=np.float64)
+                    half = np.asarray(block["half"], dtype=np.float64)
+                    whalf = np.asarray(block["whalf"], dtype=np.float64)
+                    midpoint = np.asarray(block["mid"], dtype=np.float64)
+                    e_value = np.maximum.reduce(
+                        (
+                            fit - (ask - half * (1.0 - self._eps_no_arb)),
+                            (bid + half * (1.0 - self._eps_no_arb)) - fit,
+                            np.zeros_like(fit),
+                        )
+                    ) / whalf
+                    z_value = float(np.max(np.abs(fit - midpoint) / whalf))
+                    e_var = block["e"]
+                    z_var = block["z"]
+                    if isinstance(e_var, cp.Variable):
+                        e_var.save_value(e_value)
+                        slack_sum += float(np.sum(e_value))
+                    if isinstance(z_var, cp.Variable):
+                        z_var.save_value(z_value)
+                        midpoint_sum += z_value
+                    density_min = min(density_min, float(np.min(q)))
+                    density_max = max(density_max, float(np.max(q)))
+                    mass_max = max(mass_max, abs(float(np.sum(q)) - 1.0))
+                    moment_max = max(moment_max, abs(float(x @ q) - 1.0))
+                    if previous_x is None:
+                        previous_calls = np.maximum(0.0, 1.0 - x[1:-1])
+                    else:
+                        assert previous_q is not None
+                        previous_calls = (
+                            np.maximum(0.0, previous_x[None, :] - x[1:-1, None])
+                            @ previous_q
+                        )
+                    calls = np.maximum(0.0, x[None, :] - x[1:-1, None]) @ q
+                    calendar_violation = max(
+                        calendar_violation,
+                        float(np.max(np.maximum(previous_calls - calls, 0.0))),
+                    )
+                    previous_x, previous_q = x, q
+                if (
+                    density_min < -self._eps_density
+                    or density_max > 1.0 + self._eps_density
+                    or mass_max > self._eps_dens_1
+                    or moment_max > self._eps_dens_1
+                    or calendar_violation > self._eps_density
+                ):
+                    raise ValueError("surface-domain feasibility gate failed")
+                return {
+                    "density_min": density_min,
+                    "density_max": density_max,
+                    "mass_residual_max": mass_max,
+                    "moment_residual_max": moment_max,
+                    "calendar_violation_max": calendar_violation,
+                    "contracted_slack_sum": slack_sum,
+                    "midpoint_max_sum": midpoint_sum,
+                    "contracted_objective_recomputed": (1.0 - eff_mid_fit_weight)
+                    * slack_sum
+                    + eff_mid_fit_weight * midpoint_sum,
+                }
+
+            accept_feasible_nonoptimal = (
+                self._accept_feasible_nonoptimal and diagnostic_stage == "surface"
+            )
             success, status, fell_back = SanosLPSolver(
                 timeout_seconds=self.timeout_seconds,
                 fallback_algorithms=self._solver_fallback_algorithms,
                 _debug_verbose_cvxpy=self._debug_verbose_cvxpy,
+                accept_feasible_nonoptimal=accept_feasible_nonoptimal,
             )(
                 objective=objective,
                 variables=variables,
@@ -1427,6 +1546,9 @@ class MkArbFree:
                             **dict(payload),
                         }
                     )
+                ),
+                feasible_nonoptimal_validator=(
+                    validate_feasible_nonoptimal if accept_feasible_nonoptimal else None
                 ),
                 verbose=verbose,
             )
@@ -1508,6 +1630,48 @@ class MkArbFree:
                     f"Internal error: {message()}Shape of fit_t {fit_t.shape} does not match shape of strikes_t {strikes_t.shape}"
                 )
                 fits.append(fit_t)
+            if status == "feasible_nonoptimal":
+                # Re-authenticate the exact post-processing state that will be
+                # returned, rather than relying only on the raw conic iterate.
+                for block, density in zip(candidate_blocks, xdensities, strict=True):
+                    q_var = block["q"]
+                    assert isinstance(q_var, cp.Variable)
+                    q_var.save_value(density)
+                published = validate_feasible_nonoptimal()
+                published_constraints = _candidate_constraint_residuals(constraints, variables)
+                if (
+                    published_constraints is None
+                    or max(published_constraints.values(), default=0.0) > self._eps_density
+                ):
+                    raise RuntimeError(
+                        f"{message()}feasible-nonoptimal published state failed original constraints"
+                    )
+                if self._solver_diagnostic_sink is not None:
+                    self._solver_diagnostic_sink(
+                        {
+                            **({} if diagnostic_context is None else diagnostic_context),
+                            "stage": diagnostic_stage,
+                            "solver": "POSTPROCESS",
+                            "algorithm": "established-density-postprocessing",
+                            "status": "feasible_nonoptimal_published",
+                            "is_fallback": True,
+                            "for_expiry": diagnostic_stage.startswith("expiry"),
+                            "objective": published["contracted_objective_recomputed"],
+                            "accepted_feasible_nonoptimal": True,
+                            "candidate_policy": "smooth-feasible-nonoptimal-v1",
+                            "published_state_density_digest": _surface_density_digest(
+                                xdensities
+                            ),
+                            **{
+                                f"published_state_{name}": value
+                                for name, value in published.items()
+                            },
+                            **{
+                                f"published_state_{name}": value
+                                for name, value in published_constraints.items()
+                            },
+                        }
+                    )
             verbose.write(lambda: f"done. This took {tme}.", head=False)
 
         # make numpy

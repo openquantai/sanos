@@ -700,6 +700,54 @@ both accepted it. Only `approved` may alter reference behavior.
   failure. A `user_limit` status identifies a solver resource limit but does
   not by itself distinguish elapsed-time from iteration-limit exhaustion.
 
+## CD-035 — Feasible nonoptimal smooth-SANOS candidates
+
+- **Status:** approved by the repository owner on 2026-10-17 for unresolved
+  smooth-surface failures; independently reviewed against the controlled
+  2023-02-08 replay.
+- **Evidence:** the fresh and historical selected inputs on 2023-02-08 are
+  exactly equal: 29 expiries, 2,605 Float32 strike/bid/ask rows, and equal
+  expiry values. The pinned legacy and current implementations construct the
+  same primary LP in the current runtime and both fail their normal solver
+  chains. One time-limited CLARABEL capture stopped after 15 iterations with
+  gross original-constraint violations. A separately controlled 66-iteration
+  capture returned finite probability masses with maximum mass error
+  `8.48e-10`, maximum first-moment error `1.30e-9`, positive minimum density,
+  and positive calendar slack. Its exact inward-contracted objective is
+  `0.0026862952293136904`, about `0.1746%` above the reconstructed historical
+  fit objective `0.0026816143611509036`. The contrast proves both that a failed
+  status can contain a useful feasible state and that the status alone is not
+  evidence of feasibility.
+- **Treatment:** first exhaust the unchanged smooth chain from CD-033. If no
+  attempt succeeds, inspect only fresh attempt-bound candidates from
+  `user_limit`, recognized `invalid_solution`, or `solver_error`; authenticated
+  infeasible/unbounded results remain terminal failures. A candidate must map
+  completely through that attempt's exact CVXPY reduction chain, contain every
+  original variable, and be finite. Reconstruct minimum quote auxiliaries from
+  its unmodified density state with the LP's exact one-percent inward quote
+  contraction. Require every original equality, inequality, and variable-bound
+  residual to be at most `1e-7`, then independently apply the established
+  density, mass, martingale, strike, bound, and calendar state gates both before
+  and after the unchanged common postprocessing used for normal successes. Do
+  not add candidate-specific clipping, projection, repair, or refitting, and do
+  not add a downstream DLV step. A later normal
+  success always wins; otherwise choose the feasible candidate with the lowest
+  exact reconstructed objective. Persist `feasible_nonoptimal`, the original
+  solver failure, attempt and candidate identities, all residuals, objective
+  decomposition, postprocessed published-state identity and metrics, and policy
+  version.
+- **Expected impact:** only dates that otherwise have no successful smooth fit
+  can gain a fitted-day output, and their fitting error may be higher than an
+  optimum while structural no-arbitrage remains certified. Existing successful
+  artifacts retain their original byte identity and are selected directly.
+  Each unresolved date produces a distinct immutable recovery identity bound
+  to its absent original expected pointer, exact filtered upstream pointer, and
+  recovery-policy identity; it is never published under or aliased to the old
+  ID. Dataset configuration independently derives the exact mixed source set,
+  and deep validation authenticates every selected original or recovery
+  artifact. Dataset review must report the exact count and dates of
+  `feasible_nonoptimal` outcomes separately from optimal outcomes.
+
 ## User decision required before affected implementation
 
 The first decisions requiring an explicit choice are CD-002, CD-003, CD-006,
@@ -711,6 +759,7 @@ scaffolding while those specific behavior points remain blocked. CD-004,
 CD-009 and CD-021 through CD-028 are resolved historical contracts; CD-029,
 CD-030, CD-031, and CD-032 supersede their public-unit/layout, return,
 zero-DTE population, and downstream-model organization portions respectively;
-CD-033 owns the smooth-surface runtime recovery policy. CD-034 owns the
+CD-033 owns the smooth-surface runtime recovery chain. CD-034 owns the
 canonical unsmoothed DLV state and supersedes all post-SANOS DLV projection
-contracts.
+contracts. CD-035 owns candidate-specific feasible-nonoptimal acceptance after
+the CD-033 chain has no successful result.

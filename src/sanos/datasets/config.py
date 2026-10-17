@@ -10,13 +10,15 @@ from typing import Any, Literal
 
 from cdxcore.version import version
 
+from sanos.config import canonical_sha256
 from sanos.widb.config import DailySurfaceConfig, DailyWidbConfig
+from sanos.widb.recovery import FittedSourceSelection
 
 _SAFE_DATASET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _OPTIONMETRICS_TICKER = re.compile(r"^[A-Za-z0-9.^-]{1,32}$")
 
 
-@version("1.0", dependencies=[DailyWidbConfig, DailySurfaceConfig])
+@version("1.1", dependencies=[DailyWidbConfig, DailySurfaceConfig, FittedSourceSelection])
 @dataclass(frozen=True, slots=True)
 class InternalDatasetConfig:
     """All content-affecting inputs for one internal WIDB/SANOS dataset."""
@@ -30,12 +32,12 @@ class InternalDatasetConfig:
     source_generation: str
     daily: DailyWidbConfig
     surface: DailySurfaceConfig
+    fitted_selection: FittedSourceSelection | None = None
 
     def __post_init__(self) -> None:
         if _SAFE_DATASET_NAME.fullmatch(self.name) is None:
             raise ValueError(
-                "Dataset name must be 1-128 portable characters beginning with a letter "
-                "or digit"
+                "Dataset name must be 1-128 portable characters beginning with a letter or digit"
             )
         normalized_ticker = self.ticker.strip().upper()
         if _OPTIONMETRICS_TICKER.fullmatch(normalized_ticker) is None:
@@ -49,15 +51,41 @@ class InternalDatasetConfig:
             raise ValueError(f"Unsupported Dataset source: {self.source!r}")
         if not self.source_generation.strip():
             raise ValueError("source_generation cannot be empty")
+        if self.fitted_selection is not None:
+            if self.fitted_selection.ticker != self.ticker:
+                raise ValueError("Fitted source selection ticker differs from Dataset ticker")
+            selection_dates = tuple(item.trading_date for item in self.fitted_selection.bindings)
+            if selection_dates[0] != self.start_date or selection_dates[-1] != self.end_date:
+                raise ValueError("Fitted source selection does not cover Dataset endpoints")
+            configuration_digest = canonical_sha256(
+                {
+                    "dataset": {
+                        "name": self.name,
+                        "ticker": self.ticker,
+                        "start_date": self.start_date,
+                        "end_date": self.end_date,
+                        "include_half_days": self.include_half_days,
+                        "source": self.source,
+                        "source_generation": self.source_generation,
+                    },
+                    "daily": self.daily,
+                    "surface": self.surface,
+                }
+            )
+            if self.fitted_selection.original_configuration_sha256 != configuration_digest:
+                raise ValueError(
+                    "Fitted source selection belongs to a different Dataset configuration"
+                )
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> InternalDatasetConfig:
         """Parse a strict checked-in ``dataset``/``daily``/``surface`` document."""
 
         required = {"dataset", "daily", "surface"}
-        if set(document) != required:
+        allowed = required | {"fitted_selection"}
+        if not required.issubset(document) or not set(document).issubset(allowed):
             missing = sorted(required - set(document))
-            unknown = sorted(set(document) - required)
+            unknown = sorted(set(document) - allowed)
             raise ValueError(
                 f"Dataset configuration sections changed: missing={missing}, unknown={unknown}"
             )
@@ -112,6 +140,11 @@ class InternalDatasetConfig:
                 source_generation=dataset["source_generation"],
                 daily=DailyWidbConfig.from_mapping(daily),
                 surface=DailySurfaceConfig.from_mapping(surface),
+                fitted_selection=(
+                    None
+                    if "fitted_selection" not in document
+                    else FittedSourceSelection.from_document(document["fitted_selection"])
+                ),
             )
         except TypeError as exc:
             raise ValueError(f"Invalid internal Dataset configuration field: {exc}") from exc

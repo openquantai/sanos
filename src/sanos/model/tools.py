@@ -5,6 +5,8 @@ SANOS
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import math
 import warnings as warnings
 from collections.abc import Callable, Mapping
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import cvxpy as cp
+import cvxpy.settings as cvxpy_settings
 import numpy as np
 from cdxcore.bs import bs
 from cdxcore.err import verify, verify_inp
@@ -19,6 +22,8 @@ from cdxcore.pretty import PrettyObject
 from cdxcore.verbose import Context
 from cdxcore.version import version
 from cvxpy.error import SolverError
+from cvxpy.reductions.solution import Solution
+from cvxpy.reductions.solvers.conic_solvers.clarabel_conif import CLARABEL
 
 from sanos.model.constants import DAYS_PER_YEAR, ONE_MINUTE, one_minute_year_fraction
 from sanos.model.tridiag import solve_sanos_tridiagonal
@@ -51,6 +56,224 @@ def _highs_failure_details(problem: cp.Problem) -> str:
         if value is not None:
             details[name] = value
     return f" Native HiGHS diagnostics: {details}." if details else ""
+
+
+_FEASIBLE_NONOPTIMAL_TOLERANCE = 1.0e-7
+
+
+@version("1.0")
+def _candidate_digest(values: tuple[np.ndarray, ...]) -> str:
+    """Hash an attempt-local original-variable candidate without serialising it."""
+
+    digest = hashlib.sha256()
+    for value in values:
+        array = np.ascontiguousarray(value, dtype=np.float64)
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+@version("1.1")
+def _highs_original_variable_candidate(
+    problem: cp.Problem,
+    variables: list[tuple[cp.Variable, np.ndarray]],
+) -> tuple[np.ndarray, ...] | None:
+    """Inverse-map a finite native HiGHS iterate to every original variable."""
+
+    cache = getattr(problem, "_solver_cache", None)
+    cached = cache.get("HIGHS") if isinstance(cache, Mapping) else None
+    if not isinstance(cached, tuple) or len(cached) != 3 or not isinstance(cached[2], dict):
+        return None
+    raw = cached[2]
+    native_status = str(raw.get("model_status")).rsplit(".", 1)[-1]
+    if native_status in {
+        "kInfeasible",
+        "kUnbounded",
+        "kUnboundedOrInfeasible",
+    }:
+        return None
+    solution = raw.get("solution")
+    column_values = getattr(solution, "col_value", None)
+    if column_values is None or not np.all(np.isfinite(np.asarray(column_values))):
+        return None
+    try:
+        _, chain, inverse_data = problem.get_problem_data(cp.HIGHS)
+        invertible = copy.copy(raw)
+        # CVXPY discards kUnknown/kSolveError primal iterates. This copy changes
+        # only inversion status; the authentic native status is never mutated.
+        invertible["model_status"] = "kTimeLimit"
+        mapped = chain.invert(invertible, inverse_data)
+        values = tuple(
+            np.asarray(mapped.primal_vars[variable.id], dtype=np.float64)
+            for variable, _ in variables
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(
+        value.shape != variable.shape or not np.all(np.isfinite(value))
+        for value, (variable, _) in zip(values, variables, strict=True)
+    ):
+        return None
+    return values
+
+
+@version("1.0")
+def _clarabel_original_variable_candidate(
+    problem: cp.Problem,
+    variables: list[tuple[cp.Variable, np.ndarray]],
+) -> tuple[np.ndarray, ...] | None:
+    """Inverse-map a complete attempt-local native CLARABEL primal iterate."""
+
+    cache = getattr(problem, "_solver_cache", None)
+    solver = cache.get("CLARABEL") if isinstance(cache, Mapping) else None
+    if solver is None or not hasattr(solver, "get_solution"):
+        return None
+    native = solver.get_solution()
+    native_status = str(getattr(native, "status", ""))
+    if native_status in {
+        "PrimalInfeasible",
+        "AlmostPrimalInfeasible",
+        "DualInfeasible",
+        "AlmostDualInfeasible",
+    }:
+        return None
+    native_x = getattr(native, "x", None)
+    if native_x is None or not np.all(np.isfinite(np.asarray(native_x))):
+        return None
+    try:
+        _, chain, inverse_data = problem.get_problem_data(cp.CLARABEL)
+        solution = Solution(
+            cvxpy_settings.OPTIMAL_INACCURATE,
+            float(getattr(native, "obj_val")),
+            {inverse_data[-1][CLARABEL.VAR_ID]: np.asarray(native_x, dtype=np.float64)},
+            None,
+            {},
+        )
+        for reduction, inverse in reversed(
+            list(zip(chain.reductions[:-1], inverse_data[:-1], strict=True))
+        ):
+            solution = reduction.invert(solution, inverse)
+        values = tuple(
+            np.asarray(solution.primal_vars[variable.id], dtype=np.float64)
+            for variable, _ in variables
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if any(
+        value.shape != variable.shape or not np.all(np.isfinite(value))
+        for value, (variable, _) in zip(values, variables, strict=True)
+    ):
+        return None
+    return values
+
+
+@version("1.0")
+def _candidate_constraint_residuals(
+    constraints: list[cp.Constraint],
+    variables: list[tuple[cp.Variable, np.ndarray]],
+) -> dict[str, float] | None:
+    """Return independent original-expression residuals for the assigned candidate."""
+
+    explicit = 0.0
+    try:
+        for constraint in constraints:
+            violation = np.asarray(constraint.violation(), dtype=np.float64)
+            if not np.all(np.isfinite(violation)):
+                return None
+            if violation.size:
+                explicit = max(explicit, float(np.max(np.abs(violation))))
+    except (TypeError, ValueError):
+        return None
+    bound = 0.0
+    for variable, _ in variables:
+        value = np.asarray(variable.value, dtype=np.float64)
+        if value.shape != variable.shape or not np.all(np.isfinite(value)):
+            return None
+        if variable.bounds is None:
+            continue
+        lower, upper = variable.bounds
+        if lower is not None:
+            bound = max(bound, float(np.max(np.maximum(np.asarray(lower) - value, 0.0))))
+        if upper is not None:
+            bound = max(bound, float(np.max(np.maximum(value - np.asarray(upper), 0.0))))
+    return {"explicit_constraint_max": explicit, "variable_bound_max": bound}
+
+
+@version("1.0")
+def _problem_original_variable_candidate(
+    problem: cp.Problem,
+    variables: list[tuple[cp.Variable, np.ndarray]],
+) -> tuple[np.ndarray, ...] | None:
+    """Read only a complete primal mapped by this exact CVXPY solve attempt."""
+
+    solution = getattr(problem, "solution", None)
+    primal_vars = getattr(solution, "primal_vars", None)
+    if not isinstance(primal_vars, Mapping):
+        return None
+    try:
+        values = tuple(
+            np.asarray(primal_vars[variable.id], dtype=np.float64)
+            for variable, _ in variables
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(
+        value.shape != variable.shape or not np.all(np.isfinite(value))
+        for value, (variable, _) in zip(values, variables, strict=True)
+    ):
+        return None
+    return values
+
+
+@version("1.0")
+def _native_attempt_metadata(problem: cp.Problem, algorithm: str) -> dict[str, object]:
+    """Return path-free scalar provenance for an attempt's native solver result."""
+
+    cache = getattr(problem, "_solver_cache", None)
+    if not isinstance(cache, Mapping):
+        return {}
+    if algorithm != "clarabel":
+        cached = cache.get("HIGHS")
+        if not isinstance(cached, tuple) or len(cached) != 3 or not isinstance(cached[2], dict):
+            return {}
+        result = cached[2]
+        metadata: dict[str, object] = {
+            "native_model_status": str(result.get("model_status")),
+        }
+        if isinstance(result.get("run_time"), (int, float)):
+            metadata["native_solve_time"] = float(result["run_time"])
+        info = result.get("info")
+        for name in (
+            "simplex_iteration_count",
+            "ipm_iteration_count",
+            "objective_function_value",
+            "max_primal_infeasibility",
+            "max_dual_infeasibility",
+        ):
+            value = getattr(info, name, None)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                metadata[f"native_{name}"] = float(value)
+        return metadata
+    solver = cache.get("CLARABEL")
+    if solver is None or not hasattr(solver, "get_info"):
+        return {}
+    info = solver.get_info()
+    metadata = {"native_model_status": str(getattr(info, "status", "unknown"))}
+    for name in (
+        "iterations",
+        "solve_time",
+        "cost_primal",
+        "cost_dual",
+        "gap_abs",
+        "gap_rel",
+        "res_primal",
+        "res_dual",
+    ):
+        value = getattr(info, name, None)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            metadata[f"native_{name}"] = float(value)
+    return metadata
 
 
 @dataclass(frozen=True)
@@ -652,7 +875,18 @@ class SanosPricer:
         return xdensities
 
 
-@version("1.2")
+@version(
+    "1.3",
+    dependencies=[
+        _candidate_constraint_residuals,
+        _candidate_digest,
+        _clarabel_original_variable_candidate,
+        _highs_failure_details,
+        _highs_original_variable_candidate,
+        _native_attempt_metadata,
+        _problem_original_variable_candidate,
+    ],
+)
 @dataclass(frozen=True)
 class SanosLPSolver:
     timeout_seconds: float = 60 * 5.0  # timeout in seconds
@@ -662,6 +896,7 @@ class SanosLPSolver:
     _debug_verbose_cvxpy: set[str] | bool | None = (
         None  # Turn 'verbose' on for cvxpy, optionally scoped by solver mode
     )
+    accept_feasible_nonoptimal: bool = False
 
     def __post_init__(self) -> None:
         verify_inp(
@@ -692,6 +927,8 @@ class SanosLPSolver:
         _attempt_algorithm: Literal["simplex", "ipm", "clarabel"] | None = None,
         _remaining_fallbacks: tuple[Literal["ipm", "clarabel"], ...] | None = None,
         diagnostic_sink: Callable[[Mapping[str, object]], None] | None = None,
+        feasible_nonoptimal_validator: Callable[[], Mapping[str, object]] | None = None,
+        _candidate_pool: list[dict[str, object]] | None = None,
         verbose: Context = Context.quiet,
     ) -> tuple[bool, str, bool]:
         """
@@ -724,8 +961,13 @@ class SanosLPSolver:
             if _remaining_fallbacks is None
             else _remaining_fallbacks
         )
+        candidate_pool = [] if _candidate_pool is None else _candidate_pool
 
-        def emit(status: str, objective_value: float | None = None) -> None:
+        def emit(
+            status: str,
+            objective_value: float | None = None,
+            **extra: object,
+        ) -> None:
             if diagnostic_sink is not None:
                 if objective_value is not None and not math.isfinite(objective_value):
                     objective_value = None
@@ -742,8 +984,98 @@ class SanosLPSolver:
                         "is_fallback": is_fallback,
                         "for_expiry": for_expiry,
                         "objective": objective_value,
+                        **extra,
                     }
                 )
+
+        def inspect_candidate(status: str) -> dict[str, object]:
+            if not self.accept_feasible_nonoptimal or feasible_nonoptimal_validator is None:
+                return {}
+            values: tuple[np.ndarray, ...] | None
+            if status == "user_limit":
+                values = _problem_original_variable_candidate(prob, variables)
+            elif attempt_algorithm == "clarabel":
+                values = _clarabel_original_variable_candidate(prob, variables)
+            else:
+                values = _highs_original_variable_candidate(prob, variables)
+            if values is None or any(not np.all(np.isfinite(value)) for value in values):
+                return {"candidate_inspected": True, "candidate_available": False}
+            prior = tuple(
+                None if variable.value is None else np.array(variable.value, copy=True)
+                for variable, _ in variables
+            )
+            try:
+                for (variable, _), value in zip(variables, values, strict=True):
+                    variable.save_value(value)
+                domain = dict(feasible_nonoptimal_validator())
+                residuals = _candidate_constraint_residuals(constraints, variables)
+                if residuals is None:
+                    raise ValueError("original constraint residuals are unavailable")
+                accepted = (
+                    max(residuals.values(), default=0.0)
+                    <= _FEASIBLE_NONOPTIMAL_TOLERANCE
+                )
+                final_values = tuple(
+                    np.array(variable.value, dtype=np.float64, copy=True)
+                    for variable, _ in variables
+                )
+                objective_value = None if objective.value is None else float(objective.value)
+                accepted = accepted and objective_value is not None and math.isfinite(objective_value)
+                evidence: dict[str, object] = {
+                    "candidate_inspected": True,
+                    "candidate_available": True,
+                    "candidate_accepted": accepted,
+                    "candidate_digest": _candidate_digest(final_values),
+                    "candidate_policy": "smooth-feasible-nonoptimal-v1",
+                    "candidate_feasibility_tolerance": _FEASIBLE_NONOPTIMAL_TOLERANCE,
+                    "candidate_auxiliary_objective": objective_value,
+                    **residuals,
+                    **domain,
+                    **_native_attempt_metadata(prob, attempt_algorithm),
+                }
+                if accepted:
+                    candidate_pool.append(
+                        {
+                            "values": final_values,
+                            "evidence": evidence,
+                            "solver": "CLARABEL" if attempt_algorithm == "clarabel" else "HIGHS",
+                            "algorithm": attempt_algorithm,
+                            "original_status": status,
+                        }
+                    )
+                return evidence
+            except (AssertionError, TypeError, ValueError) as error:
+                return {
+                    "candidate_inspected": True,
+                    "candidate_available": True,
+                    "candidate_accepted": False,
+                    "candidate_rejection": type(error).__name__,
+                }
+            finally:
+                for (variable, _), value in zip(variables, prior, strict=True):
+                    variable.save_value(value)
+
+        def accept_best_candidate() -> tuple[bool, str, bool] | None:
+            if not candidate_pool:
+                return None
+            best = min(
+                candidate_pool,
+                key=lambda item: float(
+                    dict(item["evidence"])["contracted_objective_recomputed"]
+                ),
+            )
+            for (variable, _), value in zip(variables, best["values"], strict=True):
+                variable.save_value(np.asarray(value))
+            emit(
+                "feasible_nonoptimal",
+                float(dict(best["evidence"])["candidate_auxiliary_objective"]),
+                accepted_feasible_nonoptimal=True,
+                original_solver=best["solver"],
+                original_algorithm=best["algorithm"],
+                original_status=best["original_status"],
+                **dict(best["evidence"]),
+            )
+            return True, "feasible_nonoptimal", True
 
         # Preserve the primary solver's final iterate when the fallback is
         # entered after a limit or solver failure.
@@ -777,7 +1109,8 @@ class SanosLPSolver:
                 prob.solve(solver=slv, **opt)
                 prob_status = str(prob.status)
             except SolverError as e:
-                emit("solver_error")
+                evidence = inspect_candidate("solver_error")
+                emit("solver_error", **evidence)
                 if remaining_fallbacks:
                     next_algorithm, *rest = remaining_fallbacks
                     warnings.warn(
@@ -795,8 +1128,13 @@ class SanosLPSolver:
                         _attempt_algorithm=next_algorithm,
                         _remaining_fallbacks=tuple(rest),
                         diagnostic_sink=diagnostic_sink,
+                        feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                        _candidate_pool=candidate_pool,
                         verbose=verbose,
                     )
+                accepted = accept_best_candidate()
+                if accepted is not None:
+                    return accepted
                 raise type(e)(
                     f"{message()}Solver error: {str(e)}.{_highs_failure_details(prob)}"
                 ) from e
@@ -804,9 +1142,15 @@ class SanosLPSolver:
                 prob_status = f"overflow error ({str(e.__class__.__name__)})"
             except Exception as e:
                 msg = str(e)
-                if "Cannot unpack invalid solution" in msg and remaining_fallbacks:
+                if "Cannot unpack invalid solution" in msg:
+                    evidence = inspect_candidate("invalid_solution")
+                    emit("invalid_solution", **evidence)
+                    if not remaining_fallbacks:
+                        accepted = accept_best_candidate()
+                        if accepted is not None:
+                            return accepted
+                        raise type(e)(f"{message()}Invalid solver solution: {msg}.") from e
                     next_algorithm, *rest = remaining_fallbacks
-                    emit("invalid_solution")
                     warnings.warn(
                         f"{message()}{attempt_algorithm} returned an invalid solution. "
                         f"{_highs_failure_details(prob)} "
@@ -822,6 +1166,8 @@ class SanosLPSolver:
                         _attempt_algorithm=next_algorithm,
                         _remaining_fallbacks=tuple(rest),
                         diagnostic_sink=diagnostic_sink,
+                        feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                        _candidate_pool=candidate_pool,
                         verbose=verbose,
                     )
                 emit("unexpected_error")
@@ -829,7 +1175,12 @@ class SanosLPSolver:
 
             if prob_status == "user_limit" and remaining_fallbacks:
                 next_algorithm, *rest = remaining_fallbacks
-                emit(prob_status, None if prob.value is None else float(prob.value))
+                evidence = inspect_candidate(prob_status)
+                emit(
+                    prob_status,
+                    None if prob.value is None else float(prob.value),
+                    **evidence,
+                )
                 warnings.warn(
                     f"{message()}{attempt_algorithm} solver reached its limit. "
                     f"Attempting {next_algorithm} fallback solver."
@@ -844,10 +1195,26 @@ class SanosLPSolver:
                     _attempt_algorithm=next_algorithm,
                     _remaining_fallbacks=tuple(rest),
                     diagnostic_sink=diagnostic_sink,
+                    feasible_nonoptimal_validator=feasible_nonoptimal_validator,
+                    _candidate_pool=candidate_pool,
                     verbose=verbose,
                 )
             success = prob_status in ["optimal", "optimal_inaccurate"]
-            emit(prob_status, None if prob.value is None else float(prob.value))
+            if not success:
+                evidence = inspect_candidate(prob_status)
+                emit(prob_status, None if prob.value is None else float(prob.value), **evidence)
+                if prob_status not in {
+                    "infeasible",
+                    "infeasible_inaccurate",
+                    "unbounded",
+                    "unbounded_inaccurate",
+                    "infeasible_or_unbounded",
+                }:
+                    accepted = accept_best_candidate()
+                    if accepted is not None:
+                        return accepted
+            else:
+                emit(prob_status, None if prob.value is None else float(prob.value))
         return success, prob_status, is_fallback
 
     def _lp_solver_settings(

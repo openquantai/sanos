@@ -129,6 +129,28 @@ configured timeout intervals. HiGHS IPM retains the `1e-7` calendar gate;
 CLARABEL retains its status-dependent reference tolerances. The initial
 no-arbitrage fit does not opt into the IPM tier.
 
+If every normal smooth-surface attempt fails, CD-035 permits a returned primal
+state to be considered independently of its nonoptimal status. This is not
+status-based acceptance. The state must come from the exact failed attempt,
+map completely to the original variables, remain finite without any
+candidate-specific clipping or projection, and satisfy every original
+equality, inequality, and variable bound within the named `1e-7`
+candidate-feasibility tolerance. This adds no
+relaxation to the existing fitted-state gates. The authenticated candidate
+probability masses then follow the unchanged common surface postprocessing used
+for normal successes. That exact published state must also pass the existing
+density minimum, unit-mass, martingale-moment, strike-shape, model-bound, and
+full-support calendar gates.
+
+Quote auxiliaries are reconstructed at their exact minima from the candidate
+prices using the same one-percent inward bid/ask contraction as the LP. This
+proves a complete feasible LP point and supplies the exact comparable
+objective; fit quality is reported but is not an additional acceptance band.
+A normal success always wins. Otherwise the feasible candidate with the lowest
+exact objective is retained and explicitly marked `feasible_nonoptimal` with
+its original failure status and residual evidence. Both the raw candidate and
+published-state digests, residuals, and exact objectives are retained.
+
 The generic numerical constructor can L2-project small density mass,
 positivity, or first-moment violations onto their joint feasible set. The
 canonical fitted-day serializer and validator do not invoke such a repair:

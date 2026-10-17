@@ -185,7 +185,7 @@ def _nullable_float64(name: str, values: np.ndarray[Any, Any]) -> pl.Series:
     return pl.Series(name, values.astype(np.float64, copy=False)).fill_nan(None)
 
 
-@version("1.1", dependencies=[NoArbitrageConfig, MkArbFree])
+@version("1.2", dependencies=[NoArbitrageConfig, MkArbFree])
 def _make_no_arb_fitter(
     config: NoArbitrageConfig,
     *,
@@ -210,6 +210,7 @@ def _make_no_arb_fitter(
         _solver_fallback_algorithms=(
             ("ipm", "clarabel") if smoothness is not None else ("clarabel",)
         ),
+        _accept_feasible_nonoptimal=smoothness is not None,
         _solver_diagnostic_sink=diagnostic_sink,
     )
 

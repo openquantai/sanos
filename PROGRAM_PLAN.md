@@ -437,6 +437,19 @@ self-describing Polars frame.
 - Record stage reasons for every removed quote, expiry, and day.
 - Make solver failures resumable and inspectable without converting them into
   silent exclusions.
+- Under approved CD-035, exhaust the ordinary smooth-surface solver chain and,
+  only if it has no success, admit an exact failed-attempt candidate when its
+  attempt state and its exact state after unchanged common postprocessing
+  independently satisfy every original LP constraint, variable bound, and
+  fitted-state invariant. Record
+  it as `feasible_nonoptimal`, preserve the original failure provenance, and
+  report its exact objective and residuals; never infer feasibility from
+  status alone.
+- Preserve every already successful fitted pointer byte-for-byte. Resolve an
+  unresolved date only through a distinct exact recovery identity bound to its
+  absent original expected pointer, filtered upstream pointer, and recovery
+  policy. The Dataset's configured source set and evidence must authenticate
+  this mixed original/recovery lineage without wildcard lookup or relabelling.
 
 Acceptance: per-stage row/expiry counts and numerical values match reference
 fixtures within declared tolerances; all no-arbitrage invariants hold; restart

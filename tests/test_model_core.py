@@ -7,12 +7,14 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import cvxpy as cp
+import highspy
 import numpy as np
 import pytest
 from cdxcore.bs import bs
 from cdxcore.verbose import Context
 from cvxpy.error import SolverError
 
+import sanos.model.arbfree as arbfree_module
 import sanos.model.fitter as fitter_module
 from sanos.model import (
     ArbFreePricer,
@@ -25,7 +27,11 @@ from sanos.model import (
     solve_sanos_tridiagonal,
 )
 from sanos.model.backbone import BackboneNumpy
-from sanos.model.tools import _highs_failure_details
+from sanos.model.tools import (
+    _clarabel_original_variable_candidate,
+    _highs_failure_details,
+    _highs_original_variable_candidate,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "reference_numerics_v1.json"
 
@@ -763,6 +769,336 @@ def test_lp_solver_direct_clarabel_user_limit_is_terminal(
     assert [(event["solver"], event["is_fallback"]) for event in events] == [("CLARABEL", False)]
 
 
+def test_lp_solver_accepts_only_independently_feasible_terminal_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def return_finite_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        result = original_solve(problem, *args, **kwargs)
+        problem._status = "user_limit"
+        return result
+
+    monkeypatch.setattr(cp.Problem, "solve", return_finite_limit)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="reached its limit"):
+        success, status, fell_back = SanosLPSolver(
+            timeout_seconds=10.0,
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": float(variable.value),
+            },
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert (success, status, fell_back) == (True, "feasible_nonoptimal", True)
+    assert float(variable.value) == pytest.approx(1.0)
+    accepted = events[-1]
+    assert accepted["accepted_feasible_nonoptimal"] is True
+    assert accepted["original_status"] == "user_limit"
+    assert accepted["candidate_policy"] == "smooth-feasible-nonoptimal-v1"
+    assert accepted["explicit_constraint_max"] <= 1.0e-7
+    assert len(str(accepted["candidate_digest"])) == 64
+
+
+def test_lp_solver_rejects_constraint_violating_terminal_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def return_bad_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        result = original_solve(problem, *args, **kwargs)
+        assert problem.solution.primal_vars
+        for variable_id in problem.solution.primal_vars:
+            problem.solution.primal_vars[variable_id] = np.asarray(0.0)
+        problem._status = "user_limit"
+        return result
+
+    monkeypatch.setattr(cp.Problem, "solve", return_bad_limit)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning, match="reached its limit"):
+        success, status, fell_back = SanosLPSolver(
+            timeout_seconds=10.0,
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": float(variable.value),
+            },
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert (success, status, fell_back) == (False, "user_limit", True)
+    candidates = [event for event in events if event.get("candidate_available")]
+    assert candidates
+    assert all(event["candidate_accepted"] is False for event in candidates)
+    assert max(float(event["explicit_constraint_max"]) for event in candidates) >= 1.0
+
+
+def test_lp_solver_inverse_maps_attempt_local_highs_unknown_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def expose_native_candidate(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        result = original_solve(problem, *args, **kwargs)
+        if kwargs.get("solver") == "HIGHS":
+            problem._solver_cache["HIGHS"][2]["model_status"] = "kUnknown"
+            raise ValueError("Cannot unpack invalid solution")
+        problem._status = "user_limit"
+        return result
+
+    monkeypatch.setattr(cp.Problem, "solve", expose_native_candidate)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning):
+        success, status, fell_back = SanosLPSolver(
+            timeout_seconds=10.0,
+            fallback_algorithms=("ipm", "clarabel"),
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": float(variable.value),
+            },
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert (success, status, fell_back) == (True, "feasible_nonoptimal", True)
+    highs = [event for event in events if event["solver"] == "HIGHS"]
+    assert len(highs) == 2
+    assert all(event["status"] == "invalid_solution" for event in highs)
+    assert all(event["candidate_available"] is True for event in highs)
+    assert all(event["candidate_accepted"] is True for event in highs)
+    assert events[-1]["accepted_feasible_nonoptimal"] is True
+
+
+def test_lp_solver_inverse_maps_attempt_local_clarabel_invalid_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def expose_clarabel_candidate(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("solver") == "HIGHS":
+            raise SolverError("forced primary failure")
+        original_solve(problem, *args, **kwargs)
+        raise ValueError("Cannot unpack invalid solution")
+
+    monkeypatch.setattr(cp.Problem, "solve", expose_clarabel_candidate)
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    events: list[dict[str, object]] = []
+    with pytest.warns(UserWarning):
+        success, status, fell_back = SanosLPSolver(
+            timeout_seconds=10.0,
+            accept_feasible_nonoptimal=True,
+        )(
+            objective=variable,
+            constraints=[variable >= 1.0],
+            variables=[(variable, np.asarray(1.0))],
+            feasible_nonoptimal_validator=lambda: {
+                "contracted_objective_recomputed": float(variable.value),
+            },
+            diagnostic_sink=lambda event: events.append(dict(event)),
+            verbose=cast(Any, Context).quiet,
+        )
+    assert (success, status, fell_back) == (True, "feasible_nonoptimal", True)
+    accepted = events[-1]
+    assert accepted["original_solver"] == "CLARABEL"
+    assert accepted["original_status"] == "invalid_solution"
+    assert accepted["native_model_status"] == "Solved"
+
+
+@pytest.mark.parametrize(
+    "native_status",
+    [
+        "kInfeasible",
+        "kUnbounded",
+        "kUnboundedOrInfeasible",
+        highspy.HighsModelStatus.kInfeasible,
+        highspy.HighsModelStatus.kUnbounded,
+        highspy.HighsModelStatus.kUnboundedOrInfeasible,
+    ],
+)
+def test_highs_native_infeasible_or_unbounded_iterate_is_never_a_candidate(
+    native_status: Any,
+) -> None:
+    variable = cp.Variable(bounds=[0.0, 2.0])
+    problem = cp.Problem(cp.Minimize(variable), [variable >= 1.0])
+    problem.solve(solver=cp.HIGHS)
+    problem._solver_cache["HIGHS"][2]["model_status"] = native_status
+    assert _highs_original_variable_candidate(
+        problem,
+        [(variable, np.asarray(1.0))],
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "native_status",
+    [
+        "PrimalInfeasible",
+        "AlmostPrimalInfeasible",
+        "DualInfeasible",
+        "AlmostDualInfeasible",
+    ],
+)
+def test_clarabel_native_infeasible_or_unbounded_iterate_is_never_a_candidate(
+    native_status: str,
+) -> None:
+    problem = cp.Problem(cp.Minimize(0.0))
+    problem._solver_cache = {
+        "CLARABEL": SimpleNamespace(
+            get_solution=lambda: SimpleNamespace(status=native_status, x=[1.0])
+        )
+    }
+    variable = cp.Variable()
+    assert _clarabel_original_variable_candidate(
+        problem,
+        [(variable, np.asarray(1.0))],
+    ) is None
+
+
+def test_smooth_recovery_revalidates_and_records_returned_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+
+    def return_finite_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        result = original_solve(problem, *args, **kwargs)
+        problem._status = "user_limit"
+        return result
+
+    monkeypatch.setattr(cp.Problem, "solve", return_finite_limit)
+    events: list[dict[str, object]] = []
+    fitter = MkArbFree(
+        smoothness=0.25,
+        min_dlv=None,
+        max_dlv=None,
+        _accept_feasible_nonoptimal=True,
+        _solver_diagnostic_sink=lambda event: events.append(dict(event)),
+    )
+    with pytest.warns(UserWarning):
+        result = fitter.surface_densities(
+            expiries=np.array([0.1]),
+            variances=np.array([0.004]),
+            strikes=[np.array([0.9, 1.0, 1.1])],
+            bids=[np.array([0.105, 0.025, 0.005])],
+            asks=[np.array([0.115, 0.035, 0.015])],
+            masks=None,
+            xstrikes=[np.array([0.5, 0.9, 1.0, 1.1, 1.5])],
+            xguessed_p=[np.array([0.0, 0.1, 0.8, 0.1, 0.0])],
+            verbose=cast(Any, Context).quiet,
+        )
+    assert [event["status"] for event in events][-2:] == [
+        "feasible_nonoptimal",
+        "feasible_nonoptimal_published",
+    ]
+    published = events[-1]
+    assert published["published_state_explicit_constraint_max"] <= 1.0e-7
+    assert published["published_state_calendar_violation_max"] <= 1.0e-7
+    assert len(str(published["published_state_density_digest"])) == 64
+    assert np.min(result.xdensities[0]) >= -1.0e-7
+    assert np.sum(result.xdensities[0]) == pytest.approx(1.0, abs=1.0e-7)
+
+
+def test_smooth_recovery_records_postprocessing_that_removes_subfloor_mass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_solve = cp.Problem.solve
+    tiny = 5.0e-8
+    raw_density = np.array([tiny, 0.0, 1.0 - 2.0 * tiny, 0.0, tiny])
+
+    def return_subfloor_limit(problem: cp.Problem, *args: Any, **kwargs: Any) -> Any:
+        result = original_solve(problem, *args, **kwargs)
+        for variable in problem.variables():
+            if variable.shape == raw_density.shape:
+                problem.solution.primal_vars[variable.id] = raw_density.copy()
+        problem._status = "user_limit"
+        return result
+
+    monkeypatch.setattr(cp.Problem, "solve", return_subfloor_limit)
+    monkeypatch.setattr(arbfree_module, "IMPOSE_FLOOR_ON_DENSITY", True)
+    events: list[dict[str, object]] = []
+    fitter = MkArbFree(
+        smoothness=0.25,
+        min_dlv=None,
+        max_dlv=None,
+        _accept_feasible_nonoptimal=True,
+        _solver_diagnostic_sink=lambda event: events.append(dict(event)),
+    )
+    with pytest.warns(UserWarning):
+        result = fitter.surface_densities(
+            expiries=np.array([0.1]),
+            variances=np.array([0.004]),
+            strikes=[np.array([0.9, 1.0, 1.1])],
+            bids=[np.array([0.105, 0.025, 0.005])],
+            asks=[np.array([0.115, 0.035, 0.015])],
+            masks=None,
+            xstrikes=[np.array([0.5, 0.9, 1.0, 1.1, 1.5])],
+            xguessed_p=[raw_density.copy()],
+            verbose=cast(Any, Context).quiet,
+        )
+    accepted = events[-2]
+    published = events[-1]
+    assert accepted["status"] == "feasible_nonoptimal"
+    assert published["status"] == "feasible_nonoptimal_published"
+    assert float(accepted["contracted_objective_recomputed"]) != pytest.approx(
+        float(published["published_state_contracted_objective_recomputed"]),
+        rel=0.0,
+        abs=1.0e-12,
+    )
+    np.testing.assert_array_equal(
+        result.xdensities[0],
+        np.array([0.0, 0.0, 1.0 - 2.0 * tiny, 0.0, 0.0]),
+    )
+    assert published["published_state_explicit_constraint_max"] <= 1.0e-7
+
+
+def test_smooth_recovery_is_not_enabled_for_per_expiry_solves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[bool, object]] = []
+
+    def terminal_limit(solver: SanosLPSolver, **kwargs: Any) -> tuple[bool, str, bool]:
+        observed.append(
+            (
+                solver.accept_feasible_nonoptimal,
+                kwargs["feasible_nonoptimal_validator"],
+            )
+        )
+        return False, "user_limit", True
+
+    monkeypatch.setattr(SanosLPSolver, "__call__", terminal_limit)
+    fitter = MkArbFree(
+        smoothness=0.25,
+        min_dlv=None,
+        max_dlv=None,
+        _accept_feasible_nonoptimal=True,
+    )
+    with pytest.raises(RuntimeError, match="reached timeout"):
+        fitter.surface_densities(
+            expiries=np.array([0.1]),
+            variances=np.array([0.004]),
+            strikes=[np.array([0.9, 1.0, 1.1])],
+            bids=[np.array([0.105, 0.025, 0.005])],
+            asks=[np.array([0.115, 0.035, 0.015])],
+            masks=None,
+            xstrikes=[np.array([0.5, 0.9, 1.0, 1.1, 1.5])],
+            diagnostic_stage="expiry_soft",
+            verbose=cast(Any, Context).quiet,
+        )
+    assert observed == [(False, None)]
+
+
 def test_lp_solver_direct_clarabel_error_is_not_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -883,12 +1219,14 @@ def test_numerical_components_have_resolved_versions() -> None:
     assert direct_dependency_names(MkArbFree) == {
         "ArbFreePricer",
         "SanosLPSolver",
+        "_candidate_constraint_residuals",
+        "_surface_density_digest",
         "density_floor_enabled",
         "one_minute_year_fraction",
         "warn_and_fix_density",
     }
     assert "1.0-blocked-cd013" in str(getattr(SanosPricer, "version"))
-    assert str(getattr(SanosLPSolver, "version")).startswith("1.2")
+    assert str(getattr(SanosLPSolver, "version")).startswith("1.3")
 
 
 def test_defective_reference_jax_optimizer_is_explicitly_blocked() -> None:
