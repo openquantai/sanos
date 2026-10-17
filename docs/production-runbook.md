@@ -22,7 +22,10 @@ rolling 15-minute window is blocked before network access.
 > public candidate or public Dataset exists yet. The authenticated full-range
 > resume dry run covered all 918 dates, preserving 362 exact original successes
 > and planning 556 current replacements; it accessed no WRDS data and wrote no
-> output configuration. Material resume remains pending. Evidence belongs below
+> output configuration. Material resume started from pinned revision `e9a4ac6`
+> with two workers and `WRDS_OFF=1`; detached preflights passed. The local unit is
+> `sanos-official-resume-e9a4ac6-20261017.service`, with evidence in
+> `phase-11/evidence/20261017-official-resume/`. It is not complete. Evidence belongs below
 > the operator-selected `PRODUCTION_EVIDENCE` root and is not checked into this
 > repository.
 

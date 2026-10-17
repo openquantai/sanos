@@ -39,7 +39,9 @@ through the ordinary current Intermediate pipeline. Operators do not enumerate
 failed dates or create candidate process data. Its authenticated full-range dry
 run resolved the complete 918-date plan as 362 exact original successes and 556
 current replacements; dry-run mode accessed no WRDS data and wrote no output
-configuration. Material resume has not yet been claimed complete. Run and
+configuration. Material resume started from pinned revision `e9a4ac6` on
+2026-10-17, with two workers and `WRDS_OFF=1`; detached import, location, and
+runtime preflights passed. It is running, not complete. Run and
 resume instructions are in the [fresh production
 runbook](docs/production-runbook.md); run evidence stays outside Git under the
 operator-selected evidence root.
