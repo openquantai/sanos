@@ -319,14 +319,14 @@ be accepted as compatibility aliases, but new interfaces use `intermediate`.
 
 - Keep serial HiGHS dual simplex as the primary solver for smooth SANOS so
   every successful primary result retains the established numerical path.
-- Only the smooth-SANOS stage uses the ordered fallback chain HiGHS IPM then
-  CLARABEL, and only after `solver_error`, the recognized `invalid_solution`,
-  or `user_limit`. Authenticated infeasible/unbounded statuses and unexpected
-  runtime errors remain fatal. Initial no-arbitrage retains its existing
-  solver policy.
-- Record every attempted solver and algorithm in order. HiGHS simplex and IPM
-  use the `1e-7` calendar gate; CLARABEL uses its status-dependent feasibility
-  gate. The configured timeout applies separately to each attempt.
+- Smooth SANOS uses the established ordered fallback chain serial HiGHS dual
+  simplex then CLARABEL, and only after `solver_error`, the recognized
+  `invalid_solution`, or `user_limit`. Authenticated infeasible/unbounded
+  statuses and unexpected runtime errors remain fatal. Initial no-arbitrage
+  retains its existing solver policy.
+- Record every attempted solver and algorithm in order. HiGHS simplex uses the
+  `1e-7` calendar gate; CLARABEL uses its status-dependent feasibility gate.
+  The configured timeout applies separately to each attempt.
 - Exhaust that normal chain before considering a nonoptimal candidate. If no
   attempt succeeds, a candidate returned with `user_limit`, recognized
   `invalid_solution`, or `solver_error` may be retained only when it is bound

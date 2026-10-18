@@ -269,15 +269,10 @@ class _TerminalSolverEvidence:
     terminal_solver_call: _SolverCall
 
 
-_SolverPolicy = Literal["legacy_two_tier", "smooth_three_tier"]
-
-
-@version("2.0", dependencies=[_SolverCall])
+@version("2.1", dependencies=[_SolverCall])
 def _solver_calls(
     events: list[Any],
     label: str,
-    *,
-    solver_policy: _SolverPolicy,
 ) -> list[_SolverCall]:
     """Parse and validate the exact diagnostic event and fallback grammar."""
 
@@ -545,21 +540,9 @@ def _solver_calls(
             _fail(f"{label} diagnostics {stage} has inconsistent expiry scope")
         solver_identity = (solver, algorithm, is_fallback)
         allowed_identities = {("HIGHS", "simplex", False)}
-        if solver_policy == "legacy_two_tier":
-            # Historical two-tier records labeled CLARABEL with the primary
-            # simplex algorithm even though CLARABEL performed the attempt.
-            allowed_identities.add(("CLARABEL", "simplex", True))
-        elif solver_policy == "smooth_three_tier":
-            allowed_identities.update(
-                {
-                    ("HIGHS", "ipm", True),
-                    ("CLARABEL", "clarabel", True),
-                    # Accept already-published historical smooth diagnostics.
-                    ("CLARABEL", "simplex", True),
-                }
-            )
-        else:
-            _fail(f"{label} diagnostics has an unknown solver policy")
+        # The historical fallback event keeps the primary algorithm label even
+        # though CLARABEL performed the attempt.
+        allowed_identities.add(("CLARABEL", "simplex", True))
         if solver_identity not in allowed_identities:
             _fail(f"{label} diagnostics {stage} has inconsistent solver identity")
         status = event.get("status")
@@ -616,34 +599,9 @@ def _solver_calls(
                 attempt,
             ):
                 _fail(f"{label} diagnostics has a mismatched fallback event")
-            if fallback["solver"] == "CLARABEL" and fallback["algorithm"] == "clarabel":
-                _fail(f"{label} diagnostics skipped the IPM fallback attempt")
             terminal = fallback
             used_fallback = True
             position += 1
-            if fallback["solver"] == "HIGHS" and fallback["algorithm"] == "ipm":
-                if fallback["status"] in retry_triggers:
-                    if position + 1 >= len(events):
-                        _fail(f"{label} diagnostics has a dangling IPM fallback trigger")
-                    final = events[position + 1]
-                    final_key = validate_event(final)
-                    if (
-                        not final["is_fallback"]
-                        or final["solver"] != "CLARABEL"
-                        or final["algorithm"] != "clarabel"
-                        or final_key != (stage, input_index, attempt)
-                    ):
-                        _fail(f"{label} diagnostics has a mismatched CLARABEL fallback event")
-                    terminal = final
-                    position += 1
-                elif position + 1 < len(events):
-                    possible_final = events[position + 1]
-                    if (
-                        isinstance(possible_final, Mapping)
-                        and possible_final.get("is_fallback") is True
-                        and possible_final.get("stage") == stage
-                    ):
-                        _fail(f"{label} diagnostics retries after terminal IPM status")
             if (
                 position + 1 < len(events)
                 and isinstance(events[position + 1], Mapping)
@@ -691,12 +649,11 @@ def _solver_calls(
     return calls
 
 
-@version("6.0", dependencies=[_solver_calls, _TerminalSolverEvidence])
+@version("6.1", dependencies=[_solver_calls, _TerminalSolverEvidence])
 def _terminal_solver_events(
     value: Mapping[str, Any],
     label: str,
     *,
-    solver_policy: _SolverPolicy,
     expected_expiry_indices: tuple[int, ...] | None,
     retained_expiry_indices: tuple[int, ...] | None = None,
 ) -> _TerminalSolverEvidence:
@@ -728,11 +685,7 @@ def _terminal_solver_events(
         )
         if decision_position is None:
             _fail(f"{label} diagnostics expiry {input_index} has no decision event")
-        history = _solver_calls(
-            events[cursor:decision_position],
-            label,
-            solver_policy=solver_policy,
-        )
+        history = _solver_calls(events[cursor:decision_position], label)
         if any(call.input_expiry_index != input_index for call in history):
             _fail(f"{label} diagnostics expiry solve order/count changed")
         decision = events[decision_position]
@@ -818,11 +771,7 @@ def _terminal_solver_events(
             and support_attempt == 1
         ):
             relaxed_support.add(input_index)
-    surface_calls = _solver_calls(
-        events[cursor:],
-        label,
-        solver_policy=solver_policy,
-    )
+    surface_calls = _solver_calls(events[cursor:], label)
     if (
         len(surface_calls) != 1
         or surface_calls[0].stage != "surface"
@@ -2359,7 +2308,6 @@ def validate_fitted_partition(
     initial_solver_evidence = _terminal_solver_events(
         no_arb,
         "no-arbitrage",
-        solver_policy="legacy_two_tier",
         expected_expiry_indices=no_arb_solver_indices,
         retained_expiry_indices=initial_retained_indices,
     )
@@ -2388,7 +2336,6 @@ def validate_fitted_partition(
         smooth_solver_evidence = _terminal_solver_events(
             smooth,
             "smooth",
-            solver_policy="smooth_three_tier",
             expected_expiry_indices=smooth_solver_indices,
             retained_expiry_indices=smooth_retained_indices,
         )

@@ -118,16 +118,13 @@ constraints. Returned masks remain aligned to the original input books and
 `input_index` identifies any retained subset of input expiries.
 
 The default LP backend is HiGHS serial dual simplex (`simplex_strategy=1`),
-with presolve, KKT tolerance `1e-7`, and the configured timeout. The shared
-solver's compatibility default remains simplex then CLARABEL. The production
-smooth-SANOS surface opts into simplex, then HiGHS IPM with crossover enabled,
-then CLARABEL. Each retry uses the identical LP and incumbent values and occurs
-only after `solver_error`, the recognized `invalid_solution`, or `user_limit`;
+with presolve, KKT tolerance `1e-7`, and the configured timeout. The production
+smooth-SANOS surface preserves the compatibility default: simplex then
+CLARABEL. Each retry uses the identical LP and incumbent values and occurs only
+after `solver_error`, the recognized `invalid_solution`, or `user_limit`;
 successful, infeasible, unbounded, and unexpected outcomes are not retried.
-The timeout applies per attempt, so a three-attempt failure may consume three
-configured timeout intervals. HiGHS IPM retains the `1e-7` calendar gate;
-CLARABEL retains its status-dependent reference tolerances. The initial
-no-arbitrage fit does not opt into the IPM tier.
+The timeout applies separately to the two attempts. CLARABEL retains its
+status-dependent reference tolerances.
 
 If every normal smooth-surface attempt fails, CD-035 permits a returned primal
 state to be considered independently of its nonoptimal status. This is not

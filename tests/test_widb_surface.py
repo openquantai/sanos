@@ -788,7 +788,6 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
     evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "test",
-        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(0,),
     )
@@ -808,57 +807,6 @@ def test_surface_fallback_evidence_selects_the_accepted_terminal_call() -> None:
         )
         == 1.0e-6
     )
-
-
-def test_surface_ipm_fallback_is_authenticated_and_keeps_highs_tolerance() -> None:
-    events = [
-        _solver_event(
-            "expiry_soft",
-            "optimal",
-            input_expiry_index=0,
-            expiry_attempt=1,
-        ),
-        _expiry_decision(0, retained=True, support_attempt=1),
-        _solver_event("surface", "invalid_solution"),
-        {
-            **_solver_event("surface", "optimal", fallback=True),
-            "solver": "HIGHS",
-            "algorithm": "ipm",
-        },
-    ]
-    evidence = internal_dataset_module._terminal_solver_events(
-        {"outcome": "completed", "solver_events": events},
-        "test IPM",
-        solver_policy="smooth_three_tier",
-        expected_expiry_indices=(0,),
-        retained_expiry_indices=(0,),
-    )
-    call = evidence.terminal_solver_call
-    assert (call.terminal_solver, call.terminal_algorithm, call.used_fallback) == (
-        "HIGHS",
-        "ipm",
-        True,
-    )
-    assert internal_dataset_module._surface_calendar_acceptance_tolerance(
-        call, "test IPM"
-    ) == 1.0e-7
-
-    skipped = [
-        _solver_event("surface", "invalid_solution"),
-        {
-            **_solver_event("surface", "optimal", fallback=True),
-            "algorithm": "clarabel",
-        },
-    ]
-    with pytest.raises(
-        internal_dataset_module.DatasetValidationError,
-        match="skipped the IPM fallback",
-    ):
-        internal_dataset_module._solver_calls(
-            skipped,
-            "test skipped IPM",
-            solver_policy="smooth_three_tier",
-        )
 
 
 @pytest.mark.parametrize(
@@ -1333,7 +1281,6 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
     evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "test",
-        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(0,),
     )
@@ -1357,7 +1304,6 @@ def test_solver_event_contract_accepts_documented_hard_fit_fallbacks() -> None:
     dropped_evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": dropped},
         "dropped test",
-        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0,),
         retained_expiry_indices=(),
     )
@@ -1530,7 +1476,6 @@ def test_mkarbfree_hard_fit_branches_match_diagnostic_population_contract(
     observed_evidence = internal_dataset_module._terminal_solver_events(
         {"outcome": "completed", "solver_events": events},
         "scripted MkArbFree",
-        solver_policy="legacy_two_tier",
         expected_expiry_indices=(0, 1),
         retained_expiry_indices=retained_indices,
     )
@@ -1602,15 +1547,11 @@ def test_solver_call_parser_rejects_malformed_sequences() -> None:
     ]
     for expected, events in cases:
         with pytest.raises(DatasetValidationError, match=expected):
-            internal_dataset_module._solver_calls(
-                events,
-                "test",
-                solver_policy="legacy_two_tier",
-            )
+            internal_dataset_module._solver_calls(events, "test")
 
 
 @pytest.mark.parametrize("stage", ["expiry_soft", "surface"])
-def test_initial_solver_policy_rejects_ipm_fallback(stage: str) -> None:
+def test_two_tier_solver_rejects_ipm_fallback(stage: str) -> None:
     expiry_fields = (
         {"input_expiry_index": 0, "expiry_attempt": 1}
         if stage == "expiry_soft"
@@ -1625,11 +1566,7 @@ def test_initial_solver_policy_rejects_ipm_fallback(stage: str) -> None:
         },
     ]
     with pytest.raises(DatasetValidationError, match="inconsistent solver identity"):
-        internal_dataset_module._solver_calls(
-            events,
-            "initial no-arbitrage",
-            solver_policy="legacy_two_tier",
-        )
+        internal_dataset_module._solver_calls(events, "initial no-arbitrage")
 
 
 def test_solver_event_contract_rejects_failed_or_misordered_solves() -> None:
@@ -1713,7 +1650,6 @@ def test_solver_event_contract_rejects_failed_or_misordered_solves() -> None:
             internal_dataset_module._terminal_solver_events(
                 diagnostics,
                 "test",
-                solver_policy="legacy_two_tier",
                 expected_expiry_indices=(0,),
                 retained_expiry_indices=(0,),
             )
@@ -1766,7 +1702,6 @@ def test_solver_event_contract_rejects_malformed_decisions() -> None:
             internal_dataset_module._terminal_solver_events(
                 {"outcome": "completed", "solver_events": events},
                 "test",
-                solver_policy="legacy_two_tier",
                 expected_expiry_indices=(0,),
                 retained_expiry_indices=retained,
             )
@@ -2401,6 +2336,7 @@ def test_smooth_fit_preserves_float32_ingress(
 
     def capturing_factory(*args: Any, **kwargs: Any) -> Any:
         fitter = original_factory(*args, **kwargs)
+        assert fitter._solver_fallback_algorithms == ("clarabel",)
 
         def capture(**fit_kwargs: Any) -> Any:
             captured["expiry_dtype"] = fit_kwargs["expiries"].dtype

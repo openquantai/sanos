@@ -185,7 +185,7 @@ def _nullable_float64(name: str, values: np.ndarray[Any, Any]) -> pl.Series:
     return pl.Series(name, values.astype(np.float64, copy=False)).fill_nan(None)
 
 
-@version("1.2", dependencies=[NoArbitrageConfig, MkArbFree])
+@version("1.3", dependencies=[NoArbitrageConfig, MkArbFree])
 def _make_no_arb_fitter(
     config: NoArbitrageConfig,
     *,
@@ -207,9 +207,9 @@ def _make_no_arb_fitter(
         min_strikes_per_expiry=config.min_strikes_per_expiry,
         min_density=config.min_density,
         min_dC_eps=config.min_dc_epsilon,
-        _solver_fallback_algorithms=(
-            ("ipm", "clarabel") if smoothness is not None else ("clarabel",)
-        ),
+        # Preserve the established SANOS numerical path: serial dual simplex
+        # followed directly by CLARABEL if the primary attempt is unusable.
+        _solver_fallback_algorithms=("clarabel",),
         _accept_feasible_nonoptimal=smoothness is not None,
         _solver_diagnostic_sink=diagnostic_sink,
     )

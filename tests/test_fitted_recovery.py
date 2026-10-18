@@ -616,14 +616,14 @@ def test_solver_grammar_authenticates_recovered_and_published_events(
             xguessed_p=[np.array([0.0, 0.1, 0.8, 0.1, 0.0])],
             verbose=Context.quiet,
         )
-    calls = _solver_calls(events, "smooth", solver_policy="smooth_three_tier")
+    calls = _solver_calls(events, "smooth")
     assert calls[-1].terminal_status == "feasible_nonoptimal"
     assert calls[-1].published_state_density_digest == events[-1]["published_state_density_digest"]
 
     shifted = [dict(event) for event in events]
     shifted[-1]["objective"] = float(shifted[-1]["objective"]) + 1.0e-8
     shifted[-1]["published_state_contracted_objective_recomputed"] = shifted[-1]["objective"]
-    shifted_calls = _solver_calls(shifted, "smooth", solver_policy="smooth_three_tier")
+    shifted_calls = _solver_calls(shifted, "smooth")
     assert shifted_calls[-1].terminal_status == "feasible_nonoptimal"
 
     tampered = [dict(event) for event in shifted]
@@ -632,4 +632,4 @@ def test_solver_grammar_authenticates_recovered_and_published_events(
     # persisted state; objective linkage is rejected directly by the grammar.
     tampered[-1]["objective"] = float(tampered[-1]["objective"]) + 1.0
     with pytest.raises(DatasetValidationError, match="objective linkage"):
-        _solver_calls(tampered, "smooth", solver_policy="smooth_three_tier")
+        _solver_calls(tampered, "smooth")
