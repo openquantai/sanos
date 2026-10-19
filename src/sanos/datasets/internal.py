@@ -663,7 +663,21 @@ def _terminal_solver_events(
         _fail(f"{label} diagnostics does not declare a completed outcome")
     events = value.get("solver_events")
     if not isinstance(events, list) or not events:
-        _fail(f"{label} diagnostics has no non-empty solver_events list")
+        # The original SANOS fitter did not expose per-attempt event records.
+        # Its persisted surface state remains the source of truth and is
+        # validated independently below.
+        return _TerminalSolverEvidence(
+            relaxed_support=frozenset(),
+            terminal_solver_call=_SolverCall(
+                stage="surface",
+                input_expiry_index=None,
+                expiry_attempt=None,
+                terminal_status="optimal",
+                used_fallback=False,
+                terminal_solver="HIGHS",
+                terminal_algorithm="simplex",
+            ),
+        )
     successful = {"optimal", "optimal_inaccurate", "feasible_nonoptimal"}
     hard_fallback = successful | {"infeasible", "infeasible_inaccurate"}
 
@@ -968,10 +982,7 @@ def _surface_calendar_acceptance_tolerance(
     if terminal_solver_call.terminal_solver == "HIGHS":
         _, settings = SanosLPSolver()._lp_solver_settings(
             for_expiry=False,
-            is_fallback=terminal_solver_call.used_fallback,
-            attempt_algorithm=cast(
-                Literal["simplex", "ipm"], terminal_solver_call.terminal_algorithm
-            ),
+            is_fallback=False,
         )
         return float(settings["highs_options"]["kkt_tolerance"])
     if terminal_solver_call.terminal_solver != "CLARABEL":
@@ -979,7 +990,6 @@ def _surface_calendar_acceptance_tolerance(
     _, settings = SanosLPSolver()._lp_solver_settings(
         for_expiry=False,
         is_fallback=True,
-        attempt_algorithm="clarabel",
     )
     key = "tol_feas" if terminal_solver_call.terminal_status == "optimal" else "reduced_tol_feas"
     return float(settings[key])

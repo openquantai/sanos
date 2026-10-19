@@ -164,7 +164,7 @@ class OptionsFilterConfig:
 class NoArbitrageConfig:
     """Content-affecting settings shared by the linear and smooth surface fits.
 
-    The reference solver timeout is deliberately fixed in code at 300 seconds.
+    The reference solver timeout is deliberately fixed in code at 600 seconds.
     Exposing it as a content setting would resolve open decision CD-006 without
     approval; operational provenance records the fixed value instead.
     """

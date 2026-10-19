@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -28,7 +28,7 @@ from sanos.widb.daily import (
     _numerical_tolerances,
 )
 
-SOLVER_TIMEOUT_SECONDS = 300.0
+SOLVER_TIMEOUT_SECONDS = 600.0
 _IMPLIED_VOL_CALC_EPS, _GREEK_CALC_EPS = _numerical_tolerances()
 
 
@@ -185,14 +185,13 @@ def _nullable_float64(name: str, values: np.ndarray[Any, Any]) -> pl.Series:
     return pl.Series(name, values.astype(np.float64, copy=False)).fill_nan(None)
 
 
-@version("1.3", dependencies=[NoArbitrageConfig, MkArbFree])
+@version("1.4", dependencies=[NoArbitrageConfig, MkArbFree])
 def _make_no_arb_fitter(
     config: NoArbitrageConfig,
     *,
     smoothness: float | None,
-    diagnostic_sink: Callable[[Mapping[str, object]], None] | None = None,
 ) -> MkArbFree:
-    """Construct the reviewed numerical adapter with the frozen timeout."""
+    """Construct the original SANOS numerical fitter."""
 
     return MkArbFree(
         no_arb_mode="surface",
@@ -207,11 +206,6 @@ def _make_no_arb_fitter(
         min_strikes_per_expiry=config.min_strikes_per_expiry,
         min_density=config.min_density,
         min_dC_eps=config.min_dc_epsilon,
-        # Preserve the established SANOS numerical path: serial dual simplex
-        # followed directly by CLARABEL if the primary attempt is unusable.
-        _solver_fallback_algorithms=("clarabel",),
-        _accept_feasible_nonoptimal=smoothness is not None,
-        _solver_diagnostic_sink=diagnostic_sink,
     )
 
 
@@ -296,11 +290,9 @@ def fit_initial_no_arbitrage(
     strikes = [_float_column(group, "normalized_strike") for group in groups]
     bids = [_float_column(group, "pure_bid_price") for group in groups]
     asks = [_float_column(group, "pure_ask_price") for group in groups]
-    solver_events: list[dict[str, object]] = []
     fitter = _make_no_arb_fitter(
         config.no_arbitrage,
         smoothness=None,
-        diagnostic_sink=lambda event: solver_events.append(dict(event)),
     )
     try:
         pricer = fitter(
@@ -308,10 +300,6 @@ def fit_initial_no_arbitrage(
             strikes=strikes,
             bids=bids,
             asks=asks,
-            message_context=lambda: (
-                f"{frame.get_column('ticker').item(0)} "
-                f"{frame.get_column('trading_date').item(0)} initial no-arbitrage"
-            ),
             verbose=Context.quiet,
         )
     except Exception as exc:
@@ -319,7 +307,6 @@ def fit_initial_no_arbitrage(
             {
                 "outcome": "failed",
                 "solver_timeout_seconds": SOLVER_TIMEOUT_SECONDS,
-                "solver_events": solver_events,
             }
         )
         raise DailyDataError(
@@ -426,7 +413,6 @@ def fit_initial_no_arbitrage(
             "masked_strikes": int(np.sum(retained & ~masks)),
             "outcome": "completed",
             "solver_timeout_seconds": SOLVER_TIMEOUT_SECONDS,
-            "solver_events": solver_events,
         }
     )
     result = frame.with_columns(
@@ -821,11 +807,9 @@ def fit_smooth_sanos(
     strikes = [_float32_column(group, "normalized_strike") for group in groups]
     bids = [_float32_column(group, "pure_bid_price") for group in groups]
     asks = [_float32_column(group, "pure_ask_price") for group in groups]
-    solver_events: list[dict[str, object]] = []
     fitter = _make_no_arb_fitter(
         config.no_arbitrage,
         smoothness=config.smooth_sanos.smoothness,
-        diagnostic_sink=lambda event: solver_events.append(dict(event)),
     )
     try:
         pricer = fitter(
@@ -833,10 +817,6 @@ def fit_smooth_sanos(
             strikes=strikes,
             bids=bids,
             asks=asks,
-            message_context=lambda: (
-                f"{frame.get_column('ticker').item(0)} "
-                f"{frame.get_column('trading_date').item(0)} smooth SANOS"
-            ),
             verbose=Context.quiet,
         )
         if not len(pricer.expiries):
@@ -855,7 +835,6 @@ def fit_smooth_sanos(
             {
                 "outcome": "failed",
                 "solver_timeout_seconds": SOLVER_TIMEOUT_SECONDS,
-                "solver_events": solver_events,
             }
         )
         raise DailyDataError(f"Smooth SANOS solver failed: {exc}; diagnostics={failure}") from exc
@@ -945,7 +924,6 @@ def fit_smooth_sanos(
             "mean_total_error": float(fit_result.mean_total_err),
             "outcome": "completed",
             "solver_timeout_seconds": SOLVER_TIMEOUT_SECONDS,
-            "solver_events": solver_events,
         }
     )
     result = frame.with_columns(

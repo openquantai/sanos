@@ -10,7 +10,7 @@ build==1.6.1
 cdxcore==0.1.96
 clarabel==0.11.1
 click==8.5.0
-cvxpy==1.9.3
+cvxpy==1.9.0
 filelock==3.32.7
 h5py==3.16.0
 highspy==1.15.1

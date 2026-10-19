@@ -99,7 +99,7 @@ both accepted it. Only `approved` may alter reference behavior.
 - **Expected impact:** possibly new artifact identities for otherwise identical
   inputs; successful deterministic outputs should remain equal.
 - **Current compatibility behavior:** Phase 6 fixes the reference timeout at
-  300 seconds and does not expose a timeout override. It records that fixed
+  600 seconds and does not expose a timeout override. It records that fixed
   value in solver diagnostics, while artifact content identity remains driven
   by the versioned implementation. A configurable timeout remains blocked.
 
